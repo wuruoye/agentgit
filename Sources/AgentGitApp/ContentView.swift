@@ -135,11 +135,28 @@ private struct WorktreeRow: View {
                             .padding(.vertical, 1)
                             .background(.orange.opacity(0.16), in: Capsule())
                     }
+
+                    Spacer(minLength: 4)
+
+                    if !snapshot.diffStat.isEmpty {
+                        HStack(spacing: 4) {
+                            Text("+\(snapshot.diffStat.addedLineCount)")
+                                .foregroundStyle(.green)
+                            Text("−\(snapshot.diffStat.deletedLineCount)")
+                                .foregroundStyle(.red)
+                        }
+                        .font(.caption2.monospacedDigit().weight(.medium))
+                    }
                 }
 
                 HStack(spacing: 5) {
                     Text(snapshot.worktree.rootURL.lastPathComponent)
                         .lineLimit(1)
+                    if let shortHeadOID = snapshot.worktree.shortHeadOID {
+                        Text("·")
+                        Text(shortHeadOID)
+                            .font(.caption.monospaced())
+                    }
                     Text("·")
                     if snapshot.lastActivityAt == .distantPast {
                         Text("Unknown activity")

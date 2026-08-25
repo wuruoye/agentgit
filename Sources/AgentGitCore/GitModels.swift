@@ -47,6 +47,21 @@ public struct GitWorktree: Identifiable, Hashable, Sendable {
         rootURL.path
     }
 
+    /// worktree list 对 unborn branch 输出全零 OID；此时 HEAD 不可作为 diff 基准。
+    public var isUnborn: Bool {
+        guard let headOID else {
+            return true
+        }
+        return headOID.allSatisfy { $0 == "0" }
+    }
+
+    public var shortHeadOID: String? {
+        guard let headOID, !isUnborn else {
+            return nil
+        }
+        return String(headOID.prefix(7))
+    }
+
     public var branchName: String? {
         guard let branchRef else {
             return nil

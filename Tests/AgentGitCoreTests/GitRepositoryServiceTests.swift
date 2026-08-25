@@ -132,6 +132,65 @@ final class GitRepositoryServiceTests: XCTestCase {
         )
     }
 
+    func testReportsDiffStatRelativeToHead() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-diffstat-test-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        defer {
+            try? FileManager.default.removeItem(at: container)
+        }
+        try await makeRepository(
+            at: repository,
+            initialContents: "one\ntwo\nthree\n"
+        )
+
+        try Data("one\nthree\nfour\nfive\n".utf8).write(
+            to: repository.appendingPathComponent("README.md")
+        )
+        try Data("untracked\n".utf8).write(
+            to: repository.appendingPathComponent("new.txt")
+        )
+
+        let snapshot = try await GitRepositoryService().loadProject(at: repository)
+        let worktree = try XCTUnwrap(snapshot.worktrees.first)
+
+        XCTAssertEqual(worktree.diffStat.addedLineCount, 2)
+        XCTAssertEqual(worktree.diffStat.deletedLineCount, 1)
+        XCTAssertNotNil(worktree.worktree.shortHeadOID)
+    }
+
+    func testUnbornRepositoryReportsStagedAndWorkingDiffStat() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-unborn-test-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        defer {
+            try? FileManager.default.removeItem(at: container)
+        }
+        try FileManager.default.createDirectory(
+            at: repository,
+            withIntermediateDirectories: true
+        )
+        let runner = GitCommandRunner()
+        _ = try await runner.run(arguments: ["init", "-b", "main"], workingDirectory: repository)
+
+        try Data("one\ntwo\n".utf8).write(
+            to: repository.appendingPathComponent("staged.txt")
+        )
+        _ = try await runner.run(arguments: ["add", "staged.txt"], workingDirectory: repository)
+        try Data("one\ntwo\nthree\n".utf8).write(
+            to: repository.appendingPathComponent("staged.txt")
+        )
+
+        let snapshot = try await GitRepositoryService().loadProject(at: repository)
+        let worktree = try XCTUnwrap(snapshot.worktrees.first)
+
+        XCTAssertNil(worktree.errorMessage)
+        XCTAssertTrue(worktree.worktree.isUnborn)
+        XCTAssertNil(worktree.worktree.shortHeadOID)
+        XCTAssertEqual(worktree.diffStat.addedLineCount, 3)
+        XCTAssertEqual(worktree.diffStat.deletedLineCount, 0)
+    }
+
     func testExcludesBareRepositoryEntryFromWorktrees() async throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-bare-test-\(UUID().uuidString)")

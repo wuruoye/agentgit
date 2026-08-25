@@ -3,17 +3,20 @@ import Foundation
 public struct GitWorktreeSnapshot: Identifiable, Hashable, Sendable {
     public let worktree: GitWorktree
     public let status: GitStatusSnapshot
+    public let diffStat: GitDiffStat
     public let lastActivityAt: Date
     public let errorMessage: String?
 
     public init(
         worktree: GitWorktree,
         status: GitStatusSnapshot,
+        diffStat: GitDiffStat,
         lastActivityAt: Date,
         errorMessage: String?
     ) {
         self.worktree = worktree
         self.status = status
+        self.diffStat = diffStat
         self.lastActivityAt = lastActivityAt
         self.errorMessage = errorMessage
     }
@@ -143,6 +146,7 @@ public struct GitRepositoryService: Sendable {
             return GitWorktreeSnapshot(
                 worktree: worktree,
                 status: status,
+                diffStat: try await diffStat(for: worktree),
                 lastActivityAt: await activityDate(for: worktree, status: status),
                 errorMessage: nil
             )
@@ -150,10 +154,33 @@ public struct GitRepositoryService: Sendable {
             return GitWorktreeSnapshot(
                 worktree: worktree,
                 status: .clean,
+                diffStat: .zero,
                 lastActivityAt: .distantPast,
                 errorMessage: String(describing: error)
             )
         }
+    }
+
+    /// 相对 HEAD 的改动规模；unborn HEAD 无 diff 基准，改为 staged + working 两段求和。
+    private func diffStat(for worktree: GitWorktree) async throws -> GitDiffStat {
+        let baseArguments = ["--no-optional-locks", "diff", "--no-ext-diff", "--numstat"]
+        guard worktree.isUnborn else {
+            let data = try await runner.run(
+                arguments: baseArguments + ["HEAD"],
+                workingDirectory: worktree.rootURL
+            )
+            return try GitNumstatParser.parse(data)
+        }
+
+        let stagedData = try await runner.run(
+            arguments: baseArguments + ["--cached"],
+            workingDirectory: worktree.rootURL
+        )
+        let workingData = try await runner.run(
+            arguments: baseArguments,
+            workingDirectory: worktree.rootURL
+        )
+        return try GitNumstatParser.parse(stagedData) + GitNumstatParser.parse(workingData)
     }
 
     private func activityDate(for worktree: GitWorktree, status: GitStatusSnapshot) async -> Date {
