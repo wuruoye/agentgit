@@ -15,6 +15,8 @@ struct WorktreeHistoryView: View {
     @State private var historyError: String?
     @State private var detailError: String?
     @State private var isLoadingHistory = false
+    @State private var commitFilterText = ""
+    @State private var fileFilterText = ""
     @AppStorage("agentgit.history-commit-list-height") private var commitListHeight: Double = 300
 
     var body: some View {
@@ -41,6 +43,16 @@ struct WorktreeHistoryView: View {
         .task(id: commitDiffKey) {
             await loadCommitDiff()
         }
+        .onChange(of: commitFilterText) {
+            if !visibleCommits.contains(where: { $0.id == selectedCommitID }) {
+                selectedCommitID = visibleCommits.first?.id
+            }
+        }
+        .onChange(of: fileFilterText) {
+            if !visibleChanges.contains(where: { $0.id == selectedChangeID }) {
+                selectedChangeID = visibleChanges.first?.id
+            }
+        }
     }
 
     @ViewBuilder
@@ -60,7 +72,7 @@ struct WorktreeHistoryView: View {
                 Label("No Commits Yet", systemImage: "clock")
             }
         } else {
-            List(commits, selection: $selectedCommitID) { commit in
+            List(visibleCommits, selection: $selectedCommitID) { commit in
                 CommitRow(commit: commit)
                     .tag(commit.id)
                     .contextMenu {
@@ -73,6 +85,12 @@ struct WorktreeHistoryView: View {
                     }
             }
             .listStyle(.inset)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                FileFilterField(text: $commitFilterText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.bar)
+            }
         }
     }
 
@@ -84,12 +102,17 @@ struct WorktreeHistoryView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(changes.count)")
+                Text("\(visibleChanges.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            FileFilterField(text: $fileFilterText)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
 
             Divider()
 
@@ -97,12 +120,15 @@ struct WorktreeHistoryView: View {
                 ContentUnavailableView {
                     Label("Select a Commit", systemImage: "clock.arrow.circlepath")
                 }
-            } else if changes.isEmpty {
+            } else if visibleChanges.isEmpty {
                 ContentUnavailableView {
-                    Label("No File Changes", systemImage: "checkmark.circle")
+                    Label(
+                        fileFilterText.isEmpty ? "No File Changes" : "No Matching Files",
+                        systemImage: fileFilterText.isEmpty ? "checkmark.circle" : "magnifyingglass"
+                    )
                 }
             } else {
-                List(changes, selection: $selectedChangeID) { change in
+                List(visibleChanges, selection: $selectedChangeID) { change in
                     ChangedFileRow(change: change, scope: .staged)
                         .tag(change.id)
                         .contextMenu {
@@ -137,6 +163,26 @@ struct WorktreeHistoryView: View {
         }
     }
 
+    private var visibleCommits: [GitCommit] {
+        guard !commitFilterText.isEmpty else {
+            return commits
+        }
+        return commits.filter { commit in
+            commit.subject.localizedCaseInsensitiveContains(commitFilterText)
+                || commit.authorName.localizedCaseInsensitiveContains(commitFilterText)
+                || commit.oid.hasPrefix(commitFilterText)
+        }
+    }
+
+    private var visibleChanges: [GitFileChange] {
+        guard !fileFilterText.isEmpty else {
+            return changes
+        }
+        return changes.filter {
+            $0.path.localizedCaseInsensitiveContains(fileFilterText)
+        }
+    }
+
     private var selectedCommit: GitCommit? {
         commits.first { $0.id == selectedCommitID }
     }
@@ -156,7 +202,7 @@ struct WorktreeHistoryView: View {
             let loaded = try await model.loadHistory(worktree: snapshot.worktree)
             try Task.checkCancellation()
             commits = loaded
-            selectedCommitID = loaded.first?.id
+            selectedCommitID = visibleCommits.first?.id
         } catch is CancellationError {
             return
         } catch {
@@ -184,7 +230,7 @@ struct WorktreeHistoryView: View {
             changes = loaded.sorted {
                 $0.path.localizedStandardCompare($1.path) == .orderedAscending
             }
-            selectedChangeID = changes.first?.id
+            selectedChangeID = visibleChanges.first?.id
         } catch is CancellationError {
             return
         } catch {

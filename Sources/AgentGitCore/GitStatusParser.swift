@@ -51,11 +51,29 @@ public struct GitFileChange: Identifiable, Hashable, Sendable {
     }
 }
 
+public struct GitBranchStatus: Hashable, Sendable {
+    public let upstreamRef: String?
+    public let aheadCount: Int
+    public let behindCount: Int
+
+    public init(upstreamRef: String?, aheadCount: Int, behindCount: Int) {
+        self.upstreamRef = upstreamRef
+        self.aheadCount = aheadCount
+        self.behindCount = behindCount
+    }
+
+    public var isSynced: Bool {
+        aheadCount == 0 && behindCount == 0
+    }
+}
+
 public struct GitStatusSnapshot: Hashable, Sendable {
     public let changes: [GitFileChange]
+    public let branch: GitBranchStatus?
 
-    public init(changes: [GitFileChange]) {
+    public init(changes: [GitFileChange], branch: GitBranchStatus? = nil) {
         self.changes = changes
+        self.branch = branch
     }
 
     public static let clean = GitStatusSnapshot(changes: [])
@@ -87,6 +105,9 @@ public enum GitStatusParser {
     public static func parsePorcelainV2(_ data: Data) throws -> GitStatusSnapshot {
         let rawRecords = data.split(separator: 0, omittingEmptySubsequences: true)
         var changes: [GitFileChange] = []
+        var upstreamRef: String?
+        var aheadCount = 0
+        var behindCount = 0
         var index = 0
 
         while index < rawRecords.count {
@@ -181,7 +202,23 @@ public enum GitStatusParser {
                     )
                 )
 
-            case "#", "!":
+            case "#":
+                if let ref = record.dropPrefix("# branch.upstream ") {
+                    upstreamRef = String(ref)
+                } else if let counts = record.dropPrefix("# branch.ab ") {
+                    let fields = counts.split(separator: " ")
+                    guard
+                        fields.count == 2,
+                        let ahead = Int(fields[0].dropFirst()),
+                        let behind = Int(fields[1].dropFirst())
+                    else {
+                        throw GitStatusParseError.malformedRecord(record)
+                    }
+                    aheadCount = ahead
+                    behindCount = behind
+                }
+
+            case "!":
                 continue
 
             default:
@@ -189,7 +226,16 @@ public enum GitStatusParser {
             }
         }
 
-        return GitStatusSnapshot(changes: changes)
+        return GitStatusSnapshot(
+            changes: changes,
+            branch: upstreamRef.map {
+                GitBranchStatus(
+                    upstreamRef: $0,
+                    aheadCount: aheadCount,
+                    behindCount: behindCount
+                )
+            }
+        )
     }
 
     private static func makeChange(
@@ -210,5 +256,11 @@ public enum GitStatusParser {
             worktreeStatus: status[status.index(after: status.startIndex)],
             kind: kind
         )
+    }
+}
+
+private extension String {
+    func dropPrefix(_ prefix: String) -> Substring? {
+        hasPrefix(prefix) ? dropFirst(prefix.count) : nil
     }
 }

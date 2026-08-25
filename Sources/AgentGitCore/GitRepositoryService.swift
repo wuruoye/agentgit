@@ -209,6 +209,7 @@ public struct GitRepositoryService: Sendable {
                     "status",
                     "--porcelain=v2",
                     "-z",
+                    "--branch",
                     "--untracked-files=all"
                 ],
                 workingDirectory: worktree.rootURL

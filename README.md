@@ -48,7 +48,7 @@ M1 完成以下链路：
 
 1. 用户添加若干本地 Git 项目；
 2. App 执行 `git worktree list --porcelain -z` 自动发现全部 worktree；
-3. 每个 worktree 显示 branch、HEAD、dirty 文件数和增删行数；
+3. 每个 worktree 显示 branch、HEAD、dirty 文件数、增删行数和上游 ahead/behind；
 4. worktree 按最近有效活动时间降序排列；
 5. 选择 worktree 后展示 changed-file 导航、unified diff 和提交历史；
 6. 项目列表在下次启动时恢复；
@@ -99,7 +99,7 @@ hash、ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按
 
 ```text
 git worktree list --porcelain -z
-git status --porcelain=v2 -z
+git status --porcelain=v2 -z --branch
 git diff --no-ext-diff --no-color
 git diff --cached --no-ext-diff --no-color
 git log -z --format=<unit-separated>

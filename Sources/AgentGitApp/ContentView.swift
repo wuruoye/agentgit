@@ -188,6 +188,21 @@ private struct WorktreeRow: View {
                 }
 
                 HStack(spacing: 5) {
+                    if let branch = snapshot.status.branch, !branch.isSynced {
+                        HStack(spacing: 3) {
+                            if branch.aheadCount > 0 {
+                                Text("↑\(branch.aheadCount)")
+                            }
+                            if branch.behindCount > 0 {
+                                Text("↓\(branch.behindCount)")
+                            }
+                        }
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.blue)
+                        .help(branch.upstreamRef.map { "Upstream: \($0)" } ?? "")
+                        Text("·")
+                    }
+
                     Text(snapshot.worktree.rootURL.lastPathComponent)
                         .lineLimit(1)
                     if let shortHeadOID = snapshot.worktree.shortHeadOID {

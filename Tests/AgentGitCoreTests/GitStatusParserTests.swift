@@ -47,4 +47,37 @@ final class GitStatusParserTests: XCTestCase {
         XCTAssertEqual(status.stagedFileCount, 0)
         XCTAssertEqual(status.unstagedFileCount, 1)
     }
+
+    func testParsesUpstreamAheadBehind() throws {
+        let records = [
+            "# branch.oid 99b88fa522fffec22a8420dec1e74f65c4d9d152",
+            "# branch.head feature",
+            "# branch.upstream origin/feature",
+            "# branch.ab +3 -2",
+            "1 M. N... 100644 100644 100644 aaaa bbbb README.md"
+        ]
+        let data = Data(records.joined(separator: "\0").utf8)
+
+        let snapshot = try GitStatusParser.parsePorcelainV2(data)
+
+        XCTAssertEqual(snapshot.branch?.upstreamRef, "origin/feature")
+        XCTAssertEqual(snapshot.branch?.aheadCount, 3)
+        XCTAssertEqual(snapshot.branch?.behindCount, 2)
+        XCTAssertFalse(snapshot.branch?.isSynced == true)
+        XCTAssertEqual(snapshot.changedFileCount, 1)
+    }
+
+    func testBranchIsNilWithoutUpstream() throws {
+        let records = [
+            "# branch.oid 7b83776f8fab0f908a220bb0edf3cf4f1051f859",
+            "# branch.head main",
+            "? probe.txt"
+        ]
+        let data = Data(records.joined(separator: "\0").utf8)
+
+        let snapshot = try GitStatusParser.parsePorcelainV2(data)
+
+        XCTAssertNil(snapshot.branch)
+        XCTAssertEqual(snapshot.untrackedFileCount, 1)
+    }
 }

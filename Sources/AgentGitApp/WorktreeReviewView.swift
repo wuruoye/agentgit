@@ -11,6 +11,7 @@ struct WorktreeReviewView: View {
     @State private var diff: GitFileDiff?
     @State private var errorMessage: String?
     @State private var isLoading = false
+    @State private var filterText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,6 +42,11 @@ struct WorktreeReviewView: View {
         }
         .onChange(of: tab) {
             resetSelection()
+        }
+        .onChange(of: filterText) {
+            if !visibleChanges.contains(where: { $0.id == selectedChangeID }) {
+                selectedChangeID = visibleChanges.first?.id
+            }
         }
         .task(id: loadKey) {
             await loadSelectedDiff()
@@ -96,13 +102,21 @@ struct WorktreeReviewView: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            FileFilterField(text: $filterText)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
 
             Divider()
 
             if visibleChanges.isEmpty {
                 ContentUnavailableView {
-                    Label("No \(tab.title) Changes", systemImage: "checkmark.circle")
+                    Label(
+                        filterText.isEmpty ? "No \(tab.title) Changes" : "No Matching Files",
+                        systemImage: filterText.isEmpty ? "checkmark.circle" : "magnifyingglass"
+                    )
                 }
             } else {
                 List(visibleChanges, selection: $selectedChangeID) { change in
@@ -165,6 +179,10 @@ struct WorktreeReviewView: View {
                 case .staged:
                     change.isStaged
                 }
+            }
+            .filter { change in
+                filterText.isEmpty
+                    || change.path.localizedCaseInsensitiveContains(filterText)
             }
             .sorted {
                 $0.path.localizedStandardCompare($1.path) == .orderedAscending
@@ -407,5 +425,35 @@ struct LineNumber: View {
             .padding(.trailing, 8)
             .frame(maxHeight: .infinity)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.72))
+    }
+}
+
+struct FileFilterField: View {
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            TextField("Filter files", text: $text)
+                .textFieldStyle(.plain)
+                .font(.caption)
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
     }
 }
