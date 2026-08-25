@@ -24,6 +24,9 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 mkdir -p "${CONTENTS_DIR}/MacOS"
 install -m 755 "${BIN_DIR}/AgentGitApp" "${CONTENTS_DIR}/MacOS/AgentGitApp"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
-/usr/bin/codesign --force --sign - "${APP_DIR}"
+# ad-hoc 签名没有稳定身份，每次重建都会让 TCC 重新弹“文稿”授权并挂起 git 子进程；
+# 用固定开发证书签名让授权跨构建保留。
+SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:-Apple Development: Example (TEAMID)}"
+/usr/bin/codesign --force --sign "${SIGNING_IDENTITY}" "${APP_DIR}"
 
 echo "${APP_DIR}"
