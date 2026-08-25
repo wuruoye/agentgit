@@ -6,7 +6,7 @@ struct WorktreeReviewView: View {
 
     let snapshot: GitWorktreeSnapshot
 
-    @State private var scope: GitDiffScope = .working
+    @State private var tab: ReviewTab = .working
     @State private var selectedChangeID: GitFileChange.ID?
     @State private var diff: GitFileDiff?
     @State private var errorMessage: String?
@@ -25,6 +25,8 @@ struct WorktreeReviewView: View {
                         .textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if tab == .history {
+                WorktreeHistoryView(snapshot: snapshot)
             } else {
                 HSplitView {
                     fileNavigator
@@ -37,7 +39,7 @@ struct WorktreeReviewView: View {
         .onChange(of: snapshot.id, initial: true) {
             resetSelection()
         }
-        .onChange(of: scope) {
+        .onChange(of: tab) {
             resetSelection()
         }
         .task(id: loadKey) {
@@ -59,7 +61,7 @@ struct WorktreeReviewView: View {
 
             Spacer()
 
-            if let diff {
+            if let diff, tab != .history {
                 HStack(spacing: 7) {
                     Text("+\(diff.addedLineCount)")
                         .foregroundStyle(.green)
@@ -69,14 +71,14 @@ struct WorktreeReviewView: View {
                 .font(.caption.monospacedDigit().weight(.medium))
             }
 
-            Picker("Diff Scope", selection: $scope) {
-                ForEach(GitDiffScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
+            Picker("Review Tab", selection: $tab) {
+                ForEach(ReviewTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 180)
+            .frame(width: 250)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
@@ -100,12 +102,23 @@ struct WorktreeReviewView: View {
 
             if visibleChanges.isEmpty {
                 ContentUnavailableView {
-                    Label("No \(scope.title) Changes", systemImage: "checkmark.circle")
+                    Label("No \(tab.title) Changes", systemImage: "checkmark.circle")
                 }
             } else {
                 List(visibleChanges, selection: $selectedChangeID) { change in
                     ChangedFileRow(change: change, scope: scope)
                         .tag(change.id)
+                        .contextMenu {
+                            Button("Reveal in Finder") {
+                                revealInFinder(
+                                    snapshot.worktree.rootURL
+                                        .appendingPathComponent(change.path)
+                                )
+                            }
+                            Button("Copy Path") {
+                                copyToPasteboard(change.path)
+                            }
+                        }
                 }
                 .listStyle(.sidebar)
             }
@@ -131,13 +144,20 @@ struct WorktreeReviewView: View {
             ContentUnavailableView {
                 Label("Select a File", systemImage: "doc.text.magnifyingglass")
             } description: {
-                Text("Choose a changed file to review its \(scope.title.lowercased()) diff.")
+                Text("Choose a changed file to review its \(tab.title.lowercased()) diff.")
             }
         }
     }
 
+    private var scope: GitDiffScope {
+        tab == .staged ? .staged : .working
+    }
+
     private var visibleChanges: [GitFileChange] {
-        snapshot.status.changes
+        guard tab != .history else {
+            return []
+        }
+        return snapshot.status.changes
             .filter { change in
                 switch scope {
                 case .working:
@@ -159,7 +179,7 @@ struct WorktreeReviewView: View {
         DiffLoadKey(
             worktreeID: snapshot.id,
             activityDate: snapshot.lastActivityAt,
-            scope: scope,
+            tab: tab,
             changeID: selectedChangeID
         )
     }
@@ -201,11 +221,29 @@ struct WorktreeReviewView: View {
 private struct DiffLoadKey: Hashable {
     let worktreeID: GitWorktreeSnapshot.ID
     let activityDate: Date
-    let scope: GitDiffScope
+    let tab: ReviewTab
     let changeID: GitFileChange.ID?
 }
 
-private struct ChangedFileRow: View {
+enum ReviewTab: String, CaseIterable, Identifiable {
+    case working
+    case staged
+    case history
+
+    var id: Self {
+        self
+    }
+
+    var title: String {
+        switch self {
+        case .working: "Working"
+        case .staged: "Staged"
+        case .history: "History"
+        }
+    }
+}
+
+struct ChangedFileRow: View {
     let change: GitFileChange
     let scope: GitDiffScope
 
@@ -250,7 +288,7 @@ private struct ChangedFileRow: View {
     }
 }
 
-private struct UnifiedDiffView: View {
+struct UnifiedDiffView: View {
     let diff: GitFileDiff
 
     var body: some View {
@@ -295,7 +333,7 @@ private struct UnifiedDiffView: View {
     }
 }
 
-private struct HunkHeaderRow: View {
+struct HunkHeaderRow: View {
     let header: String
 
     var body: some View {
@@ -309,7 +347,7 @@ private struct HunkHeaderRow: View {
     }
 }
 
-private struct DiffLineRow: View {
+struct DiffLineRow: View {
     let line: GitDiffLine
 
     var body: some View {
@@ -358,7 +396,7 @@ private struct DiffLineRow: View {
     }
 }
 
-private struct LineNumber: View {
+struct LineNumber: View {
     let value: Int?
 
     var body: some View {

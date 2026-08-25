@@ -1,4 +1,5 @@
 import AgentGitCore
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -20,6 +21,12 @@ struct ContentView: View {
                                         await model.refreshProject(id: projectState.id)
                                     }
                                 }
+                                Button("Reveal in Finder") {
+                                    revealInFinder(projectState.project.rootURL)
+                                }
+                                Button("Copy Path") {
+                                    copyToPasteboard(projectState.project.rootURL.path)
+                                }
                                 Divider()
                                 Button("Remove Project", role: .destructive) {
                                     model.removeProject(id: projectState.id)
@@ -39,10 +46,14 @@ struct ContentView: View {
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("Refresh All Projects (⌘R)")
 
                     Button(action: model.chooseProject) {
                         Label("Add Project", systemImage: "plus")
                     }
+                    .keyboardShortcut("o", modifiers: .command)
+                    .help("Add Project (⌘O)")
                 }
             }
         } detail: {
@@ -63,6 +74,15 @@ struct ContentView: View {
         }
         .task {
             await model.loadProjectsIfNeeded()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            Task {
+                await model.refreshAllIfStale()
+            }
         }
     }
 
@@ -88,6 +108,24 @@ struct ContentView: View {
             ForEach(snapshot.worktrees) { worktree in
                 WorktreeRow(snapshot: worktree)
                     .tag(worktree.id)
+                    .contextMenu {
+                        Button("Reveal in Finder") {
+                            revealInFinder(worktree.worktree.rootURL)
+                        }
+                        Button("Open in Terminal") {
+                            openInTerminal(worktree.worktree.rootURL)
+                        }
+                        Divider()
+                        Button("Copy Path") {
+                            copyToPasteboard(worktree.worktree.rootURL.path)
+                        }
+                        if let headOID = worktree.worktree.headOID,
+                           !worktree.worktree.isUnborn {
+                            Button("Copy HEAD SHA") {
+                                copyToPasteboard(headOID)
+                            }
+                        }
+                    }
             }
         }
     }

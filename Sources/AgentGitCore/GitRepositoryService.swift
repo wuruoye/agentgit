@@ -43,6 +43,9 @@ public struct GitProjectSnapshot: Identifiable, Hashable, Sendable {
 }
 
 public struct GitRepositoryService: Sendable {
+    /// oid, short oid, author, author date, parents, refs, subject —— 与 GitLogParser 对应。
+    private static let historyFormat = "%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%D%x1f%s"
+
     private let runner: GitCommandRunner
 
     public init(runner: GitCommandRunner = GitCommandRunner()) {
@@ -128,6 +131,74 @@ public struct GitRepositoryService: Sendable {
         }
         let data = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
         return try UnifiedDiffParser.parse(data, change: change, scope: scope)
+    }
+
+    public func loadHistory(
+        worktree: GitWorktree,
+        limit: Int = 200
+    ) async throws -> [GitCommit] {
+        guard !worktree.isUnborn else {
+            return []
+        }
+
+        let data = try await runner.run(
+            arguments: [
+                "--no-optional-locks",
+                "log",
+                "-z",
+                "--format=\(Self.historyFormat)",
+                "--max-count=\(limit)"
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return try GitLogParser.parse(data)
+    }
+
+    public func loadCommitChanges(
+        worktree: GitWorktree,
+        commit: GitCommit
+    ) async throws -> [GitFileChange] {
+        let data = try await runner.run(
+            arguments: [
+                "-c", "core.quotePath=false",
+                "--no-optional-locks",
+                "show",
+                "--format=",
+                "--name-status",
+                "-z",
+                "--find-renames",
+                "--diff-merges=first-parent",
+                commit.oid
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return try GitNameStatusParser.parse(data)
+    }
+
+    public func loadCommitDiff(
+        worktree: GitWorktree,
+        commit: GitCommit,
+        change: GitFileChange
+    ) async throws -> GitFileDiff {
+        var arguments = [
+            "-c", "core.quotePath=false",
+            "--no-optional-locks",
+            "show",
+            "--format=",
+            "--no-ext-diff",
+            "--no-color",
+            "--unified=3",
+            "--find-renames",
+            "--diff-merges=first-parent",
+            commit.oid,
+            "--",
+            change.path
+        ]
+        if let originalPath = change.originalPath {
+            arguments.append(originalPath)
+        }
+        let data = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
+        return try UnifiedDiffParser.parse(data, change: change, scope: .staged)
     }
 
     private func loadWorktree(_ worktree: GitWorktree) async -> GitWorktreeSnapshot {

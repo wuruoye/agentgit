@@ -50,7 +50,7 @@ M1 完成以下链路：
 2. App 执行 `git worktree list --porcelain -z` 自动发现全部 worktree；
 3. 每个 worktree 显示 branch、HEAD、dirty 文件数和增删行数；
 4. worktree 按最近有效活动时间降序排列；
-5. 选择 worktree 后展示 changed-file 导航和 unified diff；
+5. 选择 worktree 后展示 changed-file 导航、unified diff 和提交历史；
 6. 项目列表在下次启动时恢复；
 7. Git 命令失败时在对应项目或 worktree 上显示明确错误，不让整个窗口失效。
 
@@ -82,7 +82,9 @@ last_activity_at = max(
 - **Branch**：merge-base(base, `HEAD`) 到当前 worktree 的完整变化，包含已提交与
   未提交内容。
 
-M1 先实现 Working + Staged unified diff。后续补充：
+M1 实现 Working + Staged unified diff，以及 History：提交列表（作者、日期、短
+hash、ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按 first-parent
+展开。后续补充：
 
 - split / unified 切换；
 - 单文件 focus mode；
@@ -100,8 +102,11 @@ git worktree list --porcelain -z
 git status --porcelain=v2 -z
 git diff --no-ext-diff --no-color
 git diff --cached --no-ext-diff --no-color
-git log --date=iso-strict --format=...
+git log -z --format=<unit-separated>
+git show --format= --name-status -z --diff-merges=first-parent
 ```
+
+Git 能力保持只读：不提供 commit、stage、discard、push 或 worktree 创建删除。
 
 暂不引入 libgit2。系统 Git 对 worktree、attributes、diff driver、LFS 和用户已有
 配置的兼容性更接近真实命令行行为；性能问题先通过并发调度、缓存和增量刷新

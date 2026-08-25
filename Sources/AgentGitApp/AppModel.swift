@@ -21,6 +21,7 @@ final class AppModel {
     private let defaults: UserDefaults
     private let repositoryService: GitRepositoryService
     private var hasLoadedProjects = false
+    private var lastRefreshedAt: Date?
 
     private(set) var projects: [ProjectState]
     var selectedWorktreeID: GitWorktreeSnapshot.ID?
@@ -74,7 +75,19 @@ final class AppModel {
         }
     }
 
+    /// 窗口重新激活时刷新；短时间内重复激活不再重跑全部 git 命令。
+    func refreshAllIfStale(minimumInterval: TimeInterval = 5) async {
+        guard hasLoadedProjects else {
+            return
+        }
+        if let lastRefreshedAt, Date().timeIntervalSince(lastRefreshedAt) < minimumInterval {
+            return
+        }
+        await refreshAll()
+    }
+
     func refreshAll() async {
+        lastRefreshedAt = Date()
         let targets = projects.map(\.project)
         let service = repositoryService
         for index in projects.indices {
@@ -131,6 +144,29 @@ final class AppModel {
             worktree: worktree,
             change: change,
             scope: scope
+        )
+    }
+
+    func loadHistory(worktree: GitWorktree) async throws -> [GitCommit] {
+        try await repositoryService.loadHistory(worktree: worktree)
+    }
+
+    func loadCommitChanges(
+        worktree: GitWorktree,
+        commit: GitCommit
+    ) async throws -> [GitFileChange] {
+        try await repositoryService.loadCommitChanges(worktree: worktree, commit: commit)
+    }
+
+    func loadCommitDiff(
+        worktree: GitWorktree,
+        commit: GitCommit,
+        change: GitFileChange
+    ) async throws -> GitFileDiff {
+        try await repositoryService.loadCommitDiff(
+            worktree: worktree,
+            commit: commit,
+            change: change
         )
     }
 
