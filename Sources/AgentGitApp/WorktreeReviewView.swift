@@ -17,11 +17,21 @@ struct WorktreeReviewView: View {
             reviewHeader
             Divider()
 
-            HSplitView {
-                fileNavigator
-                    .frame(minWidth: 210, idealWidth: 270, maxWidth: 390)
-                diffContent
-                    .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+            if let statusError = snapshot.errorMessage {
+                ContentUnavailableView {
+                    Label("Unable to Read Status", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(statusError)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HSplitView {
+                    fileNavigator
+                        .frame(minWidth: 210, idealWidth: 270, maxWidth: 390)
+                    diffContent
+                        .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
         .onChange(of: snapshot.id, initial: true) {

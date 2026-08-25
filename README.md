@@ -115,8 +115,9 @@ AgentGitApp        SwiftUI App 外壳与 AppKit 高性能视图
 AgentGitCoreTests  porcelain / diff parser 与真实临时仓库测试
 ```
 
-Git 命令运行在 actor 中；UI 不直接创建 `Process`。所有路径以绝对路径进入 core，
-命令参数使用 argv，不拼 shell 字符串。
+Git 命令异步执行，进程等待不阻塞并发线程池；UI 不直接创建 `Process`。所有路径
+以绝对路径进入 core，命令参数使用 argv，不拼 shell 字符串。status 使用
+`--no-optional-locks`，避免 App 自己的刷新写 index、干扰活动时间排序。
 
 ## 后续 Agent 增强
 

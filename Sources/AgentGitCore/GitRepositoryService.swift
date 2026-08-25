@@ -48,16 +48,17 @@ public struct GitRepositoryService: Sendable {
 
     public func loadProject(at rootURL: URL) async throws -> GitProjectSnapshot {
         let project = GitProject(rootURL: rootURL)
-        let worktreeData = try runner.run(
+        let worktreeData = try await runner.run(
             arguments: ["worktree", "list", "--porcelain", "-z"],
             workingDirectory: project.rootURL
         )
         let worktrees = try WorktreeListParser.parse(worktreeData)
+            .filter { !$0.isBare }
 
         let snapshots = await withTaskGroup(of: GitWorktreeSnapshot.self) { group in
             for worktree in worktrees {
                 group.addTask {
-                    loadWorktree(worktree)
+                    await loadWorktree(worktree)
                 }
             }
 
@@ -119,14 +120,18 @@ public struct GitRepositoryService: Sendable {
             "--",
             change.path
         ])
-        let data = try runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
+        if let originalPath = change.originalPath {
+            arguments.append(originalPath)
+        }
+        let data = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
         return try UnifiedDiffParser.parse(data, change: change, scope: scope)
     }
 
-    private func loadWorktree(_ worktree: GitWorktree) -> GitWorktreeSnapshot {
+    private func loadWorktree(_ worktree: GitWorktree) async -> GitWorktreeSnapshot {
         do {
-            let statusData = try runner.run(
+            let statusData = try await runner.run(
                 arguments: [
+                    "--no-optional-locks",
                     "status",
                     "--porcelain=v2",
                     "-z",
@@ -138,7 +143,7 @@ public struct GitRepositoryService: Sendable {
             return GitWorktreeSnapshot(
                 worktree: worktree,
                 status: status,
-                lastActivityAt: activityDate(for: worktree, status: status),
+                lastActivityAt: await activityDate(for: worktree, status: status),
                 errorMessage: nil
             )
         } catch {
@@ -151,10 +156,10 @@ public struct GitRepositoryService: Sendable {
         }
     }
 
-    private func activityDate(for worktree: GitWorktree, status: GitStatusSnapshot) -> Date {
+    private func activityDate(for worktree: GitWorktree, status: GitStatusSnapshot) async -> Date {
         var dates: [Date] = []
 
-        if let gitDirectory = absoluteGitDirectory(for: worktree.rootURL) {
+        if let gitDirectory = await absoluteGitDirectory(for: worktree.rootURL) {
             dates.append(contentsOf: [
                 modificationDate(at: gitDirectory.appendingPathComponent("HEAD")),
                 modificationDate(at: gitDirectory.appendingPathComponent("index")),
@@ -170,15 +175,15 @@ public struct GitRepositoryService: Sendable {
             }
         }
 
-        if let commitDate = headCommitDate(for: worktree.rootURL) {
+        if let commitDate = await headCommitDate(for: worktree.rootURL) {
             dates.append(commitDate)
         }
 
         return dates.max() ?? .distantPast
     }
 
-    private func absoluteGitDirectory(for worktreeURL: URL) -> URL? {
-        guard let data = try? runner.run(
+    private func absoluteGitDirectory(for worktreeURL: URL) async -> URL? {
+        guard let data = try? await runner.run(
             arguments: ["rev-parse", "--absolute-git-dir"],
             workingDirectory: worktreeURL
         ) else {
@@ -193,8 +198,8 @@ public struct GitRepositoryService: Sendable {
         return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
     }
 
-    private func headCommitDate(for worktreeURL: URL) -> Date? {
-        guard let data = try? runner.run(
+    private func headCommitDate(for worktreeURL: URL) async -> Date? {
+        guard let data = try? await runner.run(
             arguments: ["show", "-s", "--format=%cI", "HEAD"],
             workingDirectory: worktreeURL
         ) else {

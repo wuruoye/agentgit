@@ -75,26 +75,26 @@ final class GitDiffTests: XCTestCase {
         }
 
         let runner = GitCommandRunner()
-        _ = try runner.run(arguments: ["init", "-b", "main"], workingDirectory: repository)
-        _ = try runner.run(
+        _ = try await runner.run(arguments: ["init", "-b", "main"], workingDirectory: repository)
+        _ = try await runner.run(
             arguments: ["config", "user.name", "AgentGit Tests"],
             workingDirectory: repository
         )
-        _ = try runner.run(
+        _ = try await runner.run(
             arguments: ["config", "user.email", "agentgit-tests@example.invalid"],
             workingDirectory: repository
         )
 
         let trackedFile = repository.appendingPathComponent("file.txt")
         try Data("base\n".utf8).write(to: trackedFile)
-        _ = try runner.run(arguments: ["add", "file.txt"], workingDirectory: repository)
-        _ = try runner.run(
+        _ = try await runner.run(arguments: ["add", "file.txt"], workingDirectory: repository)
+        _ = try await runner.run(
             arguments: ["commit", "-m", "Initial commit"],
             workingDirectory: repository
         )
 
         try Data("base\nstaged\n".utf8).write(to: trackedFile)
-        _ = try runner.run(arguments: ["add", "file.txt"], workingDirectory: repository)
+        _ = try await runner.run(arguments: ["add", "file.txt"], workingDirectory: repository)
         try Data("base\nstaged\nworking\n".utf8).write(to: trackedFile)
         try Data("untracked one\nuntracked two\n".utf8).write(
             to: repository.appendingPathComponent("new.txt")

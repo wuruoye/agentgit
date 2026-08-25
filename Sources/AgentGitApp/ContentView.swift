@@ -120,10 +120,8 @@ private struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: snapshot.worktree.isDetached ? "link" : "arrow.triangle.branch")
-                .foregroundStyle(
-                    snapshot.status.changedFileCount == 0 ? Color.secondary : Color.orange
-                )
+            Image(systemName: iconName)
+                .foregroundStyle(iconColor)
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -151,9 +149,30 @@ private struct WorktreeRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                if let errorMessage = snapshot.errorMessage {
+                    Text(errorMessage)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
             }
         }
         .padding(.vertical, 3)
         .help(snapshot.worktree.rootURL.path)
+    }
+
+    private var iconName: String {
+        if snapshot.errorMessage != nil {
+            return "exclamationmark.triangle.fill"
+        }
+        return snapshot.worktree.isDetached ? "link" : "arrow.triangle.branch"
+    }
+
+    private var iconColor: Color {
+        if snapshot.errorMessage != nil {
+            return .red
+        }
+        return snapshot.status.changedFileCount == 0 ? .secondary : .orange
     }
 }

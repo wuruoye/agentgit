@@ -26,7 +26,7 @@ public struct GitCommandRunner: Sendable {
         self.executableURL = executableURL
     }
 
-    public func run(arguments: [String], workingDirectory: URL) throws -> Data {
+    public func run(arguments: [String], workingDirectory: URL) async throws -> Data {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-command-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -56,8 +56,17 @@ public struct GitCommandRunner: Sendable {
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle
 
-        try process.run()
-        process.waitUntilExit()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            process.terminationHandler = { _ in
+                continuation.resume()
+            }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
         try stdoutHandle.synchronize()
         try stderrHandle.synchronize()
 
