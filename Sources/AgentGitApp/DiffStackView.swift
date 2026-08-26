@@ -126,6 +126,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var rows: [DiffStackRow] = []
     private var groupSections: [GroupSection] = []
     private var fileSections: [FileSection] = []
+    private var hunkRowIndexes: [Int] = []
     private var groupRowIndexByID: [String: Int] = [:]
     private var fileRowIndexByID: [String: Int] = [:]
     private var renderToken: DiffStackToken?
@@ -358,6 +359,12 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         rows = built
         groupSections = builtGroupSections
         fileSections = builtFileSections
+        hunkRowIndexes = built.indices.filter { index in
+            if case .hunk = built[index] {
+                return true
+            }
+            return false
+        }
         groupRowIndexByID = groupIndexByID
         fileRowIndexByID = fileIndexByID
     }
@@ -444,6 +451,47 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         updateStickyHeader()
     }
 
+    @discardableResult
+    func moveHunk(by offset: Int) -> Bool {
+        guard !hunkRowIndexes.isEmpty, offset != 0 else {
+            return false
+        }
+        let anchorRow: Int
+        if tableView.selectedRow >= 0 {
+            anchorRow = tableView.selectedRow
+        } else {
+            anchorRow = max(
+                -1,
+                tableView.row(
+                    at: NSPoint(x: 0, y: contentView.bounds.minY + 1)
+                )
+            )
+        }
+
+        let targetRow: Int
+        if offset > 0 {
+            targetRow = hunkRowIndexes.first(where: { $0 > anchorRow })
+                ?? hunkRowIndexes[0]
+        } else {
+            targetRow = hunkRowIndexes.last(where: { $0 < anchorRow })
+                ?? hunkRowIndexes[hunkRowIndexes.count - 1]
+        }
+
+        tableView.selectRowIndexes(
+            IndexSet(integer: targetRow),
+            byExtendingSelection: false
+        )
+        let stickyHeight = Metrics.groupHeight + Metrics.fileHeight
+        let targetOffset = max(0, tableView.rect(ofRow: targetRow).minY - stickyHeight)
+        let maxOffset = max(0, tableView.bounds.height - contentView.bounds.height)
+        contentView.scroll(
+            to: NSPoint(x: 0, y: min(targetOffset, maxOffset))
+        )
+        reflectScrolledClipView(contentView)
+        updateStickyHeader()
+        return true
+    }
+
     private func configureTable() {
         drawsBackground = true
         backgroundColor = .textBackgroundColor
@@ -480,6 +528,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         tableView.dynamicMenuProvider = { [weak self] row, selectedRows in
             self?.contextMenu(clickedRow: row, selectedRows: selectedRows)
+        }
+        tableView.hunkNavigationHandler = { [weak self] offset in
+            self?.moveHunk(by: offset) ?? false
         }
         documentView = tableView
 
@@ -1002,6 +1053,7 @@ private final class DiffCopyingTableView: NSTableView {
     var copyTextProvider: ((IndexSet) -> String)?
     var rowClickHandler: ((Int) -> Bool)?
     var dynamicMenuProvider: ((Int, IndexSet) -> NSMenu?)?
+    var hunkNavigationHandler: ((Int) -> Bool)?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -1014,6 +1066,14 @@ private final class DiffCopyingTableView: NSTableView {
 
     override func keyDown(with event: NSEvent) {
         let shortcutModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.keyCode == 48 {
+            if shortcutModifiers.isEmpty, hunkNavigationHandler?(1) == true {
+                return
+            }
+            if shortcutModifiers == .shift, hunkNavigationHandler?(-1) == true {
+                return
+            }
+        }
         if shortcutModifiers == .command,
            event.charactersIgnoringModifiers == "c" {
             copy(nil)
@@ -1454,6 +1514,7 @@ private final class DiffHunkCellView: NSTableCellView {
         primaryButton.title = mutationMode?.hunkActionTitle ?? ""
         primaryButton.isHidden = mutationMode == nil || lineIDs.isEmpty
         discardButton.isHidden = mutationMode != .working || lineIDs.isEmpty
+        toolTip = "Tab: Next Hunk  ·  Shift-Tab: Previous Hunk"
         needsLayout = true
     }
 

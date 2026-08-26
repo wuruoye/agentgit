@@ -160,6 +160,37 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertTrue(labels.contains { $0.contains("Sample.swift") })
     }
 
+    func testTabAndShiftTabNavigateHunksBelowStickyHeaders() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 100)
+        scrollView.display(
+            groups: [makeGroup(includesSecondHunk: true)],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+
+        tableView.keyDown(with: try makeTabEvent())
+        XCTAssertEqual(tableView.selectedRow, 2)
+
+        tableView.keyDown(with: try makeTabEvent())
+        XCTAssertEqual(tableView.selectedRow, 7)
+        XCTAssertEqual(
+            tableView.rect(ofRow: 7).minY - scrollView.contentView.bounds.minY,
+            68,
+            accuracy: 0.5
+        )
+
+        tableView.keyDown(with: try makeTabEvent(modifiers: .shift))
+        XCTAssertEqual(tableView.selectedRow, 2)
+        XCTAssertEqual(
+            tableView.rect(ofRow: 2).minY - scrollView.contentView.bounds.minY,
+            68,
+            accuracy: 0.5
+        )
+    }
+
     func testVisibleUnifiedCellCombinesSyntaxAndInlineHighlighting() throws {
         let scrollView = makeScrollView()
         scrollView.display(groups: [makeGroup()], layout: .unified, scrollTarget: nil)
@@ -296,11 +327,30 @@ final class DiffStackViewTests: XCTestCase {
         return try XCTUnwrap(NSEvent(cgEvent: event))
     }
 
+    private func makeTabEvent(
+        modifiers: NSEvent.ModifierFlags = []
+    ) throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: modifiers,
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "\t",
+                charactersIgnoringModifiers: "\t",
+                isARepeat: false,
+                keyCode: 48
+            )
+        )
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
 
-    private func makeGroup() -> DiffStackGroup {
+    private func makeGroup(includesSecondHunk: Bool = false) -> DiffStackGroup {
         let change = GitFileChange(
             path: "Sources/Sample.swift",
             originalPath: nil,
@@ -339,20 +389,49 @@ final class DiffStackViewTests: XCTestCase {
             )
         ]
         let lines = InlineDiffCalculator.annotate(rawLines)
+        var hunks = [
+            GitDiffHunk(
+                id: 0,
+                header: "@@ -1,3 +1,2 @@",
+                oldStart: 1,
+                oldCount: 3,
+                newStart: 1,
+                newCount: 2,
+                lines: lines
+            )
+        ]
+        if includesSecondHunk {
+            hunks.append(
+                GitDiffHunk(
+                    id: 1,
+                    header: "@@ -10,1 +10,1 @@",
+                    oldStart: 10,
+                    oldCount: 1,
+                    newStart: 10,
+                    newCount: 1,
+                    lines: [
+                        GitDiffLine(
+                            id: 10,
+                            kind: .deletion,
+                            oldLineNumber: 10,
+                            newLineNumber: nil,
+                            content: "let oldFlag = false"
+                        ),
+                        GitDiffLine(
+                            id: 11,
+                            kind: .addition,
+                            oldLineNumber: nil,
+                            newLineNumber: 10,
+                            content: "let newFlag = true"
+                        )
+                    ]
+                )
+            )
+        }
         let diff = GitFileDiff(
             change: change,
             scope: .working,
-            hunks: [
-                GitDiffHunk(
-                    id: 0,
-                    header: "@@ -1,3 +1,2 @@",
-                    oldStart: 1,
-                    oldCount: 3,
-                    newStart: 1,
-                    newCount: 2,
-                    lines: lines
-                )
-            ],
+            hunks: hunks,
             state: .textual
         )
         return DiffStackGroup(

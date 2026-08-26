@@ -93,10 +93,10 @@ ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按 first-
 展开。Review 使用连续文件流，支持 split / unified、分组折叠、分组与文件双层
 吸顶、行内差异和轻量语法高亮。Diff 布局、上下文行数与忽略空白由全局
 Settings 管理并跨启动保存。Diff 正文使用 AppKit `NSTableView`
-复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局和无障碍节点。
+复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局和无障碍节点；
+Diff 聚焦时可用 `Tab` / `Shift-Tab` 在 hunk 间导航。
 后续补充：
 
-- hunk 键盘导航；
 - reviewed 水位绑定确定的 diff snapshot；
 - 更完整的 rename 呈现与 image diff；
 - 大文件及超大变更的增量解析。
