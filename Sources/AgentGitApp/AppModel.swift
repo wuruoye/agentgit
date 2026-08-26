@@ -23,6 +23,13 @@ final class AppModel {
     private var hasLoadedProjects = false
     private var lastRefreshedAt: Date?
 
+    /// Diff 呈现口径是全局偏好：换个提交不该又要重设一遍上下文行数。
+    var diffOptions = GitDiffOptions()
+    var diffLayout = DiffLayoutMode.unified
+
+    /// 刻意放在观察体系之外：滚动位置每帧都变，进来会把整个工作区拖进重绘。
+    let reviewStates = ReviewStateStore()
+
     private(set) var projects: [ProjectState]
     var selectedWorktreeID: GitWorktreeSnapshot.ID?
 
@@ -143,12 +150,61 @@ final class AppModel {
         try await repositoryService.loadDiff(
             worktree: worktree,
             change: change,
-            scope: scope
+            scope: scope,
+            options: diffOptions
         )
+    }
+
+    func loadDiffs(
+        worktree: GitWorktree,
+        changes: [GitFileChange],
+        scope: GitDiffScope
+    ) async throws -> [GitFileDiff] {
+        try await repositoryService.loadDiffs(
+            worktree: worktree,
+            changes: changes,
+            scope: scope,
+            options: diffOptions
+        )
+    }
+
+    func applyFileAction(
+        _ action: GitPendingSelectionAction,
+        worktree: GitWorktree,
+        change: GitFileChange
+    ) async throws {
+        switch action {
+        case .stage:
+            try await repositoryService.stageFile(worktree: worktree, change: change)
+        case .unstage:
+            try await repositoryService.unstageFile(worktree: worktree, change: change)
+        case .discard:
+            try await repositoryService.discardFile(worktree: worktree, change: change)
+        }
+        await refresh(worktree: worktree)
+    }
+
+    func applySelectionAction(
+        _ action: GitPendingSelectionAction,
+        worktree: GitWorktree,
+        diff: GitFileDiff,
+        selectedLineIDs: Set<GitDiffLine.ID>
+    ) async throws {
+        try await repositoryService.applySelection(
+            action,
+            worktree: worktree,
+            diff: diff,
+            selectedLineIDs: selectedLineIDs
+        )
+        await refresh(worktree: worktree)
     }
 
     func loadHistory(worktree: GitWorktree) async throws -> [GitCommit] {
         try await repositoryService.loadHistory(worktree: worktree)
+    }
+
+    func loadCommitMessage(worktree: GitWorktree, commit: GitCommit) async throws -> String {
+        try await repositoryService.loadCommitMessage(worktree: worktree, commit: commit)
     }
 
     func loadCommitChanges(
@@ -166,7 +222,48 @@ final class AppModel {
         try await repositoryService.loadCommitDiff(
             worktree: worktree,
             commit: commit,
-            change: change
+            change: change,
+            options: diffOptions
+        )
+    }
+
+    func loadCommitDiffs(
+        worktree: GitWorktree,
+        commit: GitCommit,
+        changes: [GitFileChange]
+    ) async throws -> [GitFileDiff] {
+        try await repositoryService.loadCommitDiffs(
+            worktree: worktree,
+            commit: commit,
+            changes: changes,
+            options: diffOptions
+        )
+    }
+
+    func loadRangeChanges(
+        worktree: GitWorktree,
+        baseOID: String,
+        headOID: String
+    ) async throws -> [GitFileChange] {
+        try await repositoryService.loadRangeChanges(
+            worktree: worktree,
+            baseOID: baseOID,
+            headOID: headOID
+        )
+    }
+
+    func loadRangeDiffs(
+        worktree: GitWorktree,
+        baseOID: String,
+        headOID: String,
+        changes: [GitFileChange]
+    ) async throws -> [GitFileDiff] {
+        try await repositoryService.loadRangeDiffs(
+            worktree: worktree,
+            baseOID: baseOID,
+            headOID: headOID,
+            changes: changes,
+            options: diffOptions
         )
     }
 
@@ -213,6 +310,15 @@ final class AppModel {
 
     private func persistProjects() {
         defaults.set(projects.map { $0.project.rootURL.path }, forKey: Self.projectPathsKey)
+    }
+
+    private func refresh(worktree: GitWorktree) async {
+        guard let projectID = projects.first(where: { projectState in
+            projectState.snapshot?.worktrees.contains(where: { $0.id == worktree.id }) == true
+        })?.id else {
+            return
+        }
+        await refreshProject(id: projectID)
     }
 }
 

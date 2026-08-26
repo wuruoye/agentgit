@@ -20,6 +20,10 @@ let package = Package(
         .testTarget(
             name: "AgentGitCoreTests",
             dependencies: ["AgentGitCore"]
+        ),
+        .testTarget(
+            name: "AgentGitAppTests",
+            dependencies: ["AgentGitApp", "AgentGitCore"]
         )
     ],
     swiftLanguageModes: [.v6]

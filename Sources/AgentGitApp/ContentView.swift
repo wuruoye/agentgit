@@ -36,7 +36,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Worktrees")
-            .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
             .toolbar {
                 ToolbarItemGroup {
                     Button {
@@ -46,13 +46,11 @@ struct ContentView: View {
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
-                    .keyboardShortcut("r", modifiers: .command)
                     .help("Refresh All Projects (⌘R)")
 
                     Button(action: model.chooseProject) {
                         Label("Add Project", systemImage: "plus")
                     }
-                    .keyboardShortcut("o", modifiers: .command)
                     .help("Add Project (⌘O)")
                 }
             }

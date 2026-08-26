@@ -10,6 +10,8 @@
     <string>AgentGitApp</string>
     <key>CFBundleIdentifier</key>
     <string>com.sigma.agentgit</string>
+    <key>CFBundleIconFile</key>
+    <string>AgentGit.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -22,6 +24,12 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

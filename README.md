@@ -17,7 +17,12 @@ open .build/debug/AgentGit.app
 ```
 
 发布配置使用 `scripts/build-app.sh release`，产物位于
-`.build/release/AgentGit.app`。
+`.build/release/AgentGit.app`。这两个构建都会产出完整的 macOS App bundle，
+包含版本、开发者工具分类、多尺寸 `.icns` 图标和代码签名。图标母版位于
+`Support/Assets/AgentGitAppIcon.png`。
+
+本地默认使用开发证书签名；需要改用其它证书时设置
+`AGENTGIT_SIGNING_IDENTITY`。
 
 ## 产品主路径
 
@@ -54,8 +59,9 @@ M1 完成以下链路：
 6. 项目列表在下次启动时恢复；
 7. Git 命令失败时在对应项目或 worktree 上显示明确错误，不让整个窗口失效。
 
-M1 不包含 MCP、常驻 daemon、Agent hook、commit/push、reset/discard 或 worktree
-创建删除。
+M1 不包含 MCP、常驻 daemon、Agent hook、commit/push、reset 或 worktree
+创建删除。Git 写操作仅支持 Working / Staged 中的 Stage、Unstage 和
+Discard，粒度为文件、hunk 或选中行。
 
 ## 最近活动时间
 
@@ -82,16 +88,17 @@ last_activity_at = max(
 - **Branch**：merge-base(base, `HEAD`) 到当前 worktree 的完整变化，包含已提交与
   未提交内容。
 
-M1 实现 Working + Staged unified diff，以及 History：提交列表（作者、日期、短
-hash、ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按 first-parent
-展开。后续补充：
+M1 实现 Working + Staged 以及 History：提交列表（作者、日期、短 hash、
+ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按 first-parent
+展开。Review 使用连续文件流，支持 split / unified、单文件 focus、分组折叠、
+吸顶文件头、行内差异和轻量语法高亮。Diff 正文使用 AppKit `NSTableView`
+复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局和无障碍节点。
+后续补充：
 
-- split / unified 切换；
-- 单文件 focus mode；
-- file / hunk 键盘导航；
+- hunk 键盘导航；
 - reviewed 水位绑定确定的 diff snapshot；
-- rename、binary 和 image diff；
-- 大文件及超大变更的增量解析与虚拟化。
+- 更完整的 rename 呈现与 image diff；
+- 大文件及超大变更的增量解析。
 
 ## Git 集成边界
 
@@ -106,7 +113,8 @@ git log -z --format=<unit-separated>
 git show --format= --name-status -z --diff-merges=first-parent
 ```
 
-Git 能力保持只读：不提供 commit、stage、discard、push 或 worktree 创建删除。
+Git 写操作限定为 Stage、Unstage 和 Discard 文件 / hunk / 行；不提供
+commit、push、reset 或 worktree 创建删除。
 
 暂不引入 libgit2。系统 Git 对 worktree、attributes、diff driver、LFS 和用户已有
 配置的兼容性更接近真实命令行行为；性能问题先通过并发调度、缓存和增量刷新
@@ -118,6 +126,7 @@ Git 能力保持只读：不提供 commit、stage、discard、push 或 worktree 
 AgentGitCore       Git 命令、解析、领域模型、项目持久化
 AgentGitApp        SwiftUI App 外壳与 AppKit 高性能视图
 AgentGitCoreTests  porcelain / diff parser 与真实临时仓库测试
+AgentGitAppTests   AppKit Review 布局、交互与离屏快照测试
 ```
 
 Git 命令异步执行，进程等待不阻塞并发线程池；UI 不直接创建 `Process`。所有路径

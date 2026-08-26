@@ -16,6 +16,45 @@ public enum GitDiffScope: String, CaseIterable, Identifiable, Hashable, Sendable
     }
 }
 
+/// Diff 的呈现口径。上下文行数与忽略空白都只是 git 参数，改了要重新取一次。
+public enum GitDiffContext: Hashable, Sendable {
+    case lines(Int)
+    case wholeFile
+
+    public var unifiedArgument: String {
+        switch self {
+        case let .lines(count): "--unified=\(count)"
+        // git 没有“整文件”开关，惯例是给一个大到覆盖任何文件的上下文。
+        case .wholeFile: "--unified=1000000"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case let .lines(count): "\(count) Lines"
+        case .wholeFile: "Whole File"
+        }
+    }
+}
+
+public struct GitDiffOptions: Hashable, Sendable {
+    public var context: GitDiffContext
+    public var ignoresWhitespace: Bool
+
+    public init(context: GitDiffContext = .lines(3), ignoresWhitespace: Bool = false) {
+        self.context = context
+        self.ignoresWhitespace = ignoresWhitespace
+    }
+
+    public var arguments: [String] {
+        var arguments = [context.unifiedArgument]
+        if ignoresWhitespace {
+            arguments.append("--ignore-all-space")
+        }
+        return arguments
+    }
+}
+
 public enum GitDiffLineKind: Hashable, Sendable {
     case context
     case addition
@@ -29,19 +68,34 @@ public struct GitDiffLine: Identifiable, Hashable, Sendable {
     public let oldLineNumber: Int?
     public let newLineNumber: Int?
     public let content: String
+    /// 与配对行的字符级差异；为空表示整行按行底色处理。
+    public let inlineRanges: [GitDiffInlineRange]
 
     public init(
         id: Int,
         kind: GitDiffLineKind,
         oldLineNumber: Int?,
         newLineNumber: Int?,
-        content: String
+        content: String,
+        inlineRanges: [GitDiffInlineRange] = []
     ) {
         self.id = id
         self.kind = kind
         self.oldLineNumber = oldLineNumber
         self.newLineNumber = newLineNumber
         self.content = content
+        self.inlineRanges = inlineRanges
+    }
+
+    func withInlineRanges(_ ranges: [GitDiffInlineRange]) -> GitDiffLine {
+        GitDiffLine(
+            id: id,
+            kind: kind,
+            oldLineNumber: oldLineNumber,
+            newLineNumber: newLineNumber,
+            content: content,
+            inlineRanges: ranges
+        )
     }
 }
 
@@ -73,34 +127,66 @@ public struct GitDiffHunk: Identifiable, Hashable, Sendable {
     }
 }
 
+/// 没有 hunk 时到底发生了什么。UI 要能区分二进制、过大、无改动和不可用。
+public enum GitFileDiffState: Hashable, Sendable {
+    case textual
+    case binary
+    case tooLarge(lineCount: Int)
+    case unavailable(String)
+
+    public var note: String? {
+        switch self {
+        case .textual: nil
+        case .binary: "Binary file"
+        case let .tooLarge(lineCount): "Diff too large to display (\(lineCount) lines)"
+        case let .unavailable(reason): reason
+        }
+    }
+}
+
 public struct GitFileDiff: Hashable, Sendable {
     public let change: GitFileChange
     public let scope: GitDiffScope
     public let hunks: [GitDiffHunk]
-    public let message: String?
+    public let state: GitFileDiffState
+    /// 存储而非每次现算：文件头每次重绘都要读，现算等于把全文再走一遍。
+    public let addedLineCount: Int
+    public let deletedLineCount: Int
 
     public init(
         change: GitFileChange,
         scope: GitDiffScope,
         hunks: [GitDiffHunk],
-        message: String?
+        state: GitFileDiffState,
+        addedLineCount: Int,
+        deletedLineCount: Int
     ) {
         self.change = change
         self.scope = scope
         self.hunks = hunks
-        self.message = message
+        self.state = state
+        self.addedLineCount = addedLineCount
+        self.deletedLineCount = deletedLineCount
     }
 
-    public var addedLineCount: Int {
-        hunks.reduce(0) { count, hunk in
-            count + hunk.lines.count(where: { $0.kind == .addition })
-        }
-    }
-
-    public var deletedLineCount: Int {
-        hunks.reduce(0) { count, hunk in
-            count + hunk.lines.count(where: { $0.kind == .deletion })
-        }
+    public init(
+        change: GitFileChange,
+        scope: GitDiffScope,
+        hunks: [GitDiffHunk],
+        state: GitFileDiffState
+    ) {
+        self.init(
+            change: change,
+            scope: scope,
+            hunks: hunks,
+            state: state,
+            addedLineCount: hunks.reduce(0) { count, hunk in
+                count + hunk.lines.count(where: { $0.kind == .addition })
+            },
+            deletedLineCount: hunks.reduce(0) { count, hunk in
+                count + hunk.lines.count(where: { $0.kind == .deletion })
+            }
+        )
     }
 }
 
@@ -110,6 +196,59 @@ public enum UnifiedDiffParseError: Error, Equatable, Sendable {
 }
 
 public enum UnifiedDiffParser {
+    /// 单文件行数上限。超过就只报状态，不再构造行对象。
+    public static let maximumRenderedLines = 50_000
+
+    public static func parseFiles(
+        _ data: Data,
+        changes: [GitFileChange],
+        scope: GitDiffScope
+    ) throws -> [GitFileDiff] {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw UnifiedDiffParseError.invalidUTF8
+        }
+
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var chunks: [[String]] = []
+        var currentChunk: [String] = []
+
+        for line in lines {
+            if line.hasPrefix("diff --git "), !currentChunk.isEmpty {
+                chunks.append(currentChunk)
+                currentChunk = []
+            }
+            if !currentChunk.isEmpty || line.hasPrefix("diff --git ") {
+                currentChunk.append(line)
+            }
+        }
+        if !currentChunk.isEmpty {
+            chunks.append(currentChunk)
+        }
+
+        var parsedByChangeID: [GitFileChange.ID: GitFileDiff] = [:]
+        for chunk in chunks {
+            guard let header = chunk.first,
+                  let change = changes.first(where: { header.hasSuffix(" b/\($0.path)") }) else {
+                continue
+            }
+            let patch = chunk.joined(separator: "\n")
+            parsedByChangeID[change.id] = try parse(
+                Data(patch.utf8),
+                change: change,
+                scope: scope
+            )
+        }
+
+        return changes.map { change in
+            parsedByChangeID[change.id] ?? GitFileDiff(
+                change: change,
+                scope: scope,
+                hunks: [],
+                state: .textual
+            )
+        }
+    }
+
     public static func parse(
         _ data: Data,
         change: GitFileChange,
@@ -133,7 +272,7 @@ public enum UnifiedDiffParser {
         var oldLine = 0
         var newLine = 0
         var lineID = 0
-        var message: String?
+        var state = GitFileDiffState.textual
 
         func finishHunk() {
             guard let currentHeader else {
@@ -147,7 +286,7 @@ public enum UnifiedDiffParser {
                     oldCount: currentHeader.oldCount,
                     newStart: currentHeader.newStart,
                     newCount: currentHeader.newCount,
-                    lines: currentLines
+                    lines: InlineDiffCalculator.annotate(currentLines)
                 )
             )
         }
@@ -165,7 +304,7 @@ public enum UnifiedDiffParser {
 
             guard currentHeader != nil else {
                 if rawLine.hasPrefix("Binary files ") || rawLine == "GIT binary patch" {
-                    message = "Binary diff"
+                    state = .binary
                 }
                 continue
             }
@@ -213,15 +352,29 @@ public enum UnifiedDiffParser {
         }
 
         finishHunk()
-        if hunks.isEmpty, message == nil, !data.isEmpty {
-            message = "No textual hunks"
+
+        // 超大单文件不建行数组：真正的代价在解析和内存，不在表格渲染。
+        let lineCount = hunks.reduce(0) { $0 + $1.lines.count }
+        if state == .textual, lineCount > maximumRenderedLines {
+            return GitFileDiff(
+                change: change,
+                scope: scope,
+                hunks: [],
+                state: .tooLarge(lineCount: lineCount),
+                addedLineCount: hunks.reduce(0) { count, hunk in
+                    count + hunk.lines.count(where: { $0.kind == .addition })
+                },
+                deletedLineCount: hunks.reduce(0) { count, hunk in
+                    count + hunk.lines.count(where: { $0.kind == .deletion })
+                }
+            )
         }
 
         return GitFileDiff(
             change: change,
             scope: scope,
             hunks: hunks,
-            message: message
+            state: state
         )
     }
 
@@ -235,7 +388,7 @@ public enum UnifiedDiffParser {
                 change: change,
                 scope: .working,
                 hunks: [],
-                message: "File is too large for the initial text reviewer"
+                state: .unavailable("File is too large for the initial text reviewer")
             )
         }
         guard !data.contains(0), let text = String(data: data, encoding: .utf8) else {
@@ -243,7 +396,7 @@ public enum UnifiedDiffParser {
                 change: change,
                 scope: .working,
                 hunks: [],
-                message: "Binary file"
+                state: .binary
             )
         }
         guard !text.isEmpty else {
@@ -251,7 +404,7 @@ public enum UnifiedDiffParser {
                 change: change,
                 scope: .working,
                 hunks: [],
-                message: "Empty file"
+                state: .unavailable("Empty file")
             )
         }
 
@@ -281,7 +434,7 @@ public enum UnifiedDiffParser {
             change: change,
             scope: .working,
             hunks: [hunk],
-            message: nil
+            state: .textual
         )
     }
 

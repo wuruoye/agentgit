@@ -20,13 +20,21 @@ swift build -c "${CONFIGURATION}"
 BIN_DIR="$(swift build -c "${CONFIGURATION}" --show-bin-path)"
 APP_DIR="${PROJECT_DIR}/.build/${CONFIGURATION}/AgentGit.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
+RESOURCES_DIR="${CONTENTS_DIR}/Resources"
+ICON_PATH="${PROJECT_DIR}/.build/${CONFIGURATION}/AgentGit.icns"
 
-mkdir -p "${CONTENTS_DIR}/MacOS"
+"${PROJECT_DIR}/scripts/build-icon.sh" \
+    "${PROJECT_DIR}/Support/Assets/AgentGitAppIcon.png" \
+    "${ICON_PATH}"
+
+mkdir -p "${CONTENTS_DIR}/MacOS" "${RESOURCES_DIR}"
 install -m 755 "${BIN_DIR}/AgentGitApp" "${CONTENTS_DIR}/MacOS/AgentGitApp"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
+install -m 644 "${ICON_PATH}" "${RESOURCES_DIR}/AgentGit.icns"
 # ad-hoc 签名没有稳定身份，每次重建都会让 TCC 重新弹“文稿”授权并挂起 git 子进程；
 # 用固定开发证书签名让授权跨构建保留。
 SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:-Apple Development: Example (TEAMID)}"
 /usr/bin/codesign --force --sign "${SIGNING_IDENTITY}" "${APP_DIR}"
+/usr/bin/codesign --verify --deep --strict "${APP_DIR}"
 
 echo "${APP_DIR}"

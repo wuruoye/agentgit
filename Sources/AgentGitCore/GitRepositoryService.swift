@@ -42,6 +42,17 @@ public struct GitProjectSnapshot: Identifiable, Hashable, Sendable {
     }
 }
 
+public enum GitPendingSelectionAction: Hashable, Sendable {
+    case stage
+    case unstage
+    case discard
+}
+
+public enum GitMutationError: Error, Equatable, Sendable {
+    case invalidScope
+    case pathOutsideWorktree
+}
+
 public struct GitRepositoryService: Sendable {
     /// oid, short oid, author, author date, parents, refs, subject —— 与 GitLogParser 对应。
     private static let historyFormat = "%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%D%x1f%s"
@@ -92,7 +103,8 @@ public struct GitRepositoryService: Sendable {
     public func loadDiff(
         worktree: GitWorktree,
         change: GitFileChange,
-        scope: GitDiffScope
+        scope: GitDiffScope,
+        options: GitDiffOptions = GitDiffOptions()
     ) async throws -> GitFileDiff {
         if change.isUntracked {
             guard scope == .working else {
@@ -100,7 +112,7 @@ public struct GitRepositoryService: Sendable {
                     change: change,
                     scope: scope,
                     hunks: [],
-                    message: "Untracked files are not staged"
+                    state: .unavailable("Untracked files are not staged")
                 )
             }
             let fileURL = worktree.rootURL.appendingPathComponent(change.path)
@@ -119,18 +131,63 @@ public struct GitRepositoryService: Sendable {
         } else if change.kind == .unmerged {
             arguments.append("--ours")
         }
-        arguments.append(contentsOf: [
-            "--no-ext-diff",
-            "--no-color",
-            "--unified=3",
-            "--",
-            change.path
-        ])
+        arguments.append(contentsOf: ["--no-ext-diff", "--no-color"])
+        arguments.append(contentsOf: options.arguments)
+        arguments.append(contentsOf: ["--", change.path])
         if let originalPath = change.originalPath {
             arguments.append(originalPath)
         }
         let data = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
         return try UnifiedDiffParser.parse(data, change: change, scope: scope)
+    }
+
+    public func loadDiffs(
+        worktree: GitWorktree,
+        changes: [GitFileChange],
+        scope: GitDiffScope,
+        options: GitDiffOptions = GitDiffOptions()
+    ) async throws -> [GitFileDiff] {
+        let batchChanges = changes.filter {
+            !$0.isUntracked && !(scope == .working && $0.kind == .unmerged)
+        }
+        var diffs: [GitFileDiff] = []
+
+        if !batchChanges.isEmpty {
+            var arguments = [
+                "-c", "core.quotePath=false",
+                "diff"
+            ]
+            if scope == .staged {
+                arguments.append("--cached")
+            }
+            arguments.append(contentsOf: ["--no-ext-diff", "--no-color"])
+            arguments.append(contentsOf: options.arguments)
+            arguments.append("--find-renames")
+            let data = try await runner.run(
+                arguments: arguments,
+                workingDirectory: worktree.rootURL
+            )
+            diffs.append(contentsOf: try UnifiedDiffParser.parseFiles(
+                data,
+                changes: batchChanges,
+                scope: scope
+            ))
+        }
+
+        let batchChangeIDs = Set(batchChanges.map(\.id))
+        for change in changes where !batchChangeIDs.contains(change.id) {
+            diffs.append(
+                try await loadDiff(
+                    worktree: worktree,
+                    change: change,
+                    scope: scope,
+                    options: options
+                )
+            )
+        }
+
+        let diffsByChangeID = Dictionary(uniqueKeysWithValues: diffs.map { ($0.change.id, $0) })
+        return changes.compactMap { diffsByChangeID[$0.id] }
     }
 
     public func loadHistory(
@@ -152,6 +209,24 @@ public struct GitRepositoryService: Sendable {
             workingDirectory: worktree.rootURL
         )
         return try GitLogParser.parse(data)
+    }
+
+    public func loadCommitMessage(
+        worktree: GitWorktree,
+        commit: GitCommit
+    ) async throws -> String {
+        let data = try await runner.run(
+            arguments: [
+                "--no-optional-locks",
+                "show",
+                "-s",
+                "--format=%B",
+                commit.oid
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func loadCommitChanges(
@@ -178,7 +253,8 @@ public struct GitRepositoryService: Sendable {
     public func loadCommitDiff(
         worktree: GitWorktree,
         commit: GitCommit,
-        change: GitFileChange
+        change: GitFileChange,
+        options: GitDiffOptions = GitDiffOptions()
     ) async throws -> GitFileDiff {
         var arguments = [
             "-c", "core.quotePath=false",
@@ -186,19 +262,158 @@ public struct GitRepositoryService: Sendable {
             "show",
             "--format=",
             "--no-ext-diff",
-            "--no-color",
-            "--unified=3",
+            "--no-color"
+        ]
+        arguments.append(contentsOf: options.arguments)
+        arguments.append(contentsOf: [
             "--find-renames",
             "--diff-merges=first-parent",
             commit.oid,
             "--",
             change.path
-        ]
+        ])
         if let originalPath = change.originalPath {
             arguments.append(originalPath)
         }
         let data = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
         return try UnifiedDiffParser.parse(data, change: change, scope: .staged)
+    }
+
+    public func loadCommitDiffs(
+        worktree: GitWorktree,
+        commit: GitCommit,
+        changes: [GitFileChange],
+        options: GitDiffOptions = GitDiffOptions()
+    ) async throws -> [GitFileDiff] {
+        let data = try await runner.run(
+            arguments: [
+                "-c", "core.quotePath=false",
+                "--no-optional-locks",
+                "show",
+                "--format=",
+                "--no-ext-diff",
+                "--no-color"
+            ] + options.arguments + [
+                "--find-renames",
+                "--diff-merges=first-parent",
+                commit.oid
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return try UnifiedDiffParser.parseFiles(data, changes: changes, scope: .staged)
+    }
+
+    /// commit range 的 base 是排除端：\(baseOID)..\(headOID) 只包含 base 之后的改动。
+    public func loadRangeChanges(
+        worktree: GitWorktree,
+        baseOID: String,
+        headOID: String
+    ) async throws -> [GitFileChange] {
+        let data = try await runner.run(
+            arguments: [
+                "-c", "core.quotePath=false",
+                "--no-optional-locks",
+                "diff",
+                "--name-status",
+                "-z",
+                "--find-renames",
+                "\(baseOID)..\(headOID)"
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return try GitNameStatusParser.parse(data)
+    }
+
+    public func loadRangeDiffs(
+        worktree: GitWorktree,
+        baseOID: String,
+        headOID: String,
+        changes: [GitFileChange],
+        options: GitDiffOptions = GitDiffOptions()
+    ) async throws -> [GitFileDiff] {
+        let data = try await runner.run(
+            arguments: [
+                "-c", "core.quotePath=false",
+                "--no-optional-locks",
+                "diff",
+                "--no-ext-diff",
+                "--no-color"
+            ] + options.arguments + [
+                "--find-renames",
+                "\(baseOID)..\(headOID)"
+            ],
+            workingDirectory: worktree.rootURL
+        )
+        return try UnifiedDiffParser.parseFiles(data, changes: changes, scope: .staged)
+    }
+
+    public func stageFile(worktree: GitWorktree, change: GitFileChange) async throws {
+        _ = try await runner.run(
+            arguments: ["add", "--", change.path],
+            workingDirectory: worktree.rootURL
+        )
+    }
+
+    public func unstageFile(worktree: GitWorktree, change: GitFileChange) async throws {
+        let arguments: [String]
+        if worktree.isUnborn {
+            arguments = ["rm", "--cached", "--ignore-unmatch", "-q", "--", change.path]
+        } else {
+            arguments = ["reset", "-q", "HEAD", "--", change.path]
+        }
+        _ = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
+    }
+
+    public func discardFile(worktree: GitWorktree, change: GitFileChange) async throws {
+        if change.isUntracked {
+            let root = worktree.rootURL.standardizedFileURL
+            let target = root.appendingPathComponent(change.path).standardizedFileURL
+            guard target.path.hasPrefix(root.path + "/") else {
+                throw GitMutationError.pathOutsideWorktree
+            }
+            try FileManager.default.removeItem(at: target)
+            return
+        }
+        _ = try await runner.run(
+            arguments: ["restore", "--worktree", "--", change.path],
+            workingDirectory: worktree.rootURL
+        )
+    }
+
+    public func applySelection(
+        _ action: GitPendingSelectionAction,
+        worktree: GitWorktree,
+        diff: GitFileDiff,
+        selectedLineIDs: Set<GitDiffLine.ID>
+    ) async throws {
+        var arguments = ["apply", "--unidiff-zero", "--recount", "--whitespace=nowarn"]
+        switch action {
+        case .stage:
+            guard diff.scope == .working else {
+                throw GitMutationError.invalidScope
+            }
+            arguments.append("--cached")
+        case .unstage:
+            guard diff.scope == .staged else {
+                throw GitMutationError.invalidScope
+            }
+            arguments.append(contentsOf: ["--cached", "--reverse"])
+        case .discard:
+            guard diff.scope == .working else {
+                throw GitMutationError.invalidScope
+            }
+            arguments.append("--reverse")
+        }
+        arguments.append("-")
+        _ = try await runner.run(
+            arguments: arguments,
+            workingDirectory: worktree.rootURL,
+            standardInput: try GitPatchSelectionBuilder.patch(
+                for: diff,
+                selectedLineIDs: selectedLineIDs,
+                treatsUntrackedAsNewFile: action != .discard
+            )
+        )
     }
 
     private func loadWorktree(_ worktree: GitWorktree) async -> GitWorktreeSnapshot {

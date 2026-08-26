@@ -3,6 +3,32 @@ import XCTest
 @testable import AgentGitCore
 
 final class GitStatusParserTests: XCTestCase {
+    /// Pending 分组依赖这三个谓词互斥：untracked 不能同时算进 Working。
+    func testUntrackedIsNotReportedAsUnstaged() throws {
+        let records = [
+            "1 .M N... 100644 100644 100644 aaaa bbbb changed.swift",
+            "1 M. N... 100644 100644 100644 cccc dddd staged.swift",
+            "? brand-new.swift"
+        ]
+        let snapshot = try GitStatusParser.parsePorcelainV2(
+            Data(records.joined(separator: "\0").utf8)
+        )
+
+        let changed = try XCTUnwrap(snapshot.changes.first { $0.path == "changed.swift" })
+        XCTAssertTrue(changed.isUnstaged)
+        XCTAssertFalse(changed.isUntracked)
+        XCTAssertFalse(changed.isStaged)
+
+        let staged = try XCTUnwrap(snapshot.changes.first { $0.path == "staged.swift" })
+        XCTAssertTrue(staged.isStaged)
+        XCTAssertFalse(staged.isUnstaged)
+
+        let untracked = try XCTUnwrap(snapshot.changes.first { $0.path == "brand-new.swift" })
+        XCTAssertTrue(untracked.isUntracked)
+        XCTAssertFalse(untracked.isUnstaged)
+        XCTAssertFalse(untracked.isStaged)
+    }
+
     func testParsesOrdinaryRenameAndUntrackedRecords() throws {
         let payload = [
             "1 .M N... 100644 100644 100644 aaaaaaa bbbbbbb Sources/File One.swift",
