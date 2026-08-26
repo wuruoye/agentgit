@@ -211,20 +211,6 @@ struct IntegratedReviewWorkspace: View {
         .listStyle(.sidebar)
     }
 
-    private var optionsBinding: Binding<GitDiffOptions> {
-        Binding(
-            get: { model.diffOptions },
-            set: { model.diffOptions = $0 }
-        )
-    }
-
-    private var layoutBinding: Binding<DiffLayoutMode> {
-        Binding(
-            get: { model.diffLayout },
-            set: { model.diffLayout = $0 }
-        )
-    }
-
     /// Files 只负责定位：选中即滚动到 Review 流里的那个文件。
     private var focusBinding: Binding<String?> {
         Binding(
@@ -292,38 +278,7 @@ struct IntegratedReviewWorkspace: View {
                 ProgressView()
                     .controlSize(.small)
             }
-
-            DiffOptionsMenu(options: optionsBinding)
-
-            Picker("Diff Layout", selection: layoutBinding) {
-                ForEach(DiffLayoutMode.allCases) { layout in
-                    Text(layout.title).tag(layout)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .help("Unified or side-by-side diff")
-
-            Toggle(isOn: $review.isFocusedOnly) {
-                Label("Focus", systemImage: "doc.text.magnifyingglass")
-            }
-            .toggleStyle(.button)
-            .controlSize(.small)
-            .disabled(review.focusedFileID == nil)
-            .help("Show only the selected file")
-
-            Button("Expand All") {
-                setCollapsed(false, for: currentFileItems)
-            }
-            .disabled(!hasCollapsedFiles)
-
-            Button("Collapse All") {
-                setCollapsed(true, for: currentFileItems)
-            }
-            .disabled(!hasExpandedFiles)
         }
-        .buttonStyle(.borderless)
         .controlSize(.small)
         .font(.caption)
         .padding(.horizontal, 14)
@@ -379,19 +334,6 @@ struct IntegratedReviewWorkspace: View {
     // MARK: - Stack composition
 
     private var stackGroups: [DiffStackGroup] {
-        // 聚焦模式只留选中的那一个文件，折叠/滚动状态照旧共享同一份。
-        if review.isFocusedOnly, let focused = focusedItem {
-            return [
-                DiffStackGroup(
-                    id: "focused",
-                    title: nil,
-                    emptyMessage: "No File Changes",
-                    isExpanded: true,
-                    files: [stackFile(for: focused, forceExpanded: true)]
-                )
-            ]
-        }
-
         switch activeContext {
         case .pending:
             return [
@@ -441,17 +383,17 @@ struct IntegratedReviewWorkspace: View {
             title: title,
             emptyMessage: emptyMessage,
             isExpanded: items.contains { !review.collapsedFileIDs.contains($0.id.stackID) },
-            files: items.map { stackFile(for: $0, forceExpanded: false) }
+            files: items.map { stackFile(for: $0) }
         )
     }
 
-    private func stackFile(for item: IntegratedFileItem, forceExpanded: Bool) -> DiffStackFile {
+    private func stackFile(for item: IntegratedFileItem) -> DiffStackFile {
         DiffStackFile(
             id: item.id.stackID,
             path: item.change.path,
             status: item.stackStatus,
             statusLabel: item.statusLabel,
-            isExpanded: forceExpanded || !review.collapsedFileIDs.contains(item.id.stackID),
+            isExpanded: !review.collapsedFileIDs.contains(item.id.stackID),
             isFocused: item.id.stackID == review.focusedFileID,
             mutationMode: activeContext == .pending
                 ? (item.scope == .working ? .working : .staged)
@@ -646,10 +588,6 @@ struct IntegratedReviewWorkspace: View {
         filtered(currentFileItems)
     }
 
-    private var focusedItem: IntegratedFileItem? {
-        currentFileItems.first { $0.id.stackID == review.focusedFileID }
-    }
-
     private func filtered(_ items: [IntegratedFileItem]) -> [IntegratedFileItem] {
         guard !review.filterText.isEmpty else {
             return items
@@ -695,14 +633,6 @@ struct IntegratedReviewWorkspace: View {
             options: model.diffOptions,
             fileIDs: currentFileItems.map(\.id)
         )
-    }
-
-    private var hasCollapsedFiles: Bool {
-        currentFileItems.contains { review.collapsedFileIDs.contains($0.id.stackID) }
-    }
-
-    private var hasExpandedFiles: Bool {
-        currentFileItems.contains { !review.collapsedFileIDs.contains($0.id.stackID) }
     }
 
     // MARK: - Actions
@@ -1028,35 +958,6 @@ private struct IntegratedDiffLoadKey: Hashable {
 }
 
 // MARK: - Components
-
-private struct DiffOptionsMenu: View {
-    @Binding var options: GitDiffOptions
-
-    private static let contextChoices: [GitDiffContext] = [
-        .lines(3), .lines(8), .lines(25), .wholeFile
-    ]
-
-    var body: some View {
-        Menu {
-            Picker("Context", selection: $options.context) {
-                ForEach(Self.contextChoices, id: \.self) { choice in
-                    Text(choice.title).tag(choice)
-                }
-            }
-            .pickerStyle(.inline)
-
-            Divider()
-
-            Toggle("Ignore Whitespace", isOn: $options.ignoresWhitespace)
-        } label: {
-            Label("Diff Options", systemImage: "slider.horizontal.3")
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Context lines and whitespace handling")
-    }
-}
 
 private struct DiffCountLabel: View {
     let added: Int

@@ -17,6 +17,9 @@ struct ProjectState: Identifiable {
 @Observable
 final class AppModel {
     private static let projectPathsKey = "agentgit.project-paths"
+    private static let diffContextKey = "agentgit.diff-context"
+    private static let ignoresWhitespaceKey = "agentgit.diff-ignore-whitespace"
+    private static let diffLayoutKey = "agentgit.diff-layout"
 
     private let defaults: UserDefaults
     private let repositoryService: GitRepositoryService
@@ -24,8 +27,12 @@ final class AppModel {
     private var lastRefreshedAt: Date?
 
     /// Diff 呈现口径是全局偏好：换个提交不该又要重设一遍上下文行数。
-    var diffOptions = GitDiffOptions()
-    var diffLayout = DiffLayoutMode.unified
+    var diffOptions: GitDiffOptions {
+        didSet { persistDiffPreferences() }
+    }
+    var diffLayout: DiffLayoutMode {
+        didSet { persistDiffPreferences() }
+    }
 
     /// 刻意放在观察体系之外：滚动位置每帧都变，进来会把整个工作区拖进重绘。
     let reviewStates = ReviewStateStore()
@@ -39,9 +46,37 @@ final class AppModel {
     ) {
         self.defaults = defaults
         self.repositoryService = repositoryService
+        self.diffOptions = GitDiffOptions(
+            context: Self.diffContext(from: defaults),
+            ignoresWhitespace: defaults.bool(forKey: Self.ignoresWhitespaceKey)
+        )
+        self.diffLayout = DiffLayoutMode(
+            rawValue: defaults.string(forKey: Self.diffLayoutKey) ?? ""
+        ) ?? .unified
         self.projects = (defaults.stringArray(forKey: Self.projectPathsKey) ?? [])
             .map { ProjectState(project: GitProject(rootURL: URL(fileURLWithPath: $0))) }
             .sorted { compareProjects($0.project, $1.project) }
+    }
+
+    private static func diffContext(from defaults: UserDefaults) -> GitDiffContext {
+        switch defaults.string(forKey: diffContextKey) {
+        case "lines:8": .lines(8)
+        case "lines:25": .lines(25)
+        case "whole-file": .wholeFile
+        default: .lines(3)
+        }
+    }
+
+    private func persistDiffPreferences() {
+        let context = switch diffOptions.context {
+        case .lines(8): "lines:8"
+        case .lines(25): "lines:25"
+        case .wholeFile: "whole-file"
+        default: "lines:3"
+        }
+        defaults.set(context, forKey: Self.diffContextKey)
+        defaults.set(diffOptions.ignoresWhitespace, forKey: Self.ignoresWhitespaceKey)
+        defaults.set(diffLayout.rawValue, forKey: Self.diffLayoutKey)
     }
 
     var selectedWorktree: GitWorktreeSnapshot? {

@@ -90,8 +90,9 @@ last_activity_at = max(
 
 M1 实现 Working + Staged 以及 History：提交列表（作者、日期、短 hash、
 ref 徽标、merge 标记）与提交内文件级 diff，merge commit 按 first-parent
-展开。Review 使用连续文件流，支持 split / unified、单文件 focus、分组折叠、
-吸顶文件头、行内差异和轻量语法高亮。Diff 正文使用 AppKit `NSTableView`
+展开。Review 使用连续文件流，支持 split / unified、分组折叠、分组与文件双层
+吸顶、行内差异和轻量语法高亮。Diff 布局、上下文行数与忽略空白由全局
+Settings 管理并跨启动保存。Diff 正文使用 AppKit `NSTableView`
 复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局和无障碍节点。
 后续补充：
 

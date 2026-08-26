@@ -27,5 +27,10 @@ struct AgentGitApp: App {
                 .keyboardShortcut("r", modifiers: .command)
             }
         }
+
+        Settings {
+            AgentGitSettingsView()
+                .environment(model)
+        }
     }
 }

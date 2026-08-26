@@ -126,6 +126,40 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(scrollView.contentView.bounds.minY, 0, accuracy: 0.5)
     }
 
+    func testGroupAndFileHeadersStickAsOneStack() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 80)
+        scrollView.display(groups: [makeGroup()], layout: .sideBySide, scrollTarget: nil)
+        scrollView.layoutSubtreeIfNeeded()
+
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 60))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        scrollView.layoutSubtreeIfNeeded()
+
+        let sticky = try XCTUnwrap(
+            descendants(of: scrollView).first {
+                String(reflecting: type(of: $0)).contains("DiffStickyClipView")
+            }
+        )
+        XCTAssertFalse(sticky.isHidden)
+        XCTAssertEqual(sticky.frame.height, 68, accuracy: 0.5)
+
+        let visibleHeaders = sticky.subviews
+            .filter { !$0.isHidden }
+            .sorted { $0.frame.minY < $1.frame.minY }
+        XCTAssertEqual(visibleHeaders.count, 2)
+        XCTAssertTrue(visibleHeaders.allSatisfy(\.clipsToBounds))
+        XCTAssertEqual(visibleHeaders[0].frame.minY, 0, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[0].frame.height, 30, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.minY, 30, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.height, 38, accuracy: 0.5)
+
+        let labels = descendants(of: sticky)
+            .compactMap { ($0 as? NSTextField)?.stringValue }
+        XCTAssertTrue(labels.contains("WORKING  ·  1"))
+        XCTAssertTrue(labels.contains { $0.contains("Sample.swift") })
+    }
+
     func testVisibleUnifiedCellCombinesSyntaxAndInlineHighlighting() throws {
         let scrollView = makeScrollView()
         scrollView.display(groups: [makeGroup()], layout: .unified, scrollTarget: nil)
@@ -260,6 +294,10 @@ final class DiffStackViewTests: XCTestCase {
             )
         )
         return try XCTUnwrap(NSEvent(cgEvent: event))
+    }
+
+    private func descendants(of view: NSView) -> [NSView] {
+        view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
 
     private func makeGroup() -> DiffStackGroup {

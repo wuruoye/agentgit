@@ -98,9 +98,16 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     private struct FileSection {
+        let groupID: String
         let headerRow: Int
         let endRow: Int
         let file: DiffStackFile
+    }
+
+    private struct GroupSection {
+        let headerRow: Int
+        let endRow: Int
+        let group: DiffStackGroup
     }
 
     var onToggleFile: ((String) -> Void)?
@@ -111,11 +118,15 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private let tableView = DiffCopyingTableView()
     private let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
     private let stickyClip = DiffStickyClipView()
-    private let stickyHeader = DiffFileCellView()
+    private let stickyGroupHeader = DiffGroupCellView()
+    private let stickyFileHeader = DiffFileCellView()
+    private var stickyGroupID: String?
     private var stickyFileID: String?
     private var isUpdatingSticky = false
     private var rows: [DiffStackRow] = []
+    private var groupSections: [GroupSection] = []
     private var fileSections: [FileSection] = []
+    private var groupRowIndexByID: [String: Int] = [:]
     private var fileRowIndexByID: [String: Int] = [:]
     private var renderToken: DiffStackToken?
     private var appliedScrollTarget: String?
@@ -202,6 +213,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             rebuildRows(groups: groups, layout: layout)
             updateColumnWidth()
             tableView.reloadData()
+            stickyGroupID = nil
             stickyFileID = nil
             restorePendingOffsetIfPossible()
             updateStickyHeader()
@@ -228,7 +240,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         switch rows[row] {
         case let .group(group, count):
             let cell = reusableCell(DiffGroupCellView.self, identifier: DiffGroupCellView.identifier)
-            cell.update(title: group.title ?? "", count: count, isExpanded: group.isExpanded)
+            cell.update(group: group, count: count)
             return cell
         case let .file(file):
             let cell = reusableCell(DiffFileCellView.self, identifier: DiffFileCellView.identifier)
@@ -290,32 +302,64 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     private func rebuildRows(groups: [DiffStackGroup], layout: DiffLayoutMode) {
         var built: [DiffStackRow] = []
-        var sections: [FileSection] = []
-        var indexByID: [String: Int] = [:]
+        var builtGroupSections: [GroupSection] = []
+        var builtFileSections: [FileSection] = []
+        var groupIndexByID: [String: Int] = [:]
+        var fileIndexByID: [String: Int] = [:]
         built.reserveCapacity(Self.estimatedRowCount(for: groups))
 
         for group in groups {
+            let groupHeaderRow: Int?
             if group.title != nil {
+                groupHeaderRow = built.count
+                groupIndexByID[group.id] = built.count
                 built.append(.group(group, count: group.files.count))
+            } else {
+                groupHeaderRow = nil
             }
             guard !group.files.isEmpty else {
                 built.append(.note(group.emptyMessage))
+                if let groupHeaderRow {
+                    builtGroupSections.append(
+                        GroupSection(
+                            headerRow: groupHeaderRow,
+                            endRow: built.count,
+                            group: group
+                        )
+                    )
+                }
                 continue
             }
             for file in group.files {
                 let headerRow = built.count
-                indexByID[file.id] = headerRow
+                fileIndexByID[file.id] = headerRow
                 built.append(.file(file))
                 appendContent(of: file, layout: layout, into: &built)
-                sections.append(
-                    FileSection(headerRow: headerRow, endRow: built.count, file: file)
+                builtFileSections.append(
+                    FileSection(
+                        groupID: group.id,
+                        headerRow: headerRow,
+                        endRow: built.count,
+                        file: file
+                    )
+                )
+            }
+            if let groupHeaderRow {
+                builtGroupSections.append(
+                    GroupSection(
+                        headerRow: groupHeaderRow,
+                        endRow: built.count,
+                        group: group
+                    )
                 )
             }
         }
 
         rows = built
-        fileSections = sections
-        fileRowIndexByID = indexByID
+        groupSections = builtGroupSections
+        fileSections = builtFileSections
+        groupRowIndexByID = groupIndexByID
+        fileRowIndexByID = fileIndexByID
     }
 
     private func appendContent(
@@ -439,17 +483,22 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         documentView = tableView
 
-        // 文件头吸顶。浮动容器本身不裁剪，所以外面再套一层自己裁剪的 clip view，
-        // 被下一个文件顶出去的部分才不会画到工具条上。
+        // 分组头与文件头共用一个裁剪容器，下一组 / 文件会自然把当前头推走。
         stickyClip.isHidden = true
-        stickyClip.addSubview(stickyHeader)
-        stickyHeader.clickHandler = { [weak self] fileID in
+        stickyGroupHeader.clipsToBounds = true
+        stickyFileHeader.clipsToBounds = true
+        stickyClip.addSubview(stickyFileHeader)
+        stickyClip.addSubview(stickyGroupHeader)
+        stickyGroupHeader.clickHandler = { [weak self] groupID in
+            self?.handleStickyGroupClick(groupID: groupID)
+        }
+        stickyFileHeader.clickHandler = { [weak self] fileID in
             self?.handleStickyClick(fileID: fileID)
         }
-        stickyHeader.actionHandler = { [weak self] fileID, action in
+        stickyFileHeader.actionHandler = { [weak self] fileID, action in
             self?.onFileAction?(fileID, action)
         }
-        addFloatingSubview(stickyClip, for: .vertical)
+        addSubview(stickyClip, positioned: .above, relativeTo: contentView)
 
         contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
@@ -476,65 +525,111 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         defer { isUpdatingSticky = false }
 
         let top = contentView.bounds.minY
-        guard !fileSections.isEmpty, let section = currentSection(above: top) else {
-            hideStickyHeader()
-            return
+        let groupSection = currentGroupSection(above: top)
+        let groupVisibleHeight = stickyGroupVisibleHeight(
+            for: groupSection,
+            top: top
+        )
+        let fileTop = top + groupVisibleHeight
+        var fileSection = currentFileSection(above: fileTop)
+        if let groupSection {
+            if fileSection?.groupID != groupSection.group.id {
+                fileSection = nil
+            }
+        } else if !groupSections.isEmpty {
+            fileSection = nil
         }
-        // 折叠的文件没有正文需要保持上下文，钉住只会盖住它自己那一行。
-        guard section.endRow > section.headerRow + 1 else {
-            hideStickyHeader()
-            return
-        }
-        // 真实文件头还完整可见时不需要替身。
-        guard tableView.rect(ofRow: section.headerRow).minY < top else {
-            hideStickyHeader()
+        let fileVisibleHeight = stickyFileVisibleHeight(
+            for: fileSection,
+            top: fileTop
+        )
+        let totalVisibleHeight = groupVisibleHeight + fileVisibleHeight
+        guard totalVisibleHeight > 1 else {
+            hideStickyHeaders()
             return
         }
 
-        let sectionEnd = section.endRow < rows.count
-            ? tableView.rect(ofRow: section.endRow).minY
-            : tableView.bounds.maxY
-        let visibleHeight = min(Metrics.fileHeight, sectionEnd - top)
-        guard visibleHeight > 1 else {
-            hideStickyHeader()
-            return
+        if groupVisibleHeight > 1, let groupSection {
+            if stickyGroupID != groupSection.group.id {
+                stickyGroupID = groupSection.group.id
+                stickyGroupHeader.update(
+                    group: groupSection.group,
+                    count: groupSection.group.files.count
+                )
+            }
+            stickyGroupHeader.isHidden = false
+        } else {
+            stickyGroupID = nil
+            stickyGroupHeader.isHidden = true
         }
 
-        if stickyFileID != section.file.id {
-            stickyFileID = section.file.id
-            stickyHeader.update(file: section.file)
+        if fileVisibleHeight > 1, let fileSection {
+            if stickyFileID != fileSection.file.id {
+                stickyFileID = fileSection.file.id
+                stickyFileHeader.update(file: fileSection.file)
+            }
+            stickyFileHeader.isHidden = false
+        } else {
+            stickyFileID = nil
+            stickyFileHeader.isHidden = true
         }
 
-        // 浮动容器铺满 viewport，文件头则和 inset table 的列对齐。
         let clipFrame = NSRect(
             x: contentView.frame.minX,
             y: contentView.frame.minY,
             width: contentView.frame.width,
-            height: visibleHeight
+            height: totalVisibleHeight
         )
         if stickyClip.frame != clipFrame {
             stickyClip.frame = clipFrame
         }
-        // 顶出去时头部整体上移，露出的是它的下半截，和真实文件头接得上。
         let horizontalInset = max(0, (clipFrame.width - tableColumn.width) / 2)
-        let headerFrame = NSRect(
+        let groupFrame = NSRect(
             x: horizontalInset,
-            y: visibleHeight - Metrics.fileHeight,
+            y: groupVisibleHeight - Metrics.groupHeight,
+            width: tableColumn.width,
+            height: Metrics.groupHeight
+        )
+        if stickyGroupHeader.frame != groupFrame {
+            stickyGroupHeader.frame = groupFrame
+        }
+        let fileFrame = NSRect(
+            x: horizontalInset,
+            y: groupVisibleHeight + fileVisibleHeight - Metrics.fileHeight,
             width: tableColumn.width,
             height: Metrics.fileHeight
         )
-        if stickyHeader.frame != headerFrame {
-            stickyHeader.frame = headerFrame
+        if stickyFileHeader.frame != fileFrame {
+            stickyFileHeader.frame = fileFrame
         }
         stickyClip.isHidden = false
     }
 
-    private func hideStickyHeader() {
+    private func hideStickyHeaders() {
+        stickyGroupID = nil
         stickyFileID = nil
+        stickyGroupHeader.isHidden = true
+        stickyFileHeader.isHidden = true
         stickyClip.isHidden = true
     }
 
-    private func currentSection(above top: CGFloat) -> FileSection? {
+    private func currentGroupSection(above top: CGFloat) -> GroupSection? {
+        var low = 0
+        var high = groupSections.count - 1
+        var found: GroupSection?
+        while low <= high {
+            let mid = (low + high) / 2
+            if tableView.rect(ofRow: groupSections[mid].headerRow).minY <= top {
+                found = groupSections[mid]
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return found
+    }
+
+    private func currentFileSection(above top: CGFloat) -> FileSection? {
         var low = 0
         var high = fileSections.count - 1
         var found: FileSection?
@@ -548,6 +643,50 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
         }
         return found
+    }
+
+    private func stickyGroupVisibleHeight(
+        for section: GroupSection?,
+        top: CGFloat
+    ) -> CGFloat {
+        guard let section,
+              tableView.rect(ofRow: section.headerRow).minY < top else {
+            return 0
+        }
+        return max(
+            0,
+            min(Metrics.groupHeight, sectionEndY(section.endRow) - top)
+        )
+    }
+
+    private func stickyFileVisibleHeight(
+        for section: FileSection?,
+        top: CGFloat
+    ) -> CGFloat {
+        guard let section,
+              section.endRow > section.headerRow + 1,
+              tableView.rect(ofRow: section.headerRow).minY < top else {
+            return 0
+        }
+        return max(
+            0,
+            min(Metrics.fileHeight, sectionEndY(section.endRow) - top)
+        )
+    }
+
+    private func sectionEndY(_ endRow: Int) -> CGFloat {
+        endRow < rows.count
+            ? tableView.rect(ofRow: endRow).minY
+            : tableView.bounds.maxY
+    }
+
+    private func handleStickyGroupClick(groupID: String) {
+        if let row = groupRowIndexByID[groupID] {
+            tableView.layoutSubtreeIfNeeded()
+            contentView.scroll(to: NSPoint(x: 0, y: tableView.rect(ofRow: row).minY))
+            reflectScrolledClipView(contentView)
+        }
+        onToggleGroup?(groupID)
     }
 
     private func handleStickyClick(fileID: String) {
@@ -951,6 +1090,8 @@ private final class DiffStickyClipView: NSView {
 private final class DiffGroupCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-group")
 
+    var clickHandler: ((String) -> Void)?
+
     private let chevron = makeDisclosureImageView()
     private let label = DiffTextField(
         font: .systemFont(ofSize: 11, weight: .semibold),
@@ -958,6 +1099,7 @@ private final class DiffGroupCellView: NSTableCellView {
         alignment: .left,
         selectable: false
     )
+    private var groupID = ""
 
     override var isFlipped: Bool { true }
 
@@ -969,6 +1111,14 @@ private final class DiffGroupCellView: NSTableCellView {
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let clickHandler else {
+            super.mouseDown(with: event)
+            return
+        }
+        clickHandler(groupID)
     }
 
     override func layout() {
@@ -983,10 +1133,15 @@ private final class DiffGroupCellView: NSTableCellView {
         super.draw(dirtyRect)
     }
 
-    func update(title: String, count: Int, isExpanded: Bool) {
-        chevron.image = disclosureImage(isExpanded: isExpanded)
-        label.stringValue = "\(title.uppercased())  ·  \(count)"
-        toolTip = isExpanded ? "Collapse all \(count) files" : "Expand all \(count) files"
+    func update(group: DiffStackGroup, count: Int) {
+        groupID = group.id
+        chevron.image = disclosureImage(isExpanded: group.isExpanded)
+        label.stringValue = "\((group.title ?? "").uppercased())  ·  \(count)"
+        toolTip = group.isExpanded
+            ? "Collapse all \(count) files"
+            : "Expand all \(count) files"
+        needsLayout = true
+        needsDisplay = true
     }
 }
 

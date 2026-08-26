@@ -41,7 +41,6 @@ struct ReviewState {
     var collapsedFileIDs: Set<String> = []
     var focusedFileID: String?
     var filterText = ""
-    var isFocusedOnly = false
 }
 
 struct ReviewStateKey: Hashable {
