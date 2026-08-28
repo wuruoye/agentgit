@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var projectsShowingAllWorktrees: Set<GitProject.ID> = []
     @State private var sidebarFilterText = ""
+    @State private var projectDropTargetID: GitProject.ID?
 
     init(initialSidebarFilterText: String = "") {
         _sidebarFilterText = State(initialValue: initialSidebarFilterText)
@@ -15,12 +16,7 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection: sidebarSelection) {
                 ForEach(filteredProjects) { projectState in
-                    Section {
-                        if !model.collapsedProjectIDs.contains(projectState.id)
-                            || !sidebarFilterQuery.isEmpty {
-                            projectContents(projectState)
-                        }
-                    } header: {
+                    Group {
                         ProjectHeader(
                             projectState: projectState,
                             isCollapsed: model.collapsedProjectIDs.contains(projectState.id),
@@ -28,83 +24,60 @@ struct ContentView: View {
                                 model.toggleProjectCollapsed(id: projectState.id)
                             }
                         )
-                            .tag(SidebarSelection.project(projectState.id))
-                            .selectionDisabled()
-                            .frame(minHeight: 22)
-                            .draggable(projectState.id) {
-                                Label(
-                                    projectState.project.displayName,
-                                    systemImage: "folder"
+                        .tag(SidebarSelection.project(projectState.id))
+                        .selectionDisabled()
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(
+                                    projectDropTargetID == projectState.id
+                                        ? Color(nsColor: AgentGitPalette.sidebarSelection)
+                                        : Color(nsColor: AgentGitPalette.sidebarGroupHeader)
                                 )
-                            }
-                            .dropDestination(for: String.self) {
-                                projectIDs,
-                                location in
-                                guard let projectID = projectIDs.first else {
+                        )
+                        .listRowInsets(
+                            EdgeInsets(top: 6, leading: 6, bottom: 2, trailing: 6)
+                        )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .draggable(projectState.id) {
+                            Label(
+                                projectState.project.displayName,
+                                systemImage: "folder"
+                            )
+                        }
+                        .dropDestination(
+                            for: String.self,
+                            action: { projectIDs, location in
+                                projectDropTargetID = nil
+                                guard let projectID = projectIDs.first,
+                                      model.projects.contains(where: {
+                                          $0.id == projectID
+                                      }) else {
                                     return false
                                 }
                                 model.moveProject(
                                     id: projectID,
                                     relativeTo: projectState.id,
-                                    placeAfterTarget: location.y >= 11
+                                    placeAfterTarget: location.y >= 15
                                 )
                                 return true
-                            }
-                            .contextMenu {
-                                let projectIndex = model.projects.firstIndex(where: {
-                                    $0.id == projectState.id
-                                })
-                                Button(
-                                    model.collapsedProjectIDs.contains(projectState.id)
-                                        ? "Expand Project"
-                                        : "Collapse Project"
-                                ) {
-                                    model.toggleProjectCollapsed(id: projectState.id)
-                                }
-                                Divider()
-                                Button("Refresh") {
-                                    Task {
-                                        await model.refreshProject(id: projectState.id)
-                                    }
-                                }
-                                Button("Reveal in Finder") {
-                                    revealInFinder(projectState.project.rootURL)
-                                }
-                                Button("Copy Path") {
-                                    copyToPasteboard(projectState.project.rootURL.path)
-                                }
-                                Divider()
-                                Button("Move Up") {
-                                    guard let projectIndex, projectIndex > 0 else {
-                                        return
-                                    }
-                                    model.moveProject(
-                                        id: projectState.id,
-                                        relativeTo: model.projects[projectIndex - 1].id,
-                                        placeAfterTarget: false
-                                    )
-                                }
-                                .disabled(projectIndex == nil || projectIndex == 0)
-                                Button("Move Down") {
-                                    guard let projectIndex,
-                                          projectIndex + 1 < model.projects.count else {
-                                        return
-                                    }
-                                    model.moveProject(
-                                        id: projectState.id,
-                                        relativeTo: model.projects[projectIndex + 1].id,
-                                        placeAfterTarget: true
-                                    )
-                                }
-                                .disabled(
-                                    projectIndex == nil
-                                        || projectIndex == model.projects.count - 1
-                                )
-                                Divider()
-                                Button("Remove Project", role: .destructive) {
-                                    model.removeProject(id: projectState.id)
+                            },
+                            isTargeted: { isTargeted in
+                                if isTargeted {
+                                    projectDropTargetID = projectState.id
+                                } else if projectDropTargetID == projectState.id {
+                                    projectDropTargetID = nil
                                 }
                             }
+                        )
+                        .contextMenu {
+                            projectContextMenu(projectState)
+                        }
+
+                        if !model.collapsedProjectIDs.contains(projectState.id)
+                            || !sidebarFilterQuery.isEmpty {
+                            projectContents(projectState)
+                        }
                     }
                 }
             }
@@ -122,6 +95,9 @@ struct ContentView: View {
                 prompt: "Filter projects and worktrees"
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 260)
+            .scrollContentBackground(.hidden)
+            .background(Color(nsColor: AgentGitPalette.sidebarBackground))
+            .tint(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
             .toolbar {
                 ToolbarItemGroup {
                     Button {
@@ -169,6 +145,7 @@ struct ContentView: View {
                 }
             }
         }
+        .navigationSplitViewStyle(.balanced)
         .task {
             model.setApplicationActive(NSApp.isActive)
             await model.loadProjectsIfNeeded()
@@ -302,6 +279,63 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func projectContextMenu(_ projectState: ProjectState) -> some View {
+        let projectIndex = model.projects.firstIndex(where: {
+            $0.id == projectState.id
+        })
+        Button(
+            model.collapsedProjectIDs.contains(projectState.id)
+                ? "Expand Project"
+                : "Collapse Project"
+        ) {
+            model.toggleProjectCollapsed(id: projectState.id)
+        }
+        Divider()
+        Button("Refresh") {
+            Task {
+                await model.refreshProject(id: projectState.id)
+            }
+        }
+        Button("Reveal in Finder") {
+            revealInFinder(projectState.project.rootURL)
+        }
+        Button("Copy Path") {
+            copyToPasteboard(projectState.project.rootURL.path)
+        }
+        Divider()
+        Button("Move Up") {
+            guard let projectIndex, projectIndex > 0 else {
+                return
+            }
+            model.moveProject(
+                id: projectState.id,
+                relativeTo: model.projects[projectIndex - 1].id,
+                placeAfterTarget: false
+            )
+        }
+        .disabled(projectIndex == nil || projectIndex == 0)
+        Button("Move Down") {
+            guard let projectIndex,
+                  projectIndex + 1 < model.projects.count else {
+                return
+            }
+            model.moveProject(
+                id: projectState.id,
+                relativeTo: model.projects[projectIndex + 1].id,
+                placeAfterTarget: true
+            )
+        }
+        .disabled(
+            projectIndex == nil
+                || projectIndex == model.projects.count - 1
+        )
+        Divider()
+        Button("Remove Project", role: .destructive) {
+            model.removeProject(id: projectState.id)
+        }
+    }
+
+    @ViewBuilder
     private func projectContents(_ state: ProjectState) -> some View {
         if state.isLoading, state.snapshot == nil {
             HStack(spacing: 8) {
@@ -359,8 +393,16 @@ struct ContentView: View {
                 )
             }
             ForEach(presentation.visibleWorktrees) { worktree in
-                WorktreeRow(snapshot: worktree)
+                WorktreeRow(
+                    snapshot: worktree,
+                    isSelected: model.selectedWorktreeID == worktree.id
+                )
                     .tag(SidebarSelection.worktree(worktree.id))
+                    .listRowInsets(
+                        EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
+                    )
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                     .contextMenu {
                         Button("Refresh Worktree") {
                             Task {
@@ -399,8 +441,8 @@ struct ContentView: View {
             if presentation.hiddenWorktreeCount > 0 {
                 ProjectWorktreeDisclosureRow(
                     title: projectsShowingAllWorktrees.contains(state.id)
-                        ? "Show Fewer Worktrees"
-                        : "Show " + countedLabel(
+                        ? "Show Recent Worktrees"
+                        : countedLabel(
                             presentation.hiddenWorktreeCount,
                             singular: "More Worktree",
                             plural: "More Worktrees"
@@ -415,6 +457,11 @@ struct ContentView: View {
                 }
                 .tag(SidebarSelection.worktreeDisclosure(state.id))
                 .selectionDisabled()
+                .listRowInsets(
+                    EdgeInsets(top: 0, leading: 8, bottom: 2, trailing: 8)
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             }
         }
     }
@@ -542,14 +589,15 @@ func projectWorktreePresentation(
     now: Date
 ) -> ProjectWorktreePresentation {
     let recentCutoff = now.addingTimeInterval(-24 * 60 * 60)
+    let orderedWorktrees = snapshot.worktrees.sorted(by: compareWorktreeSnapshots)
     var defaultWorktrees = Array(
-        snapshot.worktrees.filter { worktree in
+        orderedWorktrees.filter { worktree in
             worktree.status.changedFileCount > 0
                 || !worktree.diffStat.isEmpty
                 || worktree.lastActivityAt >= recentCutoff
         }.prefix(4)
     )
-    if let selected = snapshot.worktrees.first(where: { $0.id == selectedWorktreeID }),
+    if let selected = orderedWorktrees.first(where: { $0.id == selectedWorktreeID }),
        !defaultWorktrees.contains(where: { $0.id == selected.id }) {
         if defaultWorktrees.count == 4 {
             defaultWorktrees.removeLast()
@@ -557,8 +605,8 @@ func projectWorktreePresentation(
         defaultWorktrees.append(selected)
     }
     return ProjectWorktreePresentation(
-        visibleWorktrees: showsAll ? snapshot.worktrees : defaultWorktrees,
-        hiddenWorktreeCount: snapshot.worktrees.count - defaultWorktrees.count
+        visibleWorktrees: showsAll ? orderedWorktrees : defaultWorktrees,
+        hiddenWorktreeCount: orderedWorktrees.count - defaultWorktrees.count
     )
 }
 
@@ -571,14 +619,16 @@ private struct ProjectWorktreeDisclosureRow: View {
         Button(action: action) {
             Label(
                 title,
-                systemImage: isExpanded ? "chevron.up" : "chevron.down"
+                systemImage: isExpanded ? "chevron.up" : "chevron.right"
             )
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
         }
         .buttonStyle(.plain)
+        .padding(.leading, 10)
     }
 }
 
@@ -589,12 +639,17 @@ struct ProjectHeader: View {
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 5) {
+            HStack(spacing: 7) {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 9)
+                Image(systemName: "folder.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Text(projectState.project.displayName)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 if projectState.errorMessage != nil {
                     Image(
@@ -619,11 +674,14 @@ struct ProjectHeader: View {
                 Spacer(minLength: 4)
                 if let count = projectState.snapshot?.worktrees.count {
                     Text("\(count)")
+                        .font(.caption2.monospacedDigit())
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
                 }
             }
             .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .frame(height: 28)
         }
         .buttonStyle(.plain)
         .help(projectHeaderHelpText(projectState))
@@ -646,42 +704,62 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 
 struct WorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
+    var isSelected = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: iconName)
-                .foregroundStyle(iconColor)
-                .frame(width: 16)
-                .accessibilityLabel(issueAccessibilityLabel)
+        HStack(spacing: 7) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(statusIndicatorColor)
+                .frame(width: 3, height: 27)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(snapshot.worktree.displayName)
-                        .lineLimit(1)
-                    if snapshot.status.changedFileCount > 0 {
-                        Text("\(snapshot.status.changedFileCount)")
-                            .font(.caption2.monospacedDigit())
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.orange.opacity(0.16), in: Capsule())
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    if snapshot.errorMessage != nil {
+                        Image(systemName: issueIconName)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(issueIconColor)
+                    } else if snapshot.worktree.isDetached {
+                        Image(systemName: "link")
+                            .font(.caption2)
+                            .foregroundStyle(secondaryForeground)
                     }
+                    Text(snapshot.worktree.displayName)
+                        .font(.callout.weight(isSelected ? .semibold : .medium))
+                        .foregroundStyle(primaryForeground)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
                     Spacer(minLength: 4)
 
                     if !snapshot.diffStat.isEmpty {
                         HStack(spacing: 4) {
                             Text("+\(snapshot.diffStat.addedLineCount)")
-                                .foregroundStyle(.green)
+                                .foregroundStyle(additionForeground)
                             Text("−\(snapshot.diffStat.deletedLineCount)")
-                                .foregroundStyle(.red)
+                                .foregroundStyle(deletionForeground)
                         }
                         .font(.caption2.monospacedDigit().weight(.medium))
                     }
                 }
 
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
+                    Text(snapshot.worktree.rootURL.lastPathComponent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if snapshot.status.changedFileCount > 0 {
+                        metadataSeparator
+                        Text(
+                            countedLabel(
+                                snapshot.status.changedFileCount,
+                                singular: "file",
+                                plural: "files"
+                            )
+                        )
+                        .monospacedDigit()
+                    }
                     if let branch = snapshot.status.branch, !branch.isSynced {
                         let description = branchTrackingDescription(branch) ?? ""
+                        metadataSeparator
                         HStack(spacing: 3) {
                             if branch.aheadCount > 0 {
                                 Text("↑\(branch.aheadCount)")
@@ -690,59 +768,101 @@ struct WorktreeRow: View {
                                 Text("↓\(branch.behindCount)")
                             }
                         }
-                        .font(.caption.monospacedDigit().weight(.medium))
-                        .foregroundStyle(.blue)
+                        .monospacedDigit()
                         .help(description)
                         .accessibilityLabel(description)
-                        Text("·")
                     }
-
-                    Text(snapshot.worktree.rootURL.lastPathComponent)
-                        .lineLimit(1)
-                    if let shortHeadOID = snapshot.worktree.shortHeadOID {
-                        Text("·")
-                        Text(shortHeadOID)
-                            .font(.caption.monospaced())
-                    }
-                    Text("·")
+                    Spacer(minLength: 4)
                     if snapshot.lastActivityAt == .distantPast {
-                        Text("Unknown activity")
+                        Text("Unknown")
                     } else {
                         Text(compactRelativeTime(snapshot.lastActivityAt))
                             .monospacedDigit()
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption2)
+                .foregroundStyle(secondaryForeground)
 
             }
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
         .help(worktreeRowHelpText(snapshot))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(worktreeAccessibilityLabel)
         .accessibilityHint(worktreeRowHelpText(snapshot))
     }
 
-    private var iconName: String {
-        if snapshot.errorMessage != nil {
-            return snapshot.hasUsableState
-                ? "exclamationmark.triangle.fill"
-                : "xmark.octagon.fill"
-        }
-        return snapshot.worktree.isDetached ? "link" : "arrow.triangle.branch"
+    @ViewBuilder
+    private var metadataSeparator: some View {
+        Text("·")
     }
 
-    private var iconColor: Color {
+    private var primaryForeground: Color {
+        .primary
+    }
+
+    private var secondaryForeground: Color {
+        .secondary
+    }
+
+    private var additionForeground: Color {
+        isSelected
+            ? .primary.opacity(0.82)
+            : Color(nsColor: AgentGitPalette.sidebarAdditionText)
+    }
+
+    private var deletionForeground: Color {
+        isSelected
+            ? .primary.opacity(0.82)
+            : Color(nsColor: AgentGitPalette.sidebarDeletionText)
+    }
+
+    private var statusIndicatorColor: Color {
         if snapshot.errorMessage != nil {
             return snapshot.hasUsableState ? .orange : .red
         }
-        return snapshot.status.changedFileCount == 0 ? .secondary : .orange
+        if snapshot.status.changedFileCount > 0 || !snapshot.diffStat.isEmpty {
+            return isSelected
+                ? .primary.opacity(0.72)
+                : Color(nsColor: AgentGitPalette.sidebarDirtyIndicator)
+        }
+        return isSelected
+            ? .primary.opacity(0.28)
+            : Color(nsColor: AgentGitPalette.separator).opacity(0.55)
     }
 
-    private var issueAccessibilityLabel: String {
-        guard snapshot.errorMessage != nil else {
-            return snapshot.worktree.isDetached ? "Detached HEAD" : "Git branch"
+    private var issueIconName: String {
+        snapshot.hasUsableState
+            ? "exclamationmark.triangle.fill"
+            : "xmark.octagon.fill"
+    }
+
+    private var issueIconColor: Color {
+        snapshot.hasUsableState ? .orange : .red
+    }
+
+    private var worktreeAccessibilityLabel: String {
+        var components = [snapshot.worktree.displayName]
+        if snapshot.worktree.isDetached {
+            components.append("Detached HEAD")
         }
-        return snapshot.hasUsableState ? "Refresh warning" : "Repository unavailable"
+        if snapshot.status.changedFileCount > 0 {
+            components.append(
+                countedLabel(
+                    snapshot.status.changedFileCount,
+                    singular: "changed file",
+                    plural: "changed files"
+                )
+            )
+        }
+        if !snapshot.diffStat.isEmpty {
+            components.append(
+                "+\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount)"
+            )
+        }
+        components.append(snapshot.worktree.rootURL.lastPathComponent)
+        return components.joined(separator: ", ")
     }
 }
 

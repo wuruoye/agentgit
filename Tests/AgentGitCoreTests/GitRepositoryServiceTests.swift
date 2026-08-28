@@ -2109,6 +2109,57 @@ final class GitRepositoryServiceTests: XCTestCase {
         }
     }
 
+    func testPullRestoresConfiguredTrackingRefWhenMissing() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-pull-missing-ref-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        let remote = container.appendingPathComponent("remote.git")
+        defer { try? FileManager.default.removeItem(at: container) }
+        try await makeRepository(at: repository)
+
+        let runner = GitCommandRunner()
+        _ = try await runner.run(
+            arguments: ["init", "--bare", "--initial-branch=main", remote.path],
+            workingDirectory: container
+        )
+        _ = try await runner.run(
+            arguments: ["remote", "add", "origin", remote.path],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["push", "origin", "main"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["config", "branch.main.remote", "origin"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["config", "branch.main.merge", "refs/heads/main"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["update-ref", "-d", "refs/remotes/origin/main"],
+            workingDirectory: repository
+        )
+
+        let service = GitRepositoryService()
+        let project = try await service.loadProject(at: repository)
+        let snapshot = try XCTUnwrap(project.worktrees.first)
+        XCTAssertEqual(snapshot.status.branch?.upstreamRef, "origin/main")
+        XCTAssertNotNil(snapshot.status.branch?.upstreamError)
+
+        try await service.performRemoteAction(.pull, worktree: snapshot.worktree)
+
+        let trackingHead = try await revision(
+            "refs/remotes/origin/main",
+            in: repository,
+            using: runner
+        )
+        let localHead = try await revision("HEAD", in: repository, using: runner)
+        XCTAssertEqual(trackingHead, localHead)
+    }
+
     func testRemoteActionsPreserveDivergedLocalAndRemoteHeads() async throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent(

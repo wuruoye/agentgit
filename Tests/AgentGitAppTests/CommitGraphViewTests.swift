@@ -82,6 +82,27 @@ final class CommitGraphViewTests: XCTestCase {
         XCTAssertEqual(layout.displayWidth, 50)
     }
 
+    func testAppendingTenThousandCommitHistoryWithinOneSecond() {
+        let commits = (0..<10_000).map { index in
+            commit(
+                "commit-\(index)",
+                parents: index + 1 < 10_000 ? ["commit-\(index + 1)"] : []
+            )
+        }
+        var layout = CommitGraphLayout(commits: [])
+
+        let elapsed = ContinuousClock().measure {
+            for offset in stride(from: 0, to: commits.count, by: 100) {
+                layout = layout.appending(
+                    Array(commits[offset..<min(offset + 100, commits.count)])
+                )
+            }
+        }
+
+        XCTAssertEqual(layout.rowsByCommitID.count, commits.count)
+        XCTAssertLessThan(elapsed, .seconds(1))
+    }
+
     private func mergeHistory() -> [GitCommit] {
         [
             commit("merge", parents: ["main", "topic"], refs: ["main"]),

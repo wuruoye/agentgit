@@ -11,21 +11,6 @@ struct WorktreeReviewView: View {
             for: snapshot.id
         )
         let startupContent = model.startupReviewContent(for: snapshot)
-        let restoresInitialContext = if initialNavigationState.context == .pending {
-            true
-        } else if GitHistorySearchQuery(initialNavigationState.historyFilter) != nil {
-            false
-        } else {
-            startupContent?.historyPage.map {
-                restoredHistorySelection(
-                    initialNavigationState,
-                    commits: $0.commits
-                ) != nil
-            } ?? false
-        }
-        let initialStateContext = restoresInitialContext
-            ? initialNavigationState.context
-            : .pending
         IntegratedReviewWorkspace(
             snapshot: snapshot,
             startupContent: startupContent,
@@ -36,7 +21,7 @@ struct WorktreeReviewView: View {
             initialReviewState: model.reviewStates.state(
                 for: ReviewStateKey(
                     worktreeID: snapshot.id,
-                    context: initialStateContext
+                    context: initialNavigationState.context
                 )
             )
         )
@@ -53,6 +38,10 @@ struct ReviewCommandActions {
     let focusFilter: () -> Void
     let showCommits: () -> Void
     let showFiles: () -> Void
+    let navigatorDefaultActionTitle: String?
+    let performNavigatorDefaultAction: () -> Void
+    let canDiscardFocusedFile: Bool
+    let requestFocusedFileDiscard: () -> Void
 }
 
 private struct ReviewCommandActionsKey: FocusedValueKey {
@@ -94,6 +83,22 @@ struct AgentGitReviewCommands: Commands {
             }
                 .keyboardShortcut(.upArrow, modifiers: .command)
                 .disabled(actions == nil)
+
+            Divider()
+
+            Button(
+                actions?.navigatorDefaultActionTitle
+                    ?? "Stage or Unstage Focused File"
+            ) {
+                actions?.performNavigatorDefaultAction()
+            }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(actions?.navigatorDefaultActionTitle == nil)
+            Button("Discard Focused File") {
+                actions?.requestFocusedFileDiscard()
+            }
+                .keyboardShortcut(.delete, modifiers: [.command, .shift])
+                .disabled(actions?.canDiscardFocusedFile != true)
 
             Divider()
 

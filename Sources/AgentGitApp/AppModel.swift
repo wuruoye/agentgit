@@ -737,6 +737,7 @@ final class AppModel {
     }
 
     private func refreshProjectsMissingSnapshots() async {
+        let coverageEventID = FSEventsGetCurrentEventId()
         let missingProjects = projects
             .filter { $0.snapshot == nil }
             .sorted { lhs, rhs in
@@ -775,6 +776,13 @@ final class AppModel {
             selectedWorktreeID = firstAvailableWorktreeID()
         }
         persistSelectedWorktreeSelection()
+        let missingProjectIDs = Set(missingProjects.map(\.id))
+        if !missingProjectIDs.isEmpty,
+           missingProjectIDs.isSubset(of: completeProjectSnapshotIDs) {
+            snapshotCacheSaveTask?.cancel()
+            snapshotCacheSaveTask = nil
+            _ = await saveSnapshotCache(eventID: coverageEventID)
+        }
     }
 
     @discardableResult

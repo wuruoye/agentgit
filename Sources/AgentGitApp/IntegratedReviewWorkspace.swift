@@ -14,6 +14,9 @@ struct IntegratedReviewWorkspace: View {
     let initialSelectedCommitIDs: Set<GitCommit.ID>
     let initialPane: ReviewPane
     let initialHistoryFilter: String
+    private let snapshotWorkingItems: [IntegratedFileItem]
+    private let snapshotUntrackedItems: [IntegratedFileItem]
+    private let snapshotStagedItems: [IntegratedFileItem]
 
     @State private var commits: [GitCommit] = []
     @State private var commitGraphLayout = CommitGraphLayout(commits: [])
@@ -32,7 +35,11 @@ struct IntegratedReviewWorkspace: View {
         IntegratedFileID: SupplementalDiffFailure
     ] = [:]
     @State private var pane: ReviewPane = .commits
+    @State private var selectedReviewDocument: ReviewDocumentSelection = .summary
+    @State private var openReviewFileIDs: [String] = []
     @State private var review = ReviewState()
+    @State private var navigatorSelection: NavigatorSelection?
+    @State private var navigatorTreeCache = NavigatorTreeCache()
     @State private var commitFilterText = ""
     @State private var historyError: String?
     @State private var historyPaginationError: String?
@@ -42,6 +49,7 @@ struct IntegratedReviewWorkspace: View {
     @State private var hasMoreHistory = false
     @State private var searchedCommits: [GitCommit] = []
     @State private var loadedHistorySearchKey: HistorySearchLoadKey?
+    @State private var completedHistorySearchKey: HistorySearchLoadKey?
     @State private var historySearchNextOffset = 0
     @State private var hasMoreHistorySearchResults = false
     @State private var historySearchError: String?
@@ -72,7 +80,12 @@ struct IntegratedReviewWorkspace: View {
     @State private var navigationHistory = ReviewNavigationHistory()
     @State private var suppressedHistoryFilterValue: String?
     @State private var fileFocusedFromDiffID: String?
+    @State private var navigationPaneWidth: CGFloat = 240
+    @State private var navigationPaneDragStartWidth: CGFloat?
+    @State private var diffCommandSequence: UInt64 = 0
+    @State private var diffCommand: DiffStackCommand?
     @FocusState private var isFilterFocused: Bool
+    @FocusState private var isFilesNavigatorFocused: Bool
 
     init(
         snapshot: GitWorktreeSnapshot,
@@ -88,7 +101,16 @@ struct IntegratedReviewWorkspace: View {
         self.initialSelectedCommitIDs = initialSelectedCommitIDs
         self.initialPane = initialPane
         self.initialHistoryFilter = initialHistoryFilter
+        let pendingItems = pendingIntegratedFileItems(in: snapshot)
+        snapshotWorkingItems = pendingItems.working
+        snapshotUntrackedItems = pendingItems.untracked
+        snapshotStagedItems = pendingItems.staged
         _review = State(initialValue: initialReviewState)
+        _navigatorSelection = State(
+            initialValue: initialReviewState.focusedFileID.map(
+                NavigatorSelection.file
+            )
+        )
         _pane = State(initialValue: initialPane)
         _commitFilterText = State(initialValue: initialHistoryFilter)
         _requestedRestoredContext = State(
@@ -145,19 +167,9 @@ struct IntegratedReviewWorkspace: View {
         }
 
         if let cachedDiffs = startupContent.pendingDiffs {
-            let items = Self.pendingItems(
-                in: snapshot,
-                scope: .working,
-                matching: { $0.isUnstaged }
-            ) + Self.pendingItems(
-                in: snapshot,
-                scope: .working,
-                matching: { $0.isUntracked }
-            ) + Self.pendingItems(
-                in: snapshot,
-                scope: .staged,
-                matching: { $0.isStaged }
-            )
+            let items = snapshotWorkingItems
+                + snapshotUntrackedItems
+                + snapshotStagedItems
             let restored = integratedDiffCache(
                 diffs: cachedDiffs,
                 items: items
@@ -249,12 +261,7 @@ struct IntegratedReviewWorkspace: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                HSplitView {
-                    navigationPane
-                        .frame(minWidth: 200, idealWidth: 240, maxWidth: 300)
-                    reviewPane
-                        .frame(minWidth: 590, maxWidth: .infinity, maxHeight: .infinity)
-                }
+                workspaceSplitView
             }
         }
         .onChange(of: snapshot.id) {
@@ -270,6 +277,7 @@ struct IntegratedReviewWorkspace: View {
                 for: newKey.worktreeID
             )
             review = model.reviewStates.state(for: newKey)
+            navigatorSelection = review.focusedFileID.map(NavigatorSelection.file)
             fileFocusedFromDiffID = nil
             contextChanges = []
             contextMessage = ""
@@ -290,12 +298,35 @@ struct IntegratedReviewWorkspace: View {
             remoteOperationError = nil
             isLoadingContextDetail = false
             isLoadingDiffs = false
+            selectedReviewDocument = .summary
+            openReviewFileIDs = []
+            diffCommand = nil
+        }
+        .onChange(of: reviewFileExpansionSyncKey, initial: true) { _, key in
+            let changedFiles = synchronizeReviewFileExpansion(
+                in: &review,
+                fileIDs: key.fileIDs
+            )
+            let changedFolders = synchronizeNavigatorFolderExpansion(
+                in: &review,
+                validFolderIDs: currentNavigatorFolderIDs
+            )
+            guard changedFiles || changedFolders else {
+                return
+            }
+            model.reviewStates.save(review, for: key.stateKey)
         }
         .onChange(of: review.filterText) {
             if let focused = review.focusedFileID,
                !visibleFileItems.contains(where: { $0.id.stackID == focused }) {
-                focusFileFromNavigator(visibleFileItems.first?.id.stackID)
+                focusFileFromNavigator(
+                    visibleFileItems.first?.id.stackID,
+                    expandsFile: false
+                )
             }
+        }
+        .onChange(of: currentFileItems.map { $0.id.stackID }, initial: true) {
+            synchronizeReviewDocuments()
         }
         .onChange(of: commitFilterText) { previousFilter, currentFilter in
             handleHistoryFilterChange(
@@ -369,9 +400,91 @@ struct IntegratedReviewWorkspace: View {
                 selectPrevious: { moveFileFocus(by: -1) },
                 focusFilter: { isFilterFocused = true },
                 showCommits: { pane = .commits },
-                showFiles: { pane = .files }
+                showFiles: { pane = .files },
+                navigatorDefaultActionTitle: navigatorDefaultActionTitle,
+                performNavigatorDefaultAction: performNavigatorDefaultAction,
+                canDiscardFocusedFile: focusedFileDiscardCommand != nil,
+                requestFocusedFileDiscard: requestFocusedFileDiscard
             )
         )
+    }
+
+    private var workspaceSplitView: some View {
+        GeometryReader { proxy in
+            let width = clampedReviewNavigationPaneWidth(
+                navigationPaneWidth,
+                totalWidth: proxy.size.width
+            )
+            HStack(spacing: 0) {
+                navigationPane
+                    .frame(width: width, height: proxy.size.height)
+                    .clipped()
+                reviewSplitDivider(
+                    navigationWidth: width,
+                    totalWidth: proxy.size.width
+                )
+                reviewPane
+                    .frame(
+                        width: max(0, proxy.size.width - width - 7),
+                        height: proxy.size.height
+                    )
+                    .clipped()
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+    }
+
+    private func reviewSplitDivider(
+        navigationWidth: CGFloat,
+        totalWidth: CGFloat
+    ) -> some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 7)
+            .overlay {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: 1)
+            }
+            .contentShape(Rectangle())
+            .onHover { isHovered in
+                if isHovered {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { value in
+                        if navigationPaneDragStartWidth == nil {
+                            navigationPaneDragStartWidth = navigationWidth
+                        }
+                        navigationPaneWidth = clampedReviewNavigationPaneWidth(
+                            (navigationPaneDragStartWidth ?? navigationWidth)
+                                + value.translation.width,
+                            totalWidth: totalWidth
+                        )
+                    }
+                    .onEnded { _ in
+                        navigationPaneDragStartWidth = nil
+                    }
+            )
+            .accessibilityElement()
+            .accessibilityLabel("Review Splitter")
+            .accessibilityValue("\(Int(navigationWidth)) points")
+            .accessibilityAdjustableAction { direction in
+                let delta: CGFloat = switch direction {
+                case .increment: 20
+                case .decrement: -20
+                @unknown default: 0
+                }
+                navigationPaneWidth = clampedReviewNavigationPaneWidth(
+                    navigationWidth + delta,
+                    totalWidth: totalWidth
+                )
+            }
+            .help("Drag to resize the navigation and review panes")
     }
 
     // MARK: - Header
@@ -485,15 +598,7 @@ struct IntegratedReviewWorkspace: View {
 
     private var navigationPane: some View {
         VStack(spacing: 0) {
-            Picker("Navigator", selection: $pane) {
-                ForEach(ReviewPane.allCases) { pane in
-                    Text(pane.title).tag(pane)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            ReviewPaneTabBar(selection: $pane)
 
             Divider()
 
@@ -540,6 +645,8 @@ struct IntegratedReviewWorkspace: View {
                         Text(historySearchError)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                            .textSelection(.enabled)
+                            .help(historySearchError)
                         Button("Retry") {
                             Task {
                                 await updateHistorySearch(for: historySearchLoadKey, debounces: false)
@@ -563,6 +670,8 @@ struct IntegratedReviewWorkspace: View {
                         Text(historyError)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                            .textSelection(.enabled)
+                            .help(historyError)
                         Button("Retry") {
                             Task {
                                 await loadHistory(for: historyLoadKey)
@@ -658,6 +767,8 @@ struct IntegratedReviewWorkspace: View {
                     Text(historyPaginationError)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .textSelection(.enabled)
+                        .help(historyPaginationError)
                     Button("Retry") {
                         Task {
                             await loadMoreHistory()
@@ -740,6 +851,8 @@ struct IntegratedReviewWorkspace: View {
                     Text(historySearchPaginationError)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .textSelection(.enabled)
+                        .help(historySearchPaginationError)
                     Button("Retry") {
                         Task {
                             await loadMoreHistorySearchResults()
@@ -799,7 +912,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var filesList: some View {
-        List(selection: focusBinding) {
+        List(selection: navigatorSelectionBinding) {
             if visibleFileItems.isEmpty {
                 if review.filterText.isEmpty {
                     Text("No File Changes")
@@ -816,42 +929,78 @@ struct IntegratedReviewWorkspace: View {
                 case .pending:
                     ForEach(
                         pendingNavigatorFileGroups(
-                            workingItems: filtered(workingItems),
-                            untrackedItems: filtered(untrackedItems),
-                            stagedItems: filtered(stagedItems)
+                            workingItems: workingItems,
+                            untrackedItems: untrackedItems,
+                            stagedItems: stagedItems
                         )
                     ) { group in
                         Section(group.title) {
-                            navigatorFileRows(group.items)
+                            navigatorTreeRows(
+                                group.items,
+                                namespace: group.id
+                            )
                         }
                     }
                 case .commit, .range:
-                    navigatorFileRows(filtered(contextItems))
+                    navigatorTreeRows(
+                        contextItems,
+                        namespace: "context"
+                    )
                 }
             }
         }
         .listStyle(.sidebar)
-        .onKeyPress(.space) {
-            performFocusedFilePrimaryAction() ? .handled : .ignored
-        }
+        .focused($isFilesNavigatorFocused)
     }
 
     @ViewBuilder
-    private func navigatorFileRows(
-        _ items: [IntegratedFileItem]
+    private func navigatorTreeRows(
+        _ items: [IntegratedFileItem],
+        namespace: String
     ) -> some View {
-        ForEach(items) { item in
-            let mutationMode = primaryPendingMutationMode(
-                context: activeContext,
-                item: item
+        let allNodes = navigatorTreeCache.nodes(
+            items: items,
+            namespace: namespace
+        )
+        let nodes = filteredNavigatorTreeNodes(
+            allNodes,
+            query: review.filterText
+        )
+        let expandedFolderIDs = review.filterText.isEmpty
+            ? review.expandedNavigatorFolderIDs
+            : navigatorFolderIDs(in: nodes)
+        ForEach(
+            flattenedNavigatorTreeRows(
+                nodes: nodes,
+                expandedFolderIDs: expandedFolderIDs
             )
-            NavigatorFileRow(
-                item: item,
-                diff: diffsByFileID[item.id],
-                isReviewed: isReviewed(item),
-                primaryActionTitle: mutationMode?.fileActionTitle
-            )
-                .tag(item.id.stackID)
+        ) { row in
+            switch row.content {
+            case let .folder(id, name, fileCount):
+                NavigatorFolderRow(
+                    name: name,
+                    fileCount: fileCount,
+                    isExpanded: expandedFolderIDs.contains(id)
+                )
+                .padding(.leading, CGFloat(row.depth) * 13)
+                .tag(NavigatorSelection.folder(id))
+            case let .file(item):
+                let mutationMode = primaryPendingMutationMode(
+                    context: activeContext,
+                    item: item
+                )
+                NavigatorFileRow(
+                    item: item,
+                    diff: diffsByFileID[item.id],
+                    isReviewed: isReviewed(item),
+                    primaryActionTitle: mutationMode?.fileActionTitle,
+                    canDiscard: activeContext == .pending
+                        && item.scope == .working
+                        && item.change.kind != .unmerged,
+                    showsPathDetail: false
+                )
+                .padding(.leading, CGFloat(row.depth) * 13)
+                .tag(NavigatorSelection.file(item.id.stackID))
                 .onTapGesture(count: 2) {
                     performFileUtilityAction(
                         fileID: item.id.stackID,
@@ -861,20 +1010,27 @@ struct IntegratedReviewWorkspace: View {
                 .contextMenu {
                     fileUtilityMenu(for: item)
                 }
+            }
         }
     }
 
     /// Files 只负责定位：选中即滚动到 Review 流里的那个文件。
-    private var focusBinding: Binding<String?> {
+    private var navigatorSelectionBinding: Binding<NavigatorSelection?> {
         Binding(
-            get: { review.focusedFileID },
-            set: { requestedFileID in
-                let fileID = acceptedNavigatorFileSelection(
-                    current: review.focusedFileID,
-                    requested: requestedFileID,
-                    hasVisibleFiles: !visibleFileItems.isEmpty
-                )
-                focusFileFromNavigator(fileID)
+            get: { navigatorSelection },
+            set: { requestedSelection in
+                navigatorSelection = requestedSelection
+                switch requestedSelection {
+                case let .file(fileID):
+                    focusFileFromNavigator(fileID)
+                case let .folder(folderID):
+                    guard review.filterText.isEmpty else {
+                        return
+                    }
+                    toggleNavigatorFolder(folderID)
+                case nil:
+                    focusFileFromNavigator(nil, expandsFile: false)
+                }
             }
         )
     }
@@ -886,13 +1042,53 @@ struct IntegratedReviewWorkspace: View {
         )
     }
 
-    private func focusFileFromNavigator(_ fileID: String?) {
+    private func focusFileFromNavigator(
+        _ fileID: String?,
+        expandsFile: Bool = true
+    ) {
         fileFocusedFromDiffID = nil
+        navigatorSelection = fileID.map(NavigatorSelection.file)
+        if expandsFile, let fileID {
+            openReviewDocument(fileID)
+        }
+        if expandsFile,
+           let fileID,
+           setReviewFileExpansion(
+               in: &review,
+               fileIDs: [fileID],
+               isExpanded: true
+           ) {
+            model.reviewStates.save(review, for: stateKey)
+        }
         updateFocusedFile(fileID)
+    }
+
+    private func openReviewDocument(_ fileID: String) {
+        if !openReviewFileIDs.contains(fileID) {
+            openReviewFileIDs.append(fileID)
+        }
+        selectedReviewDocument = .file(fileID)
+    }
+
+    private func closeReviewDocument(_ fileID: String) {
+        openReviewFileIDs.removeAll { $0 == fileID }
+        if selectedReviewDocument == .file(fileID) {
+            selectedReviewDocument = .summary
+        }
+    }
+
+    private func synchronizeReviewDocuments() {
+        let validFileIDs = Set(currentFileItems.map { $0.id.stackID })
+        openReviewFileIDs.removeAll { !validFileIDs.contains($0) }
+        if case let .file(fileID) = selectedReviewDocument,
+           !validFileIDs.contains(fileID) {
+            selectedReviewDocument = .summary
+        }
     }
 
     private func focusFileFromDiff(_ fileID: String) {
         fileFocusedFromDiffID = fileID
+        navigatorSelection = .file(fileID)
         updateFocusedFile(fileID)
     }
 
@@ -947,13 +1143,40 @@ struct IntegratedReviewWorkspace: View {
 
     private var reviewPane: some View {
         VStack(spacing: 0) {
-            reviewContextHeader
+            reviewDocumentTabBar
             Divider()
+            if selectedReviewDocument == .summary {
+                reviewContextHeader
+                Divider()
+            }
             reviewToolbar
             Divider()
             reviewBody
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var reviewDocumentTabBar: some View {
+        ReviewDocumentTabBar(
+            selection: selectedReviewDocument,
+            files: openReviewFileIDs.compactMap { fileID in
+                currentFileItems.first(where: { $0.id.stackID == fileID }).map {
+                    ReviewDocumentFile(
+                        id: fileID,
+                        title: ($0.change.path as NSString).lastPathComponent,
+                        path: $0.change.path
+                    )
+                }
+            },
+            selectSummary: {
+                selectedReviewDocument = .summary
+            },
+            selectFile: { fileID in
+                selectedReviewDocument = .file(fileID)
+                focusFileFromNavigator(fileID)
+            },
+            closeFile: closeReviewDocument
+        )
     }
 
     @ViewBuilder
@@ -971,6 +1194,14 @@ struct IntegratedReviewWorkspace: View {
                     title: messageSubject(fallback: commit.subject),
                     subtitle: "\(commit.shortOID) · \(commit.authorName) · "
                         + commit.authoredAt.formatted(.dateTime.year().month().day().hour().minute()),
+                    message: messageBody
+                )
+            } else if requestedRestoredContext?.context == .commit(commitID) {
+                IntegratedReviewTitle(
+                    title: messageSubject(
+                        fallback: "Commit \(String(commitID.prefix(7)))"
+                    ),
+                    subtitle: "\(String(commitID.prefix(7))) · Restoring history…",
                     message: messageBody
                 )
             } else {
@@ -992,7 +1223,7 @@ struct IntegratedReviewWorkspace: View {
 
     private var reviewToolbar: some View {
         HStack(spacing: 12) {
-            Text(countedLabel(visibleFileItems.count, singular: "file"))
+            Text(countedLabel(reviewDocumentFileItems.count, singular: "file"))
                 .font(.caption.monospacedDigit().weight(.medium))
             DiffCountLabel(added: totalAddedLineCount, deleted: totalDeletedLineCount)
             if reviewedFileCount > 0 {
@@ -1012,8 +1243,8 @@ struct IntegratedReviewWorkspace: View {
         }
         .controlSize(.small)
         .font(.caption)
-        .padding(.horizontal, 14)
-        .frame(height: 34)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
         .background(.bar)
     }
 
@@ -1158,8 +1389,16 @@ struct IntegratedReviewWorkspace: View {
                     isLoadingContextDetail ? "Loading Files…" : "No File Changes",
                     systemImage: isLoadingContextDetail ? "clock" : "checkmark.circle"
                 )
+            } description: {
+                if !isLoadingContextDetail {
+                    Text(
+                        activeContext == .pending
+                            ? "The working tree has no staged or unstaged changes."
+                            : "This commit selection contains no file changes."
+                    )
+                }
             }
-        } else if visibleFileItems.isEmpty {
+        } else if selectedReviewDocument == .summary, visibleFileItems.isEmpty {
             ContentUnavailableView {
                 Label("No Matching Files", systemImage: "line.3.horizontal.decrease.circle")
             } description: {
@@ -1176,7 +1415,7 @@ struct IntegratedReviewWorkspace: View {
                     Divider()
                 }
                 DiffStackView(
-                    groups: stackGroups,
+                    groups: reviewDocumentStackGroups,
                     layout: model.diffLayout,
                     scrollTarget: reviewScrollTarget,
                     scrollKey: stateKey,
@@ -1186,6 +1425,7 @@ struct IntegratedReviewWorkspace: View {
                         ? "Waiting for repository update…"
                         : "Loading diff…",
                     mutationActionsEnabled: allowsPendingMutations,
+                    command: diffCommand,
                     onFocusFile: focusFileFromDiff,
                     onToggleFile: toggleFile,
                     onToggleGroup: toggleGroup,
@@ -1239,7 +1479,10 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func blockingGitRefreshErrorBar(_ message: String) -> some View {
-        BlockingGitRefreshErrorBar(message: message) {
+        BlockingGitRefreshErrorBar(
+            message: message,
+            isRefreshing: isRefreshingSnapshot
+        ) {
             Task {
                 switch await model.refreshWorktree(id: snapshot.id) {
                 case .updated:
@@ -1301,7 +1544,7 @@ struct IntegratedReviewWorkspace: View {
             [
                 stackGroup(
                     id: "context",
-                    title: "Files",
+                    title: nil,
                     emptyMessage: emptyMessage("No file changes", "No matching files"),
                     items: filtered(contextItems)
                 )
@@ -1310,13 +1553,34 @@ struct IntegratedReviewWorkspace: View {
         return nonEmptyDiffStackGroups(groups)
     }
 
+    private var reviewDocumentStackGroups: [DiffStackGroup] {
+        switch selectedReviewDocument {
+        case .summary:
+            return stackGroups
+        case let .file(fileID):
+            guard let item = currentFileItems.first(where: {
+                $0.id.stackID == fileID
+            }) else {
+                return []
+            }
+            return [
+                stackGroup(
+                    id: "document",
+                    title: nil,
+                    emptyMessage: "No file changes",
+                    items: [item]
+                )
+            ]
+        }
+    }
+
     private func emptyMessage(_ empty: String, _ filteredAway: String) -> String {
         review.filterText.isEmpty ? empty : filteredAway
     }
 
     private func stackGroup(
         id: String,
-        title: String,
+        title: String?,
         emptyMessage: String,
         items: [IntegratedFileItem]
     ) -> DiffStackGroup {
@@ -1324,7 +1588,9 @@ struct IntegratedReviewWorkspace: View {
             id: id,
             title: title,
             emptyMessage: emptyMessage,
-            isExpanded: items.contains { !review.collapsedFileIDs.contains($0.id.stackID) },
+            isExpanded: items.contains {
+                isReviewFileExpanded($0.id.stackID, in: review)
+            },
             files: items.map { stackFile(for: $0) }
         )
     }
@@ -1337,7 +1603,7 @@ struct IntegratedReviewWorkspace: View {
             originalPath: item.change.originalPath,
             status: item.stackStatus,
             statusLabel: item.statusLabel,
-            isExpanded: !review.collapsedFileIDs.contains(item.id.stackID),
+            isExpanded: isReviewFileExpanded(item.id.stackID, in: review),
             isFocused: item.id.stackID == review.focusedFileID,
             isReviewed: isReviewed(item),
             showsWholeFile: showsWholeFile(item),
@@ -1354,6 +1620,7 @@ struct IntegratedReviewWorkspace: View {
                 && item.scope == .working
                 && item.change.kind != .unmerged,
             isMutationEnabled: allowsPendingMutations,
+            mutationSnapshotID: reviewSnapshotID(for: item),
             contextGaps: contextGaps(for: item),
             mutationMode: activeContext == .pending
                 ? (item.scope == .working ? .working : .staged)
@@ -1436,13 +1703,84 @@ struct IntegratedReviewWorkspace: View {
         executeFileAction(fileID: fileID, action: action)
     }
 
+    private var navigatorDefaultActionTitle: String? {
+        guard isFilesNavigatorFocused, pane == .files else {
+            return nil
+        }
+        switch navigatorSelection {
+        case let .folder(folderID):
+            guard review.filterText.isEmpty else {
+                return nil
+            }
+            return review.expandedNavigatorFolderIDs.contains(folderID)
+                ? "Collapse Folder"
+                : "Expand Folder"
+        case .file:
+            guard let command = focusedFilePrimaryCommand else {
+                return nil
+            }
+            return command.action == .stage
+                ? "Stage Focused File"
+                : "Unstage Focused File"
+        case nil:
+            return nil
+        }
+    }
+
+    private var focusedFilePrimaryCommand: PendingFilePrimaryCommand? {
+        guard allowsPendingMutations else {
+            return nil
+        }
+        return pendingFilePrimaryCommand(
+            context: activeContext,
+            focusedFileID: review.focusedFileID,
+            items: currentFileItems
+        )
+    }
+
+    private var focusedFileDiscardCommand: PendingFilePrimaryCommand? {
+        guard isFilesNavigatorFocused,
+              pane == .files,
+              allowsPendingMutations else {
+            return nil
+        }
+        return pendingFileDiscardCommand(
+            context: activeContext,
+            focusedFileID: review.focusedFileID,
+            items: currentFileItems
+        )
+    }
+
+    private func performNavigatorDefaultAction() {
+        guard isFilesNavigatorFocused, pane == .files else {
+            return
+        }
+        switch navigatorSelection {
+        case let .folder(folderID):
+            guard review.filterText.isEmpty else {
+                return
+            }
+            toggleNavigatorFolder(folderID)
+        case .file:
+            _ = performFocusedFilePrimaryAction()
+        case nil:
+            break
+        }
+    }
+
+    private func requestFocusedFileDiscard() {
+        guard let command = focusedFileDiscardCommand else {
+            return
+        }
+        diffCommandSequence &+= 1
+        diffCommand = DiffStackCommand(
+            id: diffCommandSequence,
+            action: .requestFileDiscard(command.fileID)
+        )
+    }
+
     private func performFocusedFilePrimaryAction() -> Bool {
-        guard allowsPendingMutations,
-              let command = pendingFilePrimaryCommand(
-                  context: activeContext,
-                  focusedFileID: review.focusedFileID,
-                  items: currentFileItems
-              ) else {
+        guard let command = focusedFilePrimaryCommand else {
             return false
         }
         executeFileAction(
@@ -1626,7 +1964,10 @@ struct IntegratedReviewWorkspace: View {
             } catch {
                 let refreshOutcome = await model.refreshWorktree(id: snapshot.id)
                 feedback = nil
-                errorMessage = "\(action.title) did not complete locally: \(error)"
+                errorMessage = gitRemoteOperationFailureMessage(
+                    action: action,
+                    error: error
+                )
                 refreshErrorMessage = mutationRefreshFailureMessage(
                     refreshOutcome
                 )
@@ -1699,7 +2040,10 @@ struct IntegratedReviewWorkspace: View {
     // MARK: - Derived state
 
     private var activeContext: ReviewContext {
-        reviewContext(for: selectedCommits)
+        effectiveReviewContext(
+            requestedRestoration: requestedRestoredContext,
+            selectedCommits: selectedCommits
+        )
     }
 
     /// 按历史顺序（新 → 旧）排列，range 的 head/base 才有确定含义。
@@ -1722,6 +2066,39 @@ struct IntegratedReviewWorkspace: View {
 
     private var stateKey: ReviewStateKey {
         ReviewStateKey(worktreeID: snapshot.id, context: activeContext)
+    }
+
+    private var reviewFileExpansionSyncKey: ReviewFileExpansionSyncKey {
+        ReviewFileExpansionSyncKey(
+            stateKey: stateKey,
+            fileIDs: Set(currentFileItems.map(\.id.stackID))
+        )
+    }
+
+    private var currentNavigatorFolderIDs: Set<String> {
+        switch activeContext {
+        case .pending:
+            return navigatorFolderIDs(
+                in: navigatorTreeCache.nodes(
+                    items: workingItems + untrackedItems,
+                    namespace: "working"
+                )
+            ).union(
+                navigatorFolderIDs(
+                    in: navigatorTreeCache.nodes(
+                        items: stagedItems,
+                        namespace: "staged"
+                    )
+                )
+            )
+        case .commit, .range:
+            return navigatorFolderIDs(
+                in: navigatorTreeCache.nodes(
+                    items: contextItems,
+                    namespace: "context"
+                )
+            )
+        }
     }
 
     private var currentNavigationState: ReviewNavigationState {
@@ -1773,43 +2150,15 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var workingItems: [IntegratedFileItem] {
-        pendingItems(scope: .working) { $0.isUnstaged }
+        snapshotWorkingItems
     }
 
     private var untrackedItems: [IntegratedFileItem] {
-        pendingItems(scope: .working) { $0.isUntracked }
+        snapshotUntrackedItems
     }
 
     private var stagedItems: [IntegratedFileItem] {
-        pendingItems(scope: .staged) { $0.isStaged }
-    }
-
-    private func pendingItems(
-        scope: GitDiffScope,
-        matching predicate: (GitFileChange) -> Bool
-    ) -> [IntegratedFileItem] {
-        Self.pendingItems(
-            in: snapshot,
-            scope: scope,
-            matching: predicate
-        )
-    }
-
-    private static func pendingItems(
-        in snapshot: GitWorktreeSnapshot,
-        scope: GitDiffScope,
-        matching predicate: (GitFileChange) -> Bool
-    ) -> [IntegratedFileItem] {
-        snapshot.status.changes
-            .filter(predicate)
-            .sorted(by: compareChanges)
-            .map { change in
-                IntegratedFileItem(
-                    id: .pending(scope: scope, changeID: change.id),
-                    change: change,
-                    scope: scope
-                )
-            }
+        snapshotStagedItems
     }
 
     private var contextItems: [IntegratedFileItem] {
@@ -1835,6 +2184,15 @@ struct IntegratedReviewWorkspace: View {
 
     private var visibleFileItems: [IntegratedFileItem] {
         filtered(currentFileItems)
+    }
+
+    private var reviewDocumentFileItems: [IntegratedFileItem] {
+        switch selectedReviewDocument {
+        case .summary:
+            visibleFileItems
+        case let .file(fileID):
+            currentFileItems.filter { $0.id.stackID == fileID }
+        }
     }
 
     private func filtered(_ items: [IntegratedFileItem]) -> [IntegratedFileItem] {
@@ -1906,15 +2264,19 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var totalAddedLineCount: Int {
-        visibleFileItems.reduce(0) { $0 + (diffsByFileID[$1.id]?.addedLineCount ?? 0) }
+        reviewDocumentFileItems.reduce(0) {
+            $0 + (diffsByFileID[$1.id]?.addedLineCount ?? 0)
+        }
     }
 
     private var totalDeletedLineCount: Int {
-        visibleFileItems.reduce(0) { $0 + (diffsByFileID[$1.id]?.deletedLineCount ?? 0) }
+        reviewDocumentFileItems.reduce(0) {
+            $0 + (diffsByFileID[$1.id]?.deletedLineCount ?? 0)
+        }
     }
 
     private var reviewedFileCount: Int {
-        visibleFileItems.count(where: isReviewed)
+        reviewDocumentFileItems.count(where: isReviewed)
     }
 
     private func messageSubject(fallback: String) -> String {
@@ -1978,19 +2340,7 @@ struct IntegratedReviewWorkspace: View {
     ) -> [IntegratedFileID] {
         switch context {
         case .pending:
-            return Self.pendingItems(
-                in: snapshot,
-                scope: .working,
-                matching: { $0.isUnstaged }
-            ).map(\.id) + Self.pendingItems(
-                in: snapshot,
-                scope: .working,
-                matching: { $0.isUntracked }
-            ).map(\.id) + Self.pendingItems(
-                in: snapshot,
-                scope: .staged,
-                matching: { $0.isStaged }
-            ).map(\.id)
+            return pendingIntegratedFileItems(in: snapshot).all.map(\.id)
         case .commit, .range:
             let contextID = Self.identifier(for: context)
             return contextChanges.map { change in
@@ -2068,6 +2418,13 @@ struct IntegratedReviewWorkspace: View {
         )
         requestedRestoredContext = nil
         selection = normalized
+        model.reviewStates.saveLastContext(
+            next.context,
+            selectedCommitIDs: next.selectedCommitIDs,
+            pane: next.pane,
+            historyFilter: next.historyFilter,
+            for: snapshot.id
+        )
     }
 
     private func navigateBack() {
@@ -2099,12 +2456,12 @@ struct IntegratedReviewWorkspace: View {
             state,
             commits: availableCommits
         ) {
-            requestedRestoredContext = nil
             requestedHistoryScrollCommitID = historyScrollTargetID(
                 selection: restoredSelection,
                 commits: availableCommits
             )
             selection = restoredSelection
+            requestedRestoredContext = nil
         } else {
             selection = [.pending]
             requestedRestoredContext = state
@@ -2217,6 +2574,7 @@ struct IntegratedReviewWorkspace: View {
         hasMoreHistory = false
         searchedCommits = []
         loadedHistorySearchKey = nil
+        completedHistorySearchKey = nil
         historySearchNextOffset = 0
         hasMoreHistorySearchResults = false
         historySearchError = nil
@@ -2241,6 +2599,7 @@ struct IntegratedReviewWorkspace: View {
                 context: .pending
             )
         )
+        navigatorSelection = review.focusedFileID.map(NavigatorSelection.file)
         contextDetailError = nil
         diffError = nil
         mutationError = nil
@@ -2258,13 +2617,19 @@ struct IntegratedReviewWorkspace: View {
         navigationHistory.removeAll()
         suppressedHistoryFilterValue = nil
         fileFocusedFromDiffID = nil
+        diffCommand = nil
     }
 
     private func toggleFile(_ stackID: String) {
-        if review.collapsedFileIDs.contains(stackID) {
-            review.collapsedFileIDs.remove(stackID)
+        toggleReviewFileExpansion(in: &review, fileID: stackID)
+        model.reviewStates.save(review, for: stateKey)
+    }
+
+    private func toggleNavigatorFolder(_ folderID: String) {
+        if review.expandedNavigatorFolderIDs.contains(folderID) {
+            review.expandedNavigatorFolderIDs.remove(folderID)
         } else {
-            review.collapsedFileIDs.insert(stackID)
+            review.expandedNavigatorFolderIDs.insert(folderID)
         }
         model.reviewStates.save(review, for: stateKey)
     }
@@ -2426,7 +2791,15 @@ struct IntegratedReviewWorkspace: View {
         guard !items.isEmpty else {
             return
         }
-        setCollapsed(items.contains { !review.collapsedFileIDs.contains($0.id.stackID) }, for: items)
+        let shouldExpand = !items.contains {
+            isReviewFileExpanded($0.id.stackID, in: review)
+        }
+        setReviewFileExpansion(
+            in: &review,
+            fileIDs: Set(items.map(\.id.stackID)),
+            isExpanded: shouldExpand
+        )
+        model.reviewStates.save(review, for: stateKey)
     }
 
     private func groupItems(id: String) -> [IntegratedFileItem] {
@@ -2436,16 +2809,6 @@ struct IntegratedReviewWorkspace: View {
         case "context": filtered(contextItems)
         default: []
         }
-    }
-
-    private func setCollapsed(_ isCollapsed: Bool, for items: [IntegratedFileItem]) {
-        let ids = items.map(\.id.stackID)
-        if isCollapsed {
-            review.collapsedFileIDs.formUnion(ids)
-        } else {
-            review.collapsedFileIDs.subtract(ids)
-        }
-        model.reviewStates.save(review, for: stateKey)
     }
 
     private func moveFileFocus(by offset: Int) {
@@ -2653,12 +3016,12 @@ struct IntegratedReviewWorkspace: View {
             )
             return
         }
-        requestedRestoredContext = nil
         requestedHistoryScrollCommitID = historyScrollTargetID(
             selection: restoredSelection,
             commits: commits
         )
         selection = restoredSelection
+        requestedRestoredContext = nil
     }
 
     private func loadPagesForRequestedHistoryContext() async {
@@ -2748,6 +3111,7 @@ struct IntegratedReviewWorkspace: View {
     ) async {
         guard let query = key.query else {
             loadedHistorySearchKey = nil
+            completedHistorySearchKey = nil
             searchedCommits = []
             historySearchNextOffset = 0
             hasMoreHistorySearchResults = false
@@ -2757,8 +3121,15 @@ struct IntegratedReviewWorkspace: View {
             isLoadingMoreHistorySearchResults = false
             return
         }
+        guard shouldLoadHistorySearch(
+            requested: key,
+            completed: completedHistorySearchKey
+        ) else {
+            return
+        }
 
         loadedHistorySearchKey = key
+        completedHistorySearchKey = nil
         searchedCommits = []
         historySearchNextOffset = 0
         hasMoreHistorySearchResults = false
@@ -2773,8 +3144,8 @@ struct IntegratedReviewWorkspace: View {
         } ?? false
         if !preservesRequestedContext {
             requestedRestoredContext = nil
+            selection = [.pending]
         }
-        selection = [.pending]
         if let cachedPage = historySearchPageCache.page(for: key) {
             searchedCommits = cachedPage.commits
             historySearchNextOffset = cachedPage.nextOffset
@@ -2784,6 +3155,7 @@ struct IntegratedReviewWorkspace: View {
                 commits: cachedPage.commits,
                 hasMore: cachedPage.hasMore
             )
+            completedHistorySearchKey = key
             return
         }
         isSearchingHistory = true
@@ -2820,12 +3192,14 @@ struct IntegratedReviewWorkspace: View {
                 commits: page.commits,
                 hasMore: page.hasMore
             )
+            completedHistorySearchKey = key
         } catch is CancellationError {
             return
         } catch {
             guard loadedHistorySearchKey == key else {
                 return
             }
+            completedHistorySearchKey = nil
             historySearchError = String(describing: error)
         }
     }
@@ -2967,7 +3341,7 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             contextMessage = message
-            let sortedChanges = changes.sorted(by: Self.compareChanges)
+            let sortedChanges = changes.sorted(by: integratedChangePrecedes)
             contextChanges = sortedChanges
             await model.cacheHistoricalDetails(
                 HistoricalReviewDetails(
@@ -3022,7 +3396,7 @@ struct IntegratedReviewWorkspace: View {
             guard acceptsReviewState(key) else {
                 return
             }
-            let sortedChanges = changes.sorted(by: Self.compareChanges)
+            let sortedChanges = changes.sorted(by: integratedChangePrecedes)
             contextChanges = sortedChanges
             await model.cacheHistoricalDetails(
                 HistoricalReviewDetails(
@@ -3784,10 +4158,6 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private static func compareChanges(_ lhs: GitFileChange, _ rhs: GitFileChange) -> Bool {
-        lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
-    }
-
     /// git 的空树对象，用于把根提交也纳入 range 的 base。
     private static let emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 }
@@ -3803,6 +4173,17 @@ func nonEmptyDiffStackGroups(
 enum IntegratedOverviewSelection: Hashable {
     case pending
     case commit(GitCommit.ID)
+}
+
+enum ReviewDocumentSelection: Hashable {
+    case summary
+    case file(String)
+}
+
+struct ReviewDocumentFile: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let path: String
 }
 
 func normalizedOverviewSelection(
@@ -3932,6 +4313,13 @@ func reviewContext(for selectedCommits: [GitCommit]) -> ReviewContext {
     )
 }
 
+func effectiveReviewContext(
+    requestedRestoration: ReviewNavigationState?,
+    selectedCommits: [GitCommit]
+) -> ReviewContext {
+    requestedRestoration?.context ?? reviewContext(for: selectedCommits)
+}
+
 func restoredHistorySelection(
     _ state: ReviewNavigationState,
     commits: [GitCommit]
@@ -4048,14 +4436,14 @@ struct RemoteOperationFeedback: Hashable {
     var message: String {
         switch outcome {
         case .completed: "\(action.title) completed"
-        case .cancelled: "\(action.title) cancellation requested"
+        case .cancelled: "\(action.title) cancelled"
         }
     }
 
     var compactTitle: String {
         switch outcome {
         case .completed: "\(action.title) complete"
-        case .cancelled: "Cancel requested"
+        case .cancelled: "Cancelled"
         }
     }
 }
@@ -4078,6 +4466,7 @@ struct RemoteOperationFeedbackView: View {
 
 struct BlockingGitRefreshErrorBar: View {
     let message: String
+    var isRefreshing = false
     let refresh: () -> Void
 
     var body: some View {
@@ -4090,8 +4479,20 @@ struct BlockingGitRefreshErrorBar: View {
                 .textSelection(.enabled)
                 .help(message)
             Spacer(minLength: 8)
-            Button("Refresh", action: refresh)
-                .buttonStyle(.borderless)
+            if isRefreshing {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Refreshing…")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("blocking-refresh-progress")
+            } else {
+                Button("Refresh", action: refresh)
+                    .buttonStyle(.borderless)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -4120,9 +4521,6 @@ func gitRemoteOperationUnavailableReason(
     if isRefreshingRepository {
         return "Wait for the repository status update to finish."
     }
-    if action == .pull, let upstreamError = branchStatus?.upstreamError {
-        return upstreamError
-    }
     if worktree.isDetached {
         return "\(action.title) requires a checked-out branch."
     }
@@ -4135,7 +4533,34 @@ func gitRemoteOperationUnavailableReason(
             ? "Pull requires an upstream branch."
             : nil
     }
+    if let branchStatus,
+       branchStatus.aheadCount > 0,
+       branchStatus.behindCount > 0 {
+        return "Local and upstream branches have diverged. Resolve the branch before "
+            + "pulling or pushing."
+    }
+    if action == .push, let branchStatus, branchStatus.behindCount > 0 {
+        return "Pull upstream changes before pushing."
+    }
     return nil
+}
+
+func gitRemoteOperationFailureMessage(
+    action: GitRemoteAction,
+    error: any Error
+) -> String {
+    let detail: String
+    if let localizedError = error as? any LocalizedError,
+       let errorDescription = localizedError.errorDescription,
+       !errorDescription.isEmpty {
+        detail = errorDescription
+    } else {
+        detail = String(describing: error)
+    }
+    let normalized = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalized.isEmpty
+        ? "\(action.title) failed."
+        : "\(action.title) failed: \(normalized)"
 }
 
 func gitPushActionTitle(branchStatus: GitBranchStatus?) -> String {
@@ -4150,6 +4575,13 @@ struct HistorySearchLoadKey: Hashable {
     let worktreeID: GitWorktreeSnapshot.ID
     let revision: String?
     let query: GitHistorySearchQuery?
+}
+
+func shouldLoadHistorySearch(
+    requested: HistorySearchLoadKey,
+    completed: HistorySearchLoadKey?
+) -> Bool {
+    requested.query != nil && completed != requested
 }
 
 struct HistorySearchPageCache {
@@ -4295,6 +4727,321 @@ struct IntegratedFileItem: Identifiable, Hashable {
     }
 }
 
+struct PendingIntegratedFileItems: Equatable {
+    let working: [IntegratedFileItem]
+    let untracked: [IntegratedFileItem]
+    let staged: [IntegratedFileItem]
+
+    var all: [IntegratedFileItem] {
+        working + untracked + staged
+    }
+}
+
+func pendingIntegratedFileItems(
+    in snapshot: GitWorktreeSnapshot
+) -> PendingIntegratedFileItems {
+    var workingChanges: [GitFileChange] = []
+    var untrackedChanges: [GitFileChange] = []
+    var stagedChanges: [GitFileChange] = []
+    workingChanges.reserveCapacity(snapshot.status.changes.count)
+    untrackedChanges.reserveCapacity(snapshot.status.changes.count / 8)
+    stagedChanges.reserveCapacity(snapshot.status.changes.count)
+
+    for change in snapshot.status.changes {
+        if change.isUnstaged {
+            workingChanges.append(change)
+        }
+        if change.isUntracked {
+            untrackedChanges.append(change)
+        }
+        if change.isStaged {
+            stagedChanges.append(change)
+        }
+    }
+    workingChanges.sort(by: integratedChangePrecedes)
+    untrackedChanges.sort(by: integratedChangePrecedes)
+    stagedChanges.sort(by: integratedChangePrecedes)
+
+    return PendingIntegratedFileItems(
+        working: integratedFileItems(workingChanges, scope: .working),
+        untracked: integratedFileItems(untrackedChanges, scope: .working),
+        staged: integratedFileItems(stagedChanges, scope: .staged)
+    )
+}
+
+private func integratedFileItems(
+    _ changes: [GitFileChange],
+    scope: GitDiffScope
+) -> [IntegratedFileItem] {
+    changes.map { change in
+        IntegratedFileItem(
+            id: .pending(scope: scope, changeID: change.id),
+            change: change,
+            scope: scope
+        )
+    }
+}
+
+private func integratedChangePrecedes(
+    _ lhs: GitFileChange,
+    _ rhs: GitFileChange
+) -> Bool {
+    lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+}
+
+indirect enum NavigatorTreeNode: Identifiable, Hashable {
+    case folder(
+        id: String,
+        name: String,
+        fileCount: Int,
+        children: [NavigatorTreeNode]
+    )
+    case file(IntegratedFileItem)
+
+    var id: String {
+        switch self {
+        case let .folder(id, _, _, _): id
+        case let .file(item): "navigator-file:\(item.id.stackID)"
+        }
+    }
+}
+
+struct NavigatorTreeRow: Identifiable, Hashable {
+    enum Content: Hashable {
+        case folder(id: String, name: String, fileCount: Int)
+        case file(IntegratedFileItem)
+    }
+
+    let id: String
+    let depth: Int
+    let content: Content
+}
+
+enum NavigatorSelection: Hashable {
+    case file(String)
+    case folder(String)
+}
+
+@MainActor
+final class NavigatorTreeCache {
+    private struct Entry {
+        let items: [IntegratedFileItem]
+        let nodes: [NavigatorTreeNode]
+    }
+
+    private var entriesByNamespace: [String: Entry] = [:]
+    private(set) var buildCount = 0
+
+    func nodes(
+        items: [IntegratedFileItem],
+        namespace: String
+    ) -> [NavigatorTreeNode] {
+        if let cached = entriesByNamespace[namespace],
+           cached.items == items {
+            return cached.nodes
+        }
+        let nodes = navigatorTreeNodes(
+            items: items,
+            namespace: namespace
+        )
+        entriesByNamespace[namespace] = Entry(
+            items: items,
+            nodes: nodes
+        )
+        buildCount += 1
+        return nodes
+    }
+}
+
+func navigatorTreeNodes(
+    items: [IntegratedFileItem],
+    namespace: String
+) -> [NavigatorTreeNode] {
+    let entries = items.map { item in
+        NavigatorTreeEntry(
+            components: (item.change.path as NSString).pathComponents.filter {
+                !$0.isEmpty && $0 != "/" && $0 != "."
+            },
+            item: item
+        )
+    }
+    return buildNavigatorTree(
+        entries: entries,
+        namespace: namespace,
+        parentPath: ""
+    )
+}
+
+func navigatorFolderIDs(in nodes: [NavigatorTreeNode]) -> Set<String> {
+    nodes.reduce(into: []) { result, node in
+        guard case let .folder(id, _, _, children) = node else {
+            return
+        }
+        result.insert(id)
+        result.formUnion(navigatorFolderIDs(in: children))
+    }
+}
+
+func filteredNavigatorTreeNodes(
+    _ nodes: [NavigatorTreeNode],
+    query: String
+) -> [NavigatorTreeNode] {
+    guard !query.isEmpty else {
+        return nodes
+    }
+    return nodes.compactMap { node in
+        switch node {
+        case let .folder(id, name, _, children):
+            let filteredChildren = filteredNavigatorTreeNodes(
+                children,
+                query: query
+            )
+            guard !filteredChildren.isEmpty else {
+                return nil
+            }
+            return .folder(
+                id: id,
+                name: name,
+                fileCount: navigatorFileCount(in: filteredChildren),
+                children: filteredChildren
+            )
+        case let .file(item):
+            guard item.change.path.localizedCaseInsensitiveContains(query) else {
+                return nil
+            }
+            return node
+        }
+    }
+}
+
+func flattenedNavigatorTreeRows(
+    nodes: [NavigatorTreeNode],
+    expandedFolderIDs: Set<String>
+) -> [NavigatorTreeRow] {
+    var rows: [NavigatorTreeRow] = []
+    appendNavigatorTreeRows(
+        nodes,
+        depth: 0,
+        expandedFolderIDs: expandedFolderIDs,
+        into: &rows
+    )
+    return rows
+}
+
+private struct NavigatorTreeEntry {
+    let components: [String]
+    let item: IntegratedFileItem
+}
+
+private func buildNavigatorTree(
+    entries: [NavigatorTreeEntry],
+    namespace: String,
+    parentPath: String
+) -> [NavigatorTreeNode] {
+    var files: [IntegratedFileItem] = []
+    var entriesByDirectory: [String: [NavigatorTreeEntry]] = [:]
+    for entry in entries {
+        guard let first = entry.components.first else {
+            files.append(entry.item)
+            continue
+        }
+        guard entry.components.count > 1 else {
+            files.append(entry.item)
+            continue
+        }
+        entriesByDirectory[first, default: []].append(
+            NavigatorTreeEntry(
+                components: Array(entry.components.dropFirst()),
+                item: entry.item
+            )
+        )
+    }
+    let folders = entriesByDirectory.keys.sorted(by: navigatorNamePrecedes).map {
+        directoryName in
+        let directoryPath = parentPath.isEmpty
+            ? directoryName
+            : "\(parentPath)/\(directoryName)"
+        let children = buildNavigatorTree(
+            entries: entriesByDirectory[directoryName] ?? [],
+            namespace: namespace,
+            parentPath: directoryPath
+        )
+        return NavigatorTreeNode.folder(
+            id: "navigator-folder:\(namespace):\(directoryPath)",
+            name: directoryName,
+            fileCount: navigatorFileCount(in: children),
+            children: children
+        )
+    }
+    let fileNodes = files.sorted {
+        navigatorNamePrecedes(
+            ($0.change.path as NSString).lastPathComponent,
+            ($1.change.path as NSString).lastPathComponent
+        )
+    }.map(NavigatorTreeNode.file)
+    return folders + fileNodes
+}
+
+private func navigatorNamePrecedes(_ lhs: String, _ rhs: String) -> Bool {
+    let lhsFolded = lhs.folding(options: [.caseInsensitive], locale: nil)
+    let rhsFolded = rhs.folding(options: [.caseInsensitive], locale: nil)
+    return lhsFolded == rhsFolded ? lhs < rhs : lhsFolded < rhsFolded
+}
+
+private func navigatorFileCount(in nodes: [NavigatorTreeNode]) -> Int {
+    nodes.reduce(0) { count, node in
+        switch node {
+        case let .folder(_, _, fileCount, _): count + fileCount
+        case .file: count + 1
+        }
+    }
+}
+
+private func appendNavigatorTreeRows(
+    _ nodes: [NavigatorTreeNode],
+    depth: Int,
+    expandedFolderIDs: Set<String>,
+    into rows: inout [NavigatorTreeRow]
+) {
+    for node in nodes {
+        switch node {
+        case let .folder(id, name, fileCount, children):
+            rows.append(
+                NavigatorTreeRow(
+                    id: id,
+                    depth: depth,
+                    content: .folder(
+                        id: id,
+                        name: name,
+                        fileCount: fileCount
+                    )
+                )
+            )
+            if expandedFolderIDs.contains(id) {
+                appendNavigatorTreeRows(
+                    children,
+                    depth: depth + 1,
+                    expandedFolderIDs: expandedFolderIDs,
+                    into: &rows
+                )
+            }
+        case let .file(item):
+            rows.append(
+                NavigatorTreeRow(
+                    id: "navigator-file:\(item.id.stackID)",
+                    depth: depth,
+                    content: .file(item)
+                )
+            )
+        }
+    }
+}
+
+private struct ReviewFileExpansionSyncKey: Hashable {
+    let stateKey: ReviewStateKey
+    let fileIDs: Set<String>
+}
+
 struct NavigatorFileGroup: Identifiable, Equatable {
     let id: String
     let title: String
@@ -4366,6 +5113,24 @@ func pendingFilePrimaryCommand(
     return PendingFilePrimaryCommand(
         fileID: focusedFileID,
         action: mutationMode.primaryAction
+    )
+}
+
+func pendingFileDiscardCommand(
+    context: ReviewContext,
+    focusedFileID: String?,
+    items: [IntegratedFileItem]
+) -> PendingFilePrimaryCommand? {
+    guard context == .pending,
+          let focusedFileID,
+          let item = items.first(where: { $0.id.stackID == focusedFileID }),
+          item.scope == .working,
+          item.change.kind != .unmerged else {
+        return nil
+    }
+    return PendingFilePrimaryCommand(
+        fileID: focusedFileID,
+        action: .discard
     )
 }
 
@@ -4528,6 +5293,23 @@ private enum IntegratedReviewLoadError: LocalizedError {
     }
 }
 
+func clampedReviewNavigationPaneWidth(
+    _ proposedWidth: CGFloat,
+    totalWidth: CGFloat
+) -> CGFloat {
+    let minimumNavigationWidth: CGFloat = 180
+    let minimumReviewWidth: CGFloat = 560
+    let dividerWidth: CGFloat = 7
+    let maximumNavigationWidth = max(
+        minimumNavigationWidth,
+        min(300, totalWidth - minimumReviewWidth - dividerWidth)
+    )
+    return min(
+        maximumNavigationWidth,
+        max(minimumNavigationWidth, proposedWidth)
+    )
+}
+
 // MARK: - Components
 
 private struct DiffCountLabel: View {
@@ -4537,12 +5319,115 @@ private struct DiffCountLabel: View {
     var body: some View {
         HStack(spacing: 7) {
             Text("+\(added)")
-                .foregroundStyle(.green)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
             Text("−\(deleted)")
-                .foregroundStyle(.red)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
         }
         .font(.caption.monospacedDigit().weight(.medium))
     }
+}
+
+private struct ReviewPaneTabBar: View {
+    @Binding var selection: ReviewPane
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(ReviewPane.allCases) { pane in
+                Button {
+                    selection = pane
+                } label: {
+                    Text(pane.title)
+                        .font(.caption.weight(selection == pane ? .semibold : .regular))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .background(
+                    selection == pane
+                        ? Color(nsColor: .windowBackgroundColor)
+                        : Color.clear
+                )
+                .accessibilityAddTraits(selection == pane ? .isSelected : [])
+            }
+        }
+        .frame(height: 34)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct ReviewDocumentTabBar: View {
+    let selection: ReviewDocumentSelection
+    let files: [ReviewDocumentFile]
+    let selectSummary: () -> Void
+    let selectFile: (String) -> Void
+    let closeFile: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: selectSummary) {
+                Text("Summary")
+                    .font(.caption.weight(selection == .summary ? .semibold : .regular))
+                    .frame(width: 106, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(tabBackground(isSelected: selection == .summary))
+            .accessibilityAddTraits(selection == .summary ? .isSelected : [])
+
+            Divider()
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(files) { file in
+                        let isSelected = selection == .file(file.id)
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.text")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text(file.title)
+                                .font(.caption.weight(isSelected ? .semibold : .regular))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 2)
+                            Button {
+                                closeFile(file.id)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .frame(width: 14, height: 14)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.tertiary)
+                            .accessibilityLabel("Close \(file.title)")
+                        }
+                        .padding(.horizontal, 9)
+                        .frame(width: 190, height: 34)
+                        .contentShape(Rectangle())
+                        .background(tabBackground(isSelected: isSelected))
+                        .overlay(alignment: .trailing) {
+                            Divider()
+                        }
+                        .onTapGesture {
+                            selectFile(file.id)
+                        }
+                        .help(file.path)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(height: 34)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func tabBackground(isSelected: Bool) -> Color {
+        isSelected ? Color(nsColor: .windowBackgroundColor) : Color.clear
+    }
+
 }
 
 private struct IntegratedFilterField: View {
@@ -4681,11 +5566,7 @@ private struct IntegratedReviewTitle: View {
                     .textSelection(.enabled)
             }
             if !message.isEmpty {
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
+                CommitMessageSummary(message: message)
                     .padding(.top, 2)
             }
         }
@@ -4695,11 +5576,104 @@ private struct IntegratedReviewTitle: View {
     }
 }
 
+struct CommitMessageSummary: View {
+    let message: String
+    @State private var showsFullMessage = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+            if commitMessageNeedsFullReader(message) {
+                Button("Show Full Message") {
+                    showsFullMessage = true
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+                .accessibilityIdentifier("commit-message-full-reader")
+                .accessibilityLabel("Show Full Commit Message")
+                .accessibilityHint("Opens the complete commit message")
+                .popover(isPresented: $showsFullMessage, arrowEdge: .bottom) {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("Commit Message")
+                                .font(.headline)
+                            Spacer()
+                            Button("Copy") {
+                                copyToPasteboard(message)
+                            }
+                            .controlSize(.small)
+                        }
+                        .padding(14)
+                        Divider()
+                        ScrollView {
+                            Text(message)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(16)
+                        }
+                    }
+                    .frame(width: 520, height: 360)
+                }
+            }
+        }
+        .onChange(of: message) {
+            showsFullMessage = false
+        }
+    }
+}
+
+func commitMessageNeedsFullReader(_ message: String) -> Bool {
+    message.count > 240
+        || message.split(separator: "\n", omittingEmptySubsequences: false).count > 3
+}
+
+private struct NavigatorFolderRow: View {
+    let name: String
+    let fileCount: Int
+    let isExpanded: Bool
+
+    var body: some View {
+        let fileCountLabel = countedLabel(fileCount, singular: "file")
+        HStack(spacing: 7) {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+            Image(systemName: isExpanded ? "folder.fill" : "folder")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 14)
+            Text(name)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Text("\(fileCount)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 2)
+        .help(name)
+        .accessibilityLabel("\(name), \(fileCountLabel)")
+        .accessibilityHint(isExpanded ? "Collapse folder" : "Expand folder")
+    }
+}
+
 private struct NavigatorFileRow: View {
     let item: IntegratedFileItem
     let diff: GitFileDiff?
     let isReviewed: Bool
     let primaryActionTitle: String?
+    let canDiscard: Bool
+    var showsPathDetail = true
 
     var body: some View {
         HStack(spacing: 8) {
@@ -4712,7 +5686,7 @@ private struct NavigatorFileRow: View {
                 fileName
                     .font(.caption)
                     .lineLimit(1)
-                if !pathDetail.isEmpty {
+                if showsPathDetail, !pathDetail.isEmpty {
                     Text(pathDetail)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -4725,18 +5699,20 @@ private struct NavigatorFileRow: View {
 
             if let diff {
                 Text("+\(diff.addedLineCount)")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
                 Text("−\(diff.deletedLineCount)")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
             }
             if isReviewed {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
             }
         }
         .font(.caption2.monospacedDigit())
         .padding(.vertical, 1)
         .help(helpText)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityHint(helpText)
     }
 
@@ -4770,23 +5746,82 @@ private struct NavigatorFileRow: View {
 
     private var statusColor: Color {
         switch item.stackStatus {
-        case .added, .untracked: .green
-        case .deleted: .red
-        case .renamed: .blue
-        case .conflicted: .purple
-        case .modified: .orange
+        case .added, .untracked: Color(nsColor: AgentGitPalette.statusAdded)
+        case .deleted: Color(nsColor: AgentGitPalette.statusDeleted)
+        case .renamed: Color(nsColor: AgentGitPalette.statusRenamed)
+        case .conflicted: Color(nsColor: AgentGitPalette.statusConflicted)
+        case .modified: Color(nsColor: AgentGitPalette.statusModified)
         }
     }
 
     private var helpText: String {
-        let path = item.change.originalPath.map {
-            "\($0) → \(item.change.path)"
-        } ?? item.change.path
-        guard let primaryActionTitle else {
-            return path
-        }
-        return "\(path)\n\nPress Space to \(primaryActionTitle.lowercased()) this file."
+        navigatorFileHelpText(
+            item: item,
+            primaryActionTitle: primaryActionTitle,
+            canDiscard: canDiscard
+        )
     }
+
+    private var accessibilityLabel: String {
+        navigatorFileAccessibilityLabel(
+            item: item,
+            diff: diff,
+            isReviewed: isReviewed
+        )
+    }
+}
+
+func navigatorFileHelpText(
+    item: IntegratedFileItem,
+    primaryActionTitle: String?,
+    canDiscard: Bool
+) -> String {
+    let path = item.change.originalPath.map {
+        "\($0) → \(item.change.path)"
+    } ?? item.change.path
+    var instructions: [String] = []
+    if let primaryActionTitle {
+        instructions.append(
+            "Press Space to \(primaryActionTitle.lowercased()) this file."
+        )
+    }
+    if canDiscard {
+        instructions.append(
+            "Press Command-Shift-Delete twice to discard this file."
+        )
+    }
+    guard !instructions.isEmpty else {
+        return path
+    }
+    return "\(path)\n\n\(instructions.joined(separator: " "))"
+}
+
+func navigatorFileAccessibilityLabel(
+    item: IntegratedFileItem,
+    diff: GitFileDiff?,
+    isReviewed: Bool
+) -> String {
+    let path = item.change.originalPath.map {
+        "\($0) renamed to \(item.change.path)"
+    } ?? item.change.path
+    let status: String = switch item.stackStatus {
+    case .added: "added"
+    case .deleted: "deleted"
+    case .modified: "modified"
+    case .renamed: "renamed"
+    case .untracked: "untracked"
+    case .conflicted: "conflicted"
+    }
+    var details = [path, status]
+    if let diff {
+        details.append(
+            "\(diff.addedLineCount) additions, \(diff.deletedLineCount) deletions"
+        )
+    }
+    if isReviewed {
+        details.append("reviewed")
+    }
+    return details.joined(separator: ", ")
 }
 
 private struct PendingOverviewRow: View {
@@ -4888,7 +5923,12 @@ private struct IntegratedCommitRow: View {
             }
         }
         .padding(.vertical, 1)
-        .help(commit.subject)
+        .help(
+            "\(commit.subject)\n\(commit.oid) · \(commit.authorName) · "
+                + commit.authoredAt.formatted(
+                    .dateTime.year().month().day().hour().minute()
+                )
+        )
     }
 }
 

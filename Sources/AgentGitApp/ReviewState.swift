@@ -39,6 +39,8 @@ enum DiffLayoutMode: String, Hashable, CaseIterable, Identifiable {
 /// 折叠、聚焦、过滤走 SwiftUI 状态；滚动位置单独存，由 AppKit 直接读写。
 struct ReviewState: Equatable {
     var collapsedFileIDs: Set<String> = []
+    var knownFileIDs: Set<String> = []
+    var expandedNavigatorFolderIDs: Set<String> = []
     var focusedFileID: String?
     var filterText = ""
     var reviewedSnapshotByFileID: [String: DiffReviewSnapshotID] = [:]
@@ -275,6 +277,69 @@ func invalidateReviewedSnapshots(
         currentByFileID[fileID] == snapshotID
     }
     return state.reviewedSnapshotByFileID != previous
+}
+
+@discardableResult
+func synchronizeReviewFileExpansion(
+    in state: inout ReviewState,
+    fileIDs: Set<String>
+) -> Bool {
+    let previousCollapsed = state.collapsedFileIDs
+    let previousKnown = state.knownFileIDs
+    let newFileIDs = fileIDs.subtracting(state.knownFileIDs)
+    state.collapsedFileIDs.formUnion(newFileIDs)
+    state.collapsedFileIDs.formIntersection(fileIDs)
+    state.knownFileIDs = fileIDs
+    return state.collapsedFileIDs != previousCollapsed
+        || state.knownFileIDs != previousKnown
+}
+
+func isReviewFileExpanded(
+    _ fileID: String,
+    in state: ReviewState
+) -> Bool {
+    state.knownFileIDs.contains(fileID)
+        && !state.collapsedFileIDs.contains(fileID)
+}
+
+@discardableResult
+func setReviewFileExpansion(
+    in state: inout ReviewState,
+    fileIDs: Set<String>,
+    isExpanded: Bool
+) -> Bool {
+    let previousCollapsed = state.collapsedFileIDs
+    let previousKnown = state.knownFileIDs
+    state.knownFileIDs.formUnion(fileIDs)
+    if isExpanded {
+        state.collapsedFileIDs.subtract(fileIDs)
+    } else {
+        state.collapsedFileIDs.formUnion(fileIDs)
+    }
+    return state.collapsedFileIDs != previousCollapsed
+        || state.knownFileIDs != previousKnown
+}
+
+@discardableResult
+func toggleReviewFileExpansion(
+    in state: inout ReviewState,
+    fileID: String
+) -> Bool {
+    setReviewFileExpansion(
+        in: &state,
+        fileIDs: [fileID],
+        isExpanded: !isReviewFileExpanded(fileID, in: state)
+    )
+}
+
+@discardableResult
+func synchronizeNavigatorFolderExpansion(
+    in state: inout ReviewState,
+    validFolderIDs: Set<String>
+) -> Bool {
+    let previous = state.expandedNavigatorFolderIDs
+    state.expandedNavigatorFolderIDs.formIntersection(validFolderIDs)
+    return state.expandedNavigatorFolderIDs != previous
 }
 
 /// 刻意不做 @Observable：滚动位置每帧都在变，进入观察体系会把整个工作区拖进重绘。
@@ -516,6 +581,8 @@ private struct PersistedReviewStateEntry: Codable {
 
 private struct PersistedReviewState: Codable {
     let collapsedFileIDs: Set<String>
+    let knownFileIDs: Set<String>
+    let expandedNavigatorFolderIDs: Set<String>
     let focusedFileID: String?
     let reviewedSnapshotByFileID: [String: DiffReviewSnapshotID]
     let wholeFileIDs: Set<String>
@@ -523,6 +590,8 @@ private struct PersistedReviewState: Codable {
 
     init(_ state: ReviewState) {
         collapsedFileIDs = state.collapsedFileIDs
+        knownFileIDs = state.knownFileIDs
+        expandedNavigatorFolderIDs = state.expandedNavigatorFolderIDs
         focusedFileID = state.focusedFileID
         reviewedSnapshotByFileID = state.reviewedSnapshotByFileID
         wholeFileIDs = state.wholeFileIDs
@@ -532,11 +601,55 @@ private struct PersistedReviewState: Codable {
     var reviewState: ReviewState {
         ReviewState(
             collapsedFileIDs: collapsedFileIDs,
+            knownFileIDs: knownFileIDs,
+            expandedNavigatorFolderIDs: expandedNavigatorFolderIDs,
             focusedFileID: focusedFileID,
             filterText: "",
             reviewedSnapshotByFileID: reviewedSnapshotByFileID,
             wholeFileIDs: wholeFileIDs,
             revealedContextLineCountByGapID: revealedContextLineCountByGapID
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case collapsedFileIDs
+        case knownFileIDs
+        case expandedNavigatorFolderIDs
+        case focusedFileID
+        case reviewedSnapshotByFileID
+        case wholeFileIDs
+        case revealedContextLineCountByGapID
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        collapsedFileIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .collapsedFileIDs
+        ) ?? []
+        knownFileIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .knownFileIDs
+        ) ?? []
+        expandedNavigatorFolderIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .expandedNavigatorFolderIDs
+        ) ?? []
+        focusedFileID = try container.decodeIfPresent(
+            String.self,
+            forKey: .focusedFileID
+        )
+        reviewedSnapshotByFileID = try container.decodeIfPresent(
+            [String: DiffReviewSnapshotID].self,
+            forKey: .reviewedSnapshotByFileID
+        ) ?? [:]
+        wholeFileIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .wholeFileIDs
+        ) ?? []
+        revealedContextLineCountByGapID = try container.decodeIfPresent(
+            [String: Int].self,
+            forKey: .revealedContextLineCountByGapID
+        ) ?? [:]
     }
 }

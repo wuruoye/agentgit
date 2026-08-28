@@ -3,6 +3,33 @@ import XCTest
 @testable import AgentGitApp
 
 final class IntegratedReviewWorkspaceTests: XCTestCase {
+    func testReviewNavigationWidthProtectsNarrowReviewPane() {
+        XCTAssertEqual(
+            clampedReviewNavigationPaneWidth(240, totalWidth: 800),
+            233,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            clampedReviewNavigationPaneWidth(100, totalWidth: 800),
+            180,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            clampedReviewNavigationPaneWidth(400, totalWidth: 1_200),
+            300,
+            accuracy: 0.001
+        )
+    }
+
+    func testLongCommitMessagesOfferFullReader() {
+        XCTAssertFalse(commitMessageNeedsFullReader("Short body"))
+        XCTAssertFalse(commitMessageNeedsFullReader("One\nTwo\nThree"))
+        XCTAssertTrue(commitMessageNeedsFullReader("One\nTwo\nThree\nFour"))
+        XCTAssertTrue(
+            commitMessageNeedsFullReader(String(repeating: "long message ", count: 24))
+        )
+    }
+
     func testPendingAndCommitSelectionsRemainMutuallyExclusive() {
         let first = IntegratedOverviewSelection.commit("first")
         let second = IntegratedOverviewSelection.commit("second")
@@ -117,6 +144,24 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
                 action: .unstage
             )
         )
+        XCTAssertEqual(
+            pendingFileDiscardCommand(
+                context: .pending,
+                focusedFileID: working.id.stackID,
+                items: [working, staged]
+            ),
+            PendingFilePrimaryCommand(
+                fileID: working.id.stackID,
+                action: .discard
+            )
+        )
+        XCTAssertNil(
+            pendingFileDiscardCommand(
+                context: .pending,
+                focusedFileID: staged.id.stackID,
+                items: [working, staged]
+            )
+        )
         XCTAssertNil(
             pendingFilePrimaryCommand(
                 context: .pending,
@@ -129,6 +174,31 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
                 context: .commit("commit"),
                 item: working
             )
+        )
+        let voiceOverDiff = GitFileDiff(
+            change: ordinary,
+            scope: .working,
+            hunks: [],
+            state: .textual,
+            addedLineCount: 3,
+            deletedLineCount: 2
+        )
+        XCTAssertEqual(
+            navigatorFileAccessibilityLabel(
+                item: working,
+                diff: voiceOverDiff,
+                isReviewed: true
+            ),
+            "Sources/App.swift, modified, 3 additions, 2 deletions, reviewed"
+        )
+        XCTAssertEqual(
+            navigatorFileHelpText(
+                item: working,
+                primaryActionTitle: "Stage",
+                canDiscard: true
+            ),
+            "Sources/App.swift\n\nPress Space to stage this file. "
+                + "Press Command-Shift-Delete twice to discard this file."
         )
 
         let dirtySubmodule = GitFileChange(
@@ -159,6 +229,17 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
                 context: .pending,
                 focusedFileID: dirtySubmoduleItem.id.stackID,
                 items: [dirtySubmoduleItem]
+            )
+        )
+        XCTAssertEqual(
+            pendingFileDiscardCommand(
+                context: .pending,
+                focusedFileID: dirtySubmoduleItem.id.stackID,
+                items: [dirtySubmoduleItem]
+            ),
+            PendingFilePrimaryCommand(
+                fileID: dirtySubmoduleItem.id.stackID,
+                action: .discard
             )
         )
     }
@@ -192,6 +273,232 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         XCTAssertEqual(groups[0].items, [working])
         XCTAssertEqual(groups[1].items, [staged])
         XCTAssertNotEqual(groups[0].items[0].id, groups[1].items[0].id)
+    }
+
+    func testFilesNavigatorBuildsCollapsedFolderTree() throws {
+        let readme = makeFileItem(path: "README.md")
+        let app = makeFileItem(path: "Sources/App.swift")
+        let feature = makeFileItem(path: "Sources/Feature/Thing.swift")
+        let nodes = navigatorTreeNodes(
+            items: [feature, readme, app],
+            namespace: "working"
+        )
+
+        XCTAssertEqual(nodes.count, 2)
+        guard case let .folder(sourceID, sourceName, sourceCount, sourceChildren) = nodes[0]
+        else {
+            return XCTFail("Expected Sources folder")
+        }
+        XCTAssertEqual(sourceName, "Sources")
+        XCTAssertEqual(sourceCount, 2)
+        XCTAssertEqual(sourceChildren.count, 2)
+        guard case let .file(rootFile) = nodes[1] else {
+            return XCTFail("Expected root file")
+        }
+        XCTAssertEqual(rootFile, readme)
+
+        XCTAssertEqual(
+            flattenedNavigatorTreeRows(
+                nodes: nodes,
+                expandedFolderIDs: []
+            ).map(\.id),
+            [sourceID, "navigator-file:\(readme.id.stackID)"]
+        )
+
+        guard case let .folder(featureID, _, _, _) = sourceChildren[0] else {
+            return XCTFail("Expected nested Feature folder")
+        }
+        let sourceExpanded = flattenedNavigatorTreeRows(
+            nodes: nodes,
+            expandedFolderIDs: [sourceID]
+        )
+        XCTAssertEqual(
+            sourceExpanded.map(\.id),
+            [
+                sourceID,
+                featureID,
+                "navigator-file:\(app.id.stackID)",
+                "navigator-file:\(readme.id.stackID)"
+            ]
+        )
+        XCTAssertEqual(sourceExpanded.map(\.depth), [0, 1, 1, 0])
+
+        let fullyExpanded = flattenedNavigatorTreeRows(
+            nodes: nodes,
+            expandedFolderIDs: [sourceID, featureID]
+        )
+        XCTAssertEqual(
+            fullyExpanded.map(\.id),
+            [
+                sourceID,
+                featureID,
+                "navigator-file:\(feature.id.stackID)",
+                "navigator-file:\(app.id.stackID)",
+                "navigator-file:\(readme.id.stackID)"
+            ]
+        )
+        XCTAssertEqual(fullyExpanded.map(\.depth), [0, 1, 2, 1, 0])
+    }
+
+    func testFilesNavigatorKeepsDuplicateNamesDistinctAcrossDeepPaths() {
+        let first = makeFileItem(
+            path: "Sources/Feature/VeryLongGeneratedDirectoryName/Config.swift"
+        )
+        let second = makeFileItem(
+            path: "Tests/Fixtures/VeryLongGeneratedDirectoryName/Config.swift"
+        )
+        let nodes = navigatorTreeNodes(
+            items: [second, first],
+            namespace: "context"
+        )
+        let rows = flattenedNavigatorTreeRows(
+            nodes: nodes,
+            expandedFolderIDs: navigatorFolderIDs(in: nodes)
+        )
+        let files = rows.compactMap { row -> IntegratedFileItem? in
+            guard case let .file(item) = row.content else {
+                return nil
+            }
+            return item
+        }
+
+        XCTAssertEqual(files.map(\.change.path), [first.change.path, second.change.path])
+        XCTAssertEqual(Set(files.map { $0.id.stackID }).count, 2)
+        XCTAssertTrue(rows.contains { $0.depth >= 3 })
+    }
+
+    func testFilesNavigatorFolderIdentityIncludesChangeScope() throws {
+        let item = makeFileItem(path: "Sources/App.swift")
+        let working = navigatorTreeNodes(items: [item], namespace: "working")
+        let staged = navigatorTreeNodes(items: [item], namespace: "staged")
+
+        XCTAssertNotEqual(working.first?.id, staged.first?.id)
+    }
+
+    func testFilesNavigatorFilterKeepsMatchingAncestorsAndUpdatesCounts() {
+        let feature = makeFileItem(path: "Sources/Feature/Thing.swift")
+        let app = makeFileItem(path: "Sources/App.swift")
+        let guide = makeFileItem(path: "Docs/Guide.md")
+        let nodes = navigatorTreeNodes(
+            items: [feature, app, guide],
+            namespace: "working"
+        )
+
+        let filtered = filteredNavigatorTreeNodes(
+            nodes,
+            query: "feature/thing"
+        )
+        let folderIDs = navigatorFolderIDs(in: filtered)
+        let rows = flattenedNavigatorTreeRows(
+            nodes: filtered,
+            expandedFolderIDs: folderIDs
+        )
+        let files = rows.compactMap { row -> IntegratedFileItem? in
+            guard case let .file(item) = row.content else {
+                return nil
+            }
+            return item
+        }
+
+        XCTAssertEqual(folderIDs.count, 2)
+        XCTAssertEqual(files, [feature])
+        guard case let .folder(_, _, fileCount, _) = filtered.first else {
+            return XCTFail("Expected matching Sources folder")
+        }
+        XCTAssertEqual(fileCount, 1)
+    }
+
+    @MainActor
+    func testFilesNavigatorTreeCacheReusesUnchangedInput() {
+        let cache = NavigatorTreeCache()
+        let first = makeFileItem(path: "Sources/App.swift")
+        let second = makeFileItem(path: "Sources/Feature/Thing.swift")
+
+        _ = cache.nodes(items: [first], namespace: "working")
+        _ = cache.nodes(items: [first], namespace: "working")
+        XCTAssertEqual(cache.buildCount, 1)
+
+        _ = cache.nodes(items: [first, second], namespace: "working")
+        XCTAssertEqual(cache.buildCount, 2)
+
+        _ = cache.nodes(items: [first], namespace: "staged")
+        XCTAssertEqual(cache.buildCount, 3)
+    }
+
+    func testFilesNavigatorBuildsFortyThousandFileTreeWithinOneSecond() {
+        let items = (0..<40_000).map { index in
+            makeFileItem(
+                path: "Sources/Module\(index % 100)/File\(index).swift"
+            )
+        }
+        var nodes: [NavigatorTreeNode] = []
+
+        let elapsed = ContinuousClock().measure {
+            nodes = navigatorTreeNodes(items: items, namespace: "performance")
+        }
+
+        XCTAssertEqual(navigatorFolderIDs(in: nodes).count, 101)
+        XCTAssertLessThan(elapsed, .seconds(1))
+    }
+
+    func testPendingItemsAndBothTreesBuildFortyThousandChangesWithinOneSecond() {
+        let changes = (0..<40_000).map { index -> GitFileChange in
+            let status: (index: Character, worktree: Character, kind: GitChangeKind) =
+                switch index % 4 {
+                case 0: ("M", "M", .ordinary)
+                case 1: (".", "M", .ordinary)
+                case 2: ("M", ".", .ordinary)
+                default: ("?", "?", .untracked)
+                }
+            return GitFileChange(
+                path: "Sources/Module\(index % 100)/File\(index).swift",
+                originalPath: nil,
+                indexStatus: status.index,
+                worktreeStatus: status.worktree,
+                kind: status.kind
+            )
+        }
+        let snapshot = GitWorktreeSnapshot(
+            worktree: GitWorktree(
+                rootURL: URL(fileURLWithPath: "/worktrees/performance"),
+                headOID: String(repeating: "a", count: 40),
+                branchRef: "refs/heads/main",
+                isBare: false,
+                isDetached: false,
+                lockedReason: nil,
+                prunableReason: nil
+            ),
+            status: GitStatusSnapshot(changes: changes),
+            diffStat: .zero,
+            lastActivityAt: Date(),
+            errorMessage: nil
+        )
+        var pending = PendingIntegratedFileItems(
+            working: [],
+            untracked: [],
+            staged: []
+        )
+        var workingTree: [NavigatorTreeNode] = []
+        var stagedTree: [NavigatorTreeNode] = []
+
+        let elapsed = ContinuousClock().measure {
+            pending = pendingIntegratedFileItems(in: snapshot)
+            workingTree = navigatorTreeNodes(
+                items: pending.working + pending.untracked,
+                namespace: "working"
+            )
+            stagedTree = navigatorTreeNodes(
+                items: pending.staged,
+                namespace: "staged"
+            )
+        }
+
+        XCTAssertEqual(pending.working.count, 20_000)
+        XCTAssertEqual(pending.untracked.count, 10_000)
+        XCTAssertEqual(pending.staged.count, 20_000)
+        XCTAssertEqual(navigatorFolderIDs(in: workingTree).count, 76)
+        XCTAssertEqual(navigatorFolderIDs(in: stagedTree).count, 51)
+        XCTAssertLessThan(elapsed, .seconds(1))
     }
 
     func testDiffFocusDoesNotRequestAFileHeaderScroll() {
@@ -301,6 +608,39 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         XCTAssertEqual(
             historyRestorationCommitIDs(compatibleLegacyRange),
             [headOID, rootOID]
+        )
+    }
+
+    func testRequestedHistoryContextRemainsActiveWhileSearchReloads() {
+        let commitID = String(repeating: "a", count: 40)
+        let commit = makeCommit(oid: commitID, parentOIDs: [])
+        let requested = ReviewNavigationState(
+            context: .commit(commitID),
+            selectedCommitIDs: [commitID],
+            pane: .files,
+            historyFilter: "author:reviewer"
+        )
+
+        XCTAssertEqual(
+            effectiveReviewContext(
+                requestedRestoration: requested,
+                selectedCommits: []
+            ),
+            .commit(commitID)
+        )
+        XCTAssertEqual(
+            effectiveReviewContext(
+                requestedRestoration: nil,
+                selectedCommits: [commit]
+            ),
+            .commit(commitID)
+        )
+        XCTAssertEqual(
+            effectiveReviewContext(
+                requestedRestoration: nil,
+                selectedCommits: []
+            ),
+            .pending
         )
     }
 
@@ -436,6 +776,42 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
         totalLimitedCache.insert(firstPage, for: firstKey)
         XCTAssertNil(totalLimitedCache.page(for: firstKey))
+    }
+
+    func testCompletedHistorySearchDoesNotReloadWhenApplicationReactivates() throws {
+        let query = try XCTUnwrap(GitHistorySearchQuery("author:reviewer"))
+        let completed = HistorySearchLoadKey(
+            worktreeID: "/worktrees/feature",
+            revision: "head",
+            query: query
+        )
+
+        XCTAssertFalse(
+            shouldLoadHistorySearch(
+                requested: completed,
+                completed: completed
+            )
+        )
+        XCTAssertTrue(
+            shouldLoadHistorySearch(
+                requested: HistorySearchLoadKey(
+                    worktreeID: completed.worktreeID,
+                    revision: "new-head",
+                    query: query
+                ),
+                completed: completed
+            )
+        )
+        XCTAssertFalse(
+            shouldLoadHistorySearch(
+                requested: HistorySearchLoadKey(
+                    worktreeID: completed.worktreeID,
+                    revision: completed.revision,
+                    query: nil
+                ),
+                completed: completed
+            )
+        )
     }
 
     func testLaterDiffBatchKeepsFilesLoadedByEarlierBatch() {
@@ -699,7 +1075,7 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
                 isApplyingMutation: false,
                 runningAction: nil
             ),
-            "Ahead/behind: Upstream origin/feature is unavailable."
+            nil
         )
         XCTAssertNil(
             gitRemoteOperationUnavailableReason(
@@ -759,6 +1135,50 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
         XCTAssertEqual(gitPushActionTitle(branchStatus: nil), "Publish")
         XCTAssertEqual(gitPushActionTitle(branchStatus: upstream), "Push")
+
+        let behind = GitBranchStatus(
+            upstreamRef: "origin/feature",
+            aheadCount: 0,
+            behindCount: 2
+        )
+        XCTAssertNil(
+            gitRemoteOperationUnavailableReason(
+                action: .pull,
+                worktree: branch,
+                branchStatus: behind,
+                isApplyingMutation: false,
+                runningAction: nil
+            )
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                action: .push,
+                worktree: branch,
+                branchStatus: behind,
+                isApplyingMutation: false,
+                runningAction: nil
+            ),
+            "Pull upstream changes before pushing."
+        )
+
+        let diverged = GitBranchStatus(
+            upstreamRef: "origin/feature",
+            aheadCount: 1,
+            behindCount: 1
+        )
+        for action in [GitRemoteAction.pull, .push] {
+            XCTAssertEqual(
+                gitRemoteOperationUnavailableReason(
+                    action: action,
+                    worktree: branch,
+                    branchStatus: diverged,
+                    isApplyingMutation: false,
+                    runningAction: nil
+                ),
+                "Local and upstream branches have diverged. Resolve the branch before "
+                    + "pulling or pushing."
+            )
+        }
     }
 
     func testRemoteOperationFeedbackUsesTransientResultMeaning() {
@@ -769,8 +1189,26 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         XCTAssertEqual(completed.message, "Push completed")
         XCTAssertEqual(completed.compactTitle, "Push complete")
         XCTAssertEqual(cancelled.systemImage, "xmark.circle")
-        XCTAssertEqual(cancelled.message, "Pull cancellation requested")
-        XCTAssertEqual(cancelled.compactTitle, "Cancel requested")
+        XCTAssertEqual(cancelled.message, "Pull cancelled")
+        XCTAssertEqual(cancelled.compactTitle, "Cancelled")
+        XCTAssertEqual(
+            gitRemoteOperationFailureMessage(
+                action: .push,
+                error: GitRemoteActionError.noRemote
+            ),
+            "Push failed: Add a Git remote before publishing this branch."
+        )
+        XCTAssertEqual(
+            gitRemoteOperationFailureMessage(
+                action: .pull,
+                error: GitCommandFailure(
+                    arguments: ["pull", "--ff-only"],
+                    exitCode: 1,
+                    stderr: "fatal: Not possible to fast-forward"
+                )
+            ),
+            "Pull failed: fatal: Not possible to fast-forward"
+        )
     }
 
     func testMutationRefreshFailureMessageOnlyExistsForFailedRefresh() {
@@ -996,6 +1434,21 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
             parentOIDs: parentOIDs,
             refNames: [],
             subject: oid
+        )
+    }
+
+    private func makeFileItem(path: String) -> IntegratedFileItem {
+        let change = GitFileChange(
+            path: path,
+            originalPath: nil,
+            indexStatus: ".",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        return IntegratedFileItem(
+            id: .pending(scope: .working, changeID: change.id),
+            change: change,
+            scope: .working
         )
     }
 }

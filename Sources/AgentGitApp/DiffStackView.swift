@@ -212,6 +212,7 @@ struct DiffStackFile: Identifiable, Hashable {
     let canApplyPrimaryAction: Bool
     let canDiscard: Bool
     let isMutationEnabled: Bool
+    let mutationSnapshotID: DiffReviewSnapshotID?
     let contextGaps: [DiffStackContextGap]
     let mutationMode: DiffStackMutationMode?
     let diff: GitFileDiff?
@@ -226,6 +227,15 @@ struct DiffStackGroup: Identifiable, Hashable {
     let files: [DiffStackFile]
 }
 
+struct DiffStackCommand: Equatable {
+    enum Action: Equatable {
+        case requestFileDiscard(String)
+    }
+
+    let id: UInt64
+    let action: Action
+}
+
 /// 单个 `NSTableView` 承载整次评审的所有文件，展开只是插入行，不新建视图层级。
 struct DiffStackView: NSViewRepresentable {
     let groups: [DiffStackGroup]
@@ -236,6 +246,7 @@ struct DiffStackView: NSViewRepresentable {
     let isApplicationActive: Bool
     let loadingMessage: String
     let mutationActionsEnabled: Bool
+    let command: DiffStackCommand?
     let onFocusFile: (String) -> Void
     let onToggleFile: (String) -> Void
     let onToggleGroup: (String) -> Void
@@ -271,17 +282,19 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.loadingMessage = loadingMessage
         scrollView.mutationActionsEnabled = mutationActionsEnabled
         scrollView.display(groups: groups, layout: layout, scrollTarget: scrollTarget)
+        scrollView.perform(command)
     }
 }
 
 final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableViewDelegate {
     private enum Metrics {
         static let lineHeight: CGFloat = 20
-        static let hunkHeight: CGFloat = 26
+        static let hunkHeight: CGFloat = 24
         static let imageHeight: CGFloat = 360
         static let contextEdgeHeight: CGFloat = 14
-        static let fileHeight: CGFloat = 38
-        static let groupHeight: CGFloat = 30
+        static let fileContextToggleHeight: CGFloat = 28
+        static let fileHeight: CGFloat = 32
+        static let groupHeight: CGFloat = 28
         static let noteHeight: CGFloat = 30
         static let unifiedCodeLeading: CGFloat = 134
         static let unifiedCodeTrailing: CGFloat = 12
@@ -358,6 +371,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var codeContentWidthByHunkID: [String: CGFloat] = [:]
     private var codeHorizontalOffsetByHunkID: [String: CGFloat] = [:]
     private var appliedViewportWidth: CGFloat?
+    private var appliedCommandID: UInt64?
 
     private struct PendingHunkAnchor {
         let anchorID: String
@@ -370,6 +384,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         let newLineNumber: Int?
         let viewportY: CGFloat
         let targetWholeFileState: Bool
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(
+            width: NSView.noIntrinsicMetric,
+            height: NSView.noIntrinsicMetric
+        )
     }
 
     override init(frame frameRect: NSRect) {
@@ -430,6 +451,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         scrollKey = key
         appliedScrollTarget = nil
+        appliedCommandID = nil
         pendingHunkAnchor = nil
         pendingCodeAnchor = nil
         codeHorizontalOffsetByHunkID = [:]
@@ -437,6 +459,41 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         pendingRestoreOffset = restored > 0 ? restored : nil
         contentView.scroll(to: .zero)
         reflectScrolledClipView(contentView)
+    }
+
+    func perform(_ command: DiffStackCommand?) {
+        guard let command, command.id != appliedCommandID else {
+            return
+        }
+        appliedCommandID = command.id
+        switch command.action {
+        case let .requestFileDiscard(fileID):
+            _ = requestFileDiscard(fileID: fileID)
+        }
+    }
+
+    @discardableResult
+    func requestFileDiscard(fileID: String) -> Bool {
+        guard mutationActionsEnabled,
+              let row = fileRowIndexByID[fileID],
+              rows.indices.contains(row),
+              case let .file(file) = rows[row],
+              file.mutationMode == .working,
+              file.canDiscard,
+              file.isMutationEnabled else {
+            return false
+        }
+        focusFile(fileID)
+        scroll(toFileID: fileID)
+        tableView.layoutSubtreeIfNeeded()
+        guard let cell = tableView.view(
+            atColumn: 0,
+            row: row,
+            makeIfNecessary: true
+        ) as? DiffFileCellView else {
+            return false
+        }
+        return cell.requestDiscardAction()
     }
 
     /// diff 是异步到的，文档会一路变高；够高之前反复重试，够高了才算恢复完成。
@@ -558,6 +615,20 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 }
             )
             return cell
+        case let .fileContextToggle(fileID, showsWholeFile, isLoading):
+            let cell = reusableCell(
+                DiffFileContextToggleCellView.self,
+                identifier: DiffFileContextToggleCellView.identifier
+            )
+            cell.update(
+                fileID: fileID,
+                showsWholeFile: showsWholeFile,
+                isLoading: isLoading,
+                toggleHandler: { [weak self] fileID in
+                    self?.handleWholeFileToggle(fileID: fileID)
+                }
+            )
+            return cell
         case let .line(line, language, _, hunkID, _):
             let cell = reusableCell(DiffLineCellView.self, identifier: DiffLineCellView.identifier)
             cell.update(line: line, language: language)
@@ -598,6 +669,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case .file: Metrics.fileHeight
         case .hunk: Metrics.hunkHeight
         case .contextEdge: Metrics.contextEdgeHeight
+        case .fileContextToggle: Metrics.fileContextToggleHeight
         case .line, .sideBySide: Metrics.lineHeight
         case .image: Metrics.imageHeight
         case .note: Metrics.noteHeight
@@ -607,7 +679,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
         case .hunk, .line, .sideBySide: true
-        case .group, .file, .contextEdge, .image, .note: false
+        case .group, .file, .fileContextToggle, .contextEdge, .image, .note: false
         }
     }
 
@@ -627,6 +699,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         var builtFileSections: [FileSection] = []
         var groupIndexByID: [String: Int] = [:]
         var fileIndexByID: [String: Int] = [:]
+        var knownHunkIDs = Set<String>()
         built.reserveCapacity(Self.estimatedRowCount(for: groups))
 
         for group in groups {
@@ -652,6 +725,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 continue
             }
             for file in group.files {
+                if let diff = file.diff {
+                    for hunk in diff.hunks {
+                        knownHunkIDs.insert(
+                            hunkAnchorID(fileID: file.id, hunkID: hunk.id)
+                        )
+                    }
+                }
                 let headerRow = built.count
                 fileIndexByID[file.id] = headerRow
                 built.append(.file(file))
@@ -682,7 +762,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             ceil(CGFloat(columnCount) * Metrics.codeCharacterWidth)
         }
         codeHorizontalOffsetByHunkID = codeHorizontalOffsetByHunkID.filter {
-            maximumCodeColumnCountByHunkID[$0.key] != nil
+            knownHunkIDs.contains($0.key)
         }
         groupSections = builtGroupSections
         fileSections = builtFileSections
@@ -763,6 +843,15 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             rows.append(.note(loadingMessage))
             return
         }
+        if file.canToggleWholeFile || file.isLoadingWholeFile {
+            rows.append(
+                .fileContextToggle(
+                    fileID: file.id,
+                    showsWholeFile: file.showsWholeFile,
+                    isLoading: file.isLoadingWholeFile
+                )
+            )
+        }
         if let imageDiff = file.imageDiff {
             rows.append(.image(imageDiff))
             return
@@ -806,12 +895,14 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     DiffStackHunkRow(
                         anchorID: anchorID,
                         title: Self.hunkTitle(hunk),
+                        location: Self.hunkLocation(hunk),
                         rawHeader: hunk.header,
                         layout: layout,
                         fileID: file.id,
                         lineIDs: changedLineIDs,
                         mutationMode: granularMutationMode,
                         isMutationEnabled: file.isMutationEnabled,
+                        mutationSnapshotID: file.mutationSnapshotID,
                         showsWholeFile: file.showsWholeFile,
                         isLoadingWholeFile: file.isLoadingWholeFile,
                         canToggleWholeFile: file.canToggleWholeFile
@@ -875,6 +966,12 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         return "Lines \(oldRange) → \(newRange)"
     }
 
+    private static func hunkLocation(_ hunk: GitDiffHunk) -> String {
+        let oldRange = lineRange(start: hunk.oldStart, count: hunk.oldCount)
+        let newRange = lineRange(start: hunk.newStart, count: hunk.newCount)
+        return "−\(oldRange)  +\(newRange)"
+    }
+
     private static func lineRange(start: Int, count: Int) -> String {
         guard count > 1 else {
             return "\(start)"
@@ -928,6 +1025,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     return fileTotal + 2
                 }
                 return fileTotal + 1
+                    + ((file.canToggleWholeFile || file.isLoadingWholeFile) ? 1 : 0)
                     + file.contextGaps.count(where: { $0.hiddenLineCount > 0 })
                     + file.contextGaps.reduce(0) { $0 + $1.revealedLines.count }
                     + diff.hunks.reduce(diff.hunks.count) { count, hunk in
@@ -955,7 +1053,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                         displayedColumnCount(pair.new?.content ?? "")
                     )
                 )
-            case .group, .file, .hunk, .contextEdge, .image, .note:
+            case .group, .file, .fileContextToggle, .hunk, .contextEdge, .image, .note:
                 break
             }
         }
@@ -1145,7 +1243,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return [pair.new, pair.old].compactMap { $0 }.first {
                 $0.oldLineNumber != nil || $0.newLineNumber != nil
             }
-        case .group, .file, .hunk, .contextEdge, .image, .note:
+        case .group, .file, .fileContextToggle, .hunk, .contextEdge, .image, .note:
             return nil
         }
     }
@@ -1201,7 +1299,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     private func configureTable() {
         drawsBackground = true
-        backgroundColor = .textBackgroundColor
+        backgroundColor = AgentGitPalette.canvas
         borderType = .noBorder
         hasHorizontalScroller = false
         hasVerticalScroller = true
@@ -1222,11 +1320,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         tableView.rowHeight = Metrics.lineHeight
         tableView.usesAutomaticRowHeights = false
         tableView.usesAlternatingRowBackgroundColors = false
-        tableView.backgroundColor = .textBackgroundColor
+        tableView.backgroundColor = AgentGitPalette.canvas
         tableView.focusRingType = .default
         tableView.setAccessibilityLabel("Diff Review")
         tableView.setAccessibilityHelp(
-            "Use Tab and Shift-Tab to navigate hunks. Use Command-C to copy selected rows."
+            "Drag across code to select characters. Use Tab and Shift-Tab to navigate hunks."
         )
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = true
@@ -1511,7 +1609,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .group(group, _):
             onToggleGroup?(group.id)
             return true
-        case .hunk, .line, .sideBySide, .contextEdge, .image, .note:
+        case .hunk, .line, .sideBySide, .fileContextToggle, .contextEdge, .image, .note:
             focusFile(atRow: row)
             return false
         }
@@ -1692,7 +1790,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 )
             }
 
-        case .group, .contextEdge, .image, .note:
+        case .group, .fileContextToggle, .contextEdge, .image, .note:
             break
         }
         return menu
@@ -1744,7 +1842,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                         return line.id
                     }
                 )
-            case .group, .file, .hunk, .contextEdge, .image, .note:
+            case .group, .file, .fileContextToggle, .hunk, .contextEdge, .image, .note:
                 continue
             }
             guard let rowMode, !rowLineIDs.isEmpty else {
@@ -1834,6 +1932,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         tableView.sizeLastColumnToFit()
         for hunkID in Array(codeHorizontalOffsetByHunkID.keys) {
+            guard codeContentWidthByHunkID[hunkID] != nil else {
+                continue
+            }
             let offset = codeHorizontalOffsetByHunkID[hunkID] ?? 0
             codeHorizontalOffsetByHunkID[hunkID] = min(
                 offset,
@@ -1906,7 +2007,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
             let paneX = cellPoint.x.truncatingRemainder(dividingBy: paneWidth)
             return paneX >= Metrics.sideCodeLeading ? hunkID : nil
-        case .group, .file, .hunk, .contextEdge, .image, .note:
+        case .group, .file, .fileContextToggle, .hunk, .contextEdge, .image, .note:
             return nil
         }
     }
@@ -1925,7 +2026,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             case let .line(_, _, _, candidateHunkID, _),
                  let .sideBySide(_, _, _, candidateHunkID, _):
                 hunkID = candidateHunkID
-            case .group, .file, .hunk, .contextEdge, .image, .note:
+            case .group, .file, .fileContextToggle, .hunk, .contextEdge, .image, .note:
                 continue
             }
             if let targetHunkID, hunkID != targetHunkID {
@@ -1980,7 +2081,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     return values[0]
                 }
                 return values.joined(separator: "\n")
-            case .file, .group, .contextEdge, .image, .note:
+            case .file, .group, .fileContextToggle, .contextEdge, .image, .note:
                 return nil
             }
         }.joined(separator: "\n")
@@ -2020,6 +2121,7 @@ private struct DiffStackToken: Equatable {
         let canApplyPrimaryAction: Bool
         let canDiscard: Bool
         let isMutationEnabled: Bool
+        let mutationSnapshotID: UInt64?
         let contextGaps: [ContextGapEntry]
         let mutationMode: DiffStackMutationMode?
         let diffRenderID: UInt64?
@@ -2064,6 +2166,7 @@ private struct DiffStackToken: Equatable {
                         canApplyPrimaryAction: file.canApplyPrimaryAction,
                         canDiscard: file.canDiscard,
                         isMutationEnabled: file.isMutationEnabled,
+                        mutationSnapshotID: file.mutationSnapshotID?.rawValue,
                         contextGaps: file.contextGaps.map {
                             ContextGapEntry(
                                 id: $0.id,
@@ -2120,12 +2223,14 @@ private struct DiffStackFilePresentationToken: Equatable {
 private struct DiffStackHunkRow {
     let anchorID: String
     let title: String
+    let location: String
     let rawHeader: String
     let layout: DiffLayoutMode
     let fileID: String
     let lineIDs: Set<GitDiffLine.ID>
     let mutationMode: DiffStackMutationMode?
     let isMutationEnabled: Bool
+    let mutationSnapshotID: DiffReviewSnapshotID?
     let showsWholeFile: Bool
     let isLoadingWholeFile: Bool
     let canToggleWholeFile: Bool
@@ -2134,6 +2239,7 @@ private struct DiffStackHunkRow {
 private enum DiffStackRow {
     case group(DiffStackGroup, count: Int)
     case file(DiffStackFile)
+    case fileContextToggle(fileID: String, showsWholeFile: Bool, isLoading: Bool)
     case hunk(DiffStackHunkRow)
     case contextEdge(DiffStackContextGap, fileID: String)
     case line(
@@ -2156,7 +2262,13 @@ private enum DiffStackRow {
 
 @MainActor
 func shouldToggleDiffRow(for hitView: NSView?) -> Bool {
-    !(hitView is NSButton)
+    guard !(hitView is NSButton) else {
+        return false
+    }
+    if let textField = hitView as? NSTextField, textField.isSelectable {
+        return false
+    }
+    return true
 }
 
 private final class DiffCopyingTableView: NSTableView {
@@ -2168,11 +2280,20 @@ private final class DiffCopyingTableView: NSTableView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if !shouldToggleDiffRow(for: hitTest(point)) {
+        let hitView = hitTest(point)
+        let clickedRow = row(at: point)
+        if let textField = hitView as? NSTextField, textField.isSelectable {
+            if clickedRow >= 0 {
+                _ = rowClickHandler?(clickedRow)
+            }
+            window?.makeFirstResponder(textField)
+            textField.mouseDown(with: event)
+            return
+        }
+        if !shouldToggleDiffRow(for: hitView) {
             super.mouseDown(with: event)
             return
         }
-        let clickedRow = row(at: point)
         if clickedRow >= 0, rowClickHandler?(clickedRow) == true {
             return
         }
@@ -2281,12 +2402,12 @@ private final class DiffStickyClipView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        AgentGitPalette.groupHeader.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: groupHeight).fill()
-        NSColor.controlBackgroundColor.setFill()
+        AgentGitPalette.fileHeader.setFill()
         NSRect(x: 0, y: groupHeight, width: bounds.width, height: fileHeight).fill()
         if fileHeight > 0 {
-            NSColor.separatorColor.setFill()
+            AgentGitPalette.separator.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
     }
@@ -2337,13 +2458,15 @@ private final class DiffGroupCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        chevron.frame = NSRect(x: 10, y: 8, width: 14, height: 14)
-        label.frame = NSRect(x: 26, y: 7, width: max(0, bounds.width - 40), height: 16)
+        chevron.frame = NSRect(x: 10, y: 7, width: 14, height: 14)
+        label.frame = NSRect(x: 26, y: 6, width: max(0, bounds.width - 40), height: 16)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        AgentGitPalette.groupHeader.setFill()
         dirtyRect.fill()
+        AgentGitPalette.separator.withAlphaComponent(0.55).setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
 
@@ -2401,6 +2524,7 @@ private final class DiffFileCellView: NSTableCellView {
     private var canDiscard = false
     private var isConfirmingDiscard = false
     private var discardConfirmationTimer: Timer?
+    private var discardConfirmationSnapshotID: DiffReviewSnapshotID?
     private var fileID = ""
     private var mutationMode: DiffStackMutationMode?
 
@@ -2471,51 +2595,49 @@ private final class DiffFileCellView: NSTableCellView {
         let reviewX = actionX - reviewWidth - reviewSpacing
         let wholeFileX = reviewX - wholeFileWidth - wholeFileSpacing
         let statsX = wholeFileX - statsWidth - 6
-        chevron.frame = NSRect(x: 10, y: 12, width: 14, height: 15)
-        status.frame = NSRect(x: 26, y: 12, width: 16, height: 15)
+        chevron.frame = NSRect(x: 10, y: 9, width: 14, height: 14)
+        status.frame = NSRect(x: 26, y: 9, width: 16, height: 15)
         title.frame = NSRect(
             x: 48,
-            y: 11,
+            y: 8,
             width: max(0, statsX - 54),
             height: 17
         )
         stats.frame = NSRect(
             x: statsX,
-            y: 12,
+            y: 9,
             width: statsWidth,
             height: 15
         )
-        menuButton.frame = NSRect(x: menuX, y: 7, width: menuWidth, height: 24)
+        menuButton.frame = NSRect(x: menuX, y: 4, width: menuWidth, height: 24)
         wholeFileButton.frame = NSRect(
             x: wholeFileX,
-            y: 7,
+            y: 4,
             width: wholeFileWidth,
             height: 24
         )
-        reviewButton.frame = NSRect(x: reviewX, y: 7, width: reviewWidth, height: 24)
-        primaryButton.frame = NSRect(x: actionX, y: 8, width: primaryWidth, height: 22)
+        reviewButton.frame = NSRect(x: reviewX, y: 4, width: reviewWidth, height: 24)
+        primaryButton.frame = NSRect(x: actionX, y: 5, width: primaryWidth, height: 22)
         discardButton.frame = NSRect(
             x: actionX + primaryWidth + actionSpacing,
-            y: 8,
+            y: 5,
             width: discardWidth,
             height: 22
         )
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlBackgroundColor.setFill()
+        (isFocused ? AgentGitPalette.fileHeaderFocused : AgentGitPalette.fileHeader).setFill()
         dirtyRect.fill()
         if isReviewed {
-            NSColor.systemGreen.withAlphaComponent(0.07).setFill()
+            AgentGitPalette.additionBackground.withAlphaComponent(0.32).setFill()
             dirtyRect.fill()
         }
         if isFocused {
-            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
-            dirtyRect.fill()
-            NSColor.controlAccentColor.setFill()
-            NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+            AgentGitPalette.sidebarSelectionBorder.setFill()
+            NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
         }
-        NSColor.separatorColor.setFill()
+        AgentGitPalette.separator.withAlphaComponent(0.7).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -2527,14 +2649,17 @@ private final class DiffFileCellView: NSTableCellView {
         actionHandler: ((String, GitPendingSelectionAction) -> Void)? = nil,
         menuHandler: ((String) -> NSMenu?)? = nil
     ) {
-        if fileID != file.id || file.mutationMode != .working {
+        if fileID != file.id
+            || discardConfirmationSnapshotID != file.mutationSnapshotID
+            || file.mutationMode != .working {
             resetDiscardConfirmation()
         }
         fileID = file.id
+        discardConfirmationSnapshotID = file.mutationSnapshotID
         isFocused = file.isFocused
         isReviewed = file.isReviewed
         canReview = file.diff != nil
-        canToggleWholeFile = file.canToggleWholeFile
+        canToggleWholeFile = false
         canApplyPrimaryAction = file.mutationMode != nil && file.canApplyPrimaryAction
         canDiscard = file.mutationMode == .working && file.canDiscard
         mutationMode = file.mutationMode
@@ -2568,7 +2693,7 @@ private final class DiffFileCellView: NSTableCellView {
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         )
-        wholeFileButton.isHidden = !file.canToggleWholeFile
+        wholeFileButton.isHidden = true
         wholeFileButton.isEnabled = !file.isLoadingWholeFile
         wholeFileButton.contentTintColor = file.showsWholeFile
             ? .controlAccentColor
@@ -2612,6 +2737,17 @@ private final class DiffFileCellView: NSTableCellView {
             : pathToolTip
         needsLayout = true
         needsDisplay = true
+    }
+
+    @discardableResult
+    func requestDiscardAction() -> Bool {
+        guard canDiscard,
+              !discardButton.isHidden,
+              discardButton.isEnabled else {
+            return false
+        }
+        runDiscardAction()
+        return true
     }
 
     private func configure(_ button: NSButton, action: Selector) {
@@ -2739,68 +2875,55 @@ private final class DiffFileCellView: NSTableCellView {
         path: String,
         originalPath: String?
     ) -> NSAttributedString {
+        let text = NSMutableAttributedString()
+        if let originalPath, originalPath != path {
+            appendPath(originalPath, to: text, isCurrent: false)
+            text.append(
+                NSAttributedString(
+                    string: "  →  ",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
+                )
+            )
+        }
+        appendPath(path, to: text, isCurrent: true)
+        return text
+    }
+
+    private static func appendPath(
+        _ path: String,
+        to text: NSMutableAttributedString,
+        isCurrent: Bool
+    ) {
         let name = (path as NSString).lastPathComponent
         let parent = (path as NSString).deletingLastPathComponent
-        let text = NSMutableAttributedString()
-        if let originalPath {
-            let originalName = (originalPath as NSString).lastPathComponent
-            if originalName != name {
-                text.append(
-                    NSAttributedString(
-                        string: originalName,
-                        attributes: [
-                            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-                            .foregroundColor: NSColor.secondaryLabelColor
-                        ]
-                    )
+        if !parent.isEmpty {
+            text.append(
+                NSAttributedString(
+                    string: parent + "/",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
                 )
-                text.append(
-                    NSAttributedString(
-                        string: " → ",
-                        attributes: [
-                            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                            .foregroundColor: NSColor.tertiaryLabelColor
-                        ]
-                    )
-                )
-            }
+            )
         }
         text.append(
             NSAttributedString(
                 string: name,
                 attributes: [
-                    .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                    .foregroundColor: NSColor.labelColor
+                    .font: NSFont.systemFont(
+                        ofSize: 11.5,
+                        weight: isCurrent ? .medium : .regular
+                    ),
+                    .foregroundColor: isCurrent
+                        ? NSColor.labelColor
+                        : NSColor.secondaryLabelColor
                 ]
             )
         )
-
-        let pathDetail: String
-        if let originalPath {
-            let originalParent = (originalPath as NSString).deletingLastPathComponent
-            if originalParent != parent {
-                pathDetail = [originalParent, parent]
-                    .map { $0.isEmpty ? "." : $0 }
-                    .joined(separator: " → ")
-            } else {
-                pathDetail = parent
-            }
-        } else {
-            pathDetail = parent
-        }
-        guard !pathDetail.isEmpty else {
-            return text
-        }
-        text.append(
-            NSAttributedString(
-                string: " · \(pathDetail)",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                    .foregroundColor: NSColor.tertiaryLabelColor
-                ]
-            )
-        )
-        return text
     }
 
     private static func statsText(for diff: GitFileDiff?) -> NSAttributedString {
@@ -2815,13 +2938,19 @@ private final class DiffFileCellView: NSTableCellView {
         text.append(
             NSAttributedString(
                 string: "+\(diff.addedLineCount)",
-                attributes: [.font: font, .foregroundColor: NSColor.systemGreen]
+                attributes: [
+                    .font: font,
+                    .foregroundColor: AgentGitPalette.additionText
+                ]
             )
         )
         text.append(
             NSAttributedString(
                 string: "  −\(diff.deletedLineCount)",
-                attributes: [.font: font, .foregroundColor: NSColor.systemRed]
+                attributes: [
+                    .font: font,
+                    .foregroundColor: AgentGitPalette.deletionText
+                ]
             )
         )
         return text
@@ -2829,11 +2958,11 @@ private final class DiffFileCellView: NSTableCellView {
 
     private static func color(for status: DiffStackStatus) -> NSColor {
         switch status {
-        case .added, .untracked: .systemGreen
-        case .deleted: .systemRed
-        case .renamed: .systemBlue
-        case .conflicted: .systemPurple
-        case .modified: .systemOrange
+        case .added, .untracked: AgentGitPalette.statusAdded
+        case .deleted: AgentGitPalette.statusDeleted
+        case .renamed: AgentGitPalette.statusRenamed
+        case .conflicted: AgentGitPalette.statusConflicted
+        case .modified: AgentGitPalette.statusModified
         }
     }
 }
@@ -3252,6 +3381,82 @@ private final class DiffImageCanvasView: NSView {
     }
 }
 
+private final class DiffFileContextToggleCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("diff-file-context-toggle")
+
+    private let button = NSButton(title: "", target: nil, action: nil)
+    private var fileID = ""
+    private var toggleHandler: ((String) -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        button.identifier = NSUserInterfaceItemIdentifier("whole-file-toggle")
+        button.target = self
+        button.action = #selector(toggleWholeFile)
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.contentTintColor = .secondaryLabelColor
+        addSubview(button)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        button.frame = NSRect(x: 7, y: 2, width: 24, height: 24)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        AgentGitPalette.fileContext.setFill()
+        dirtyRect.fill()
+        AgentGitPalette.separator.withAlphaComponent(0.55).setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        super.draw(dirtyRect)
+    }
+
+    func update(
+        fileID: String,
+        showsWholeFile: Bool,
+        isLoading: Bool,
+        toggleHandler: @escaping (String) -> Void
+    ) {
+        self.fileID = fileID
+        self.toggleHandler = toggleHandler
+        let title: String
+        let symbol: String
+        if isLoading {
+            title = "Loading entire file…"
+            symbol = "ellipsis"
+        } else if showsWholeFile {
+            title = "Show only modified hunks"
+            symbol = "rectangle.compress.vertical"
+        } else {
+            title = "Show entire file"
+            symbol = "rectangle.expand.vertical"
+        }
+        button.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        )
+        button.isEnabled = !isLoading
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    @objc private func toggleWholeFile() {
+        toggleHandler?(fileID)
+    }
+}
+
 private final class DiffContextEdgeCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-context-edge")
 
@@ -3299,9 +3504,9 @@ private final class DiffContextEdgeCellView: NSTableCellView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.textBackgroundColor.setFill()
+        AgentGitPalette.canvas.setFill()
         dirtyRect.fill()
-        NSColor.separatorColor.withAlphaComponent(0.55).setFill()
+        AgentGitPalette.separator.withAlphaComponent(0.65).setFill()
         NSRect(x: 34, y: bounds.midY, width: max(0, bounds.width - 34), height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -3382,21 +3587,33 @@ private final class DiffHunkCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-hunk")
 
     private let unifiedTitle = DiffTextField(
-        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
-        textColor: .labelColor,
+        font: .monospacedSystemFont(ofSize: 11, weight: .medium),
+        textColor: .secondaryLabelColor,
         alignment: .left,
         selectable: false
     )
     private let oldTitle = DiffTextField(
-        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
-        textColor: .labelColor,
+        font: .monospacedSystemFont(ofSize: 11, weight: .medium),
+        textColor: .secondaryLabelColor,
         alignment: .left,
         selectable: false
     )
     private let newTitle = DiffTextField(
-        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
-        textColor: .labelColor,
+        font: .monospacedSystemFont(ofSize: 11, weight: .medium),
+        textColor: .secondaryLabelColor,
         alignment: .left,
+        selectable: false
+    )
+    private let marker = DiffTextField(
+        font: .monospacedSystemFont(ofSize: 10.5, weight: .medium),
+        textColor: .tertiaryLabelColor,
+        alignment: .center,
+        selectable: false
+    )
+    private let location = DiffTextField(
+        font: .monospacedSystemFont(ofSize: 10.5, weight: .medium),
+        textColor: .tertiaryLabelColor,
+        alignment: .right,
         selectable: false
     )
     private let paneDivider = NSBox()
@@ -3421,12 +3638,18 @@ private final class DiffHunkCellView: NSTableCellView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        marker.stringValue = "@@"
+        marker.identifier = NSUserInterfaceItemIdentifier("hunk-marker")
+        marker.setAccessibilityElement(false)
+        addSubview(marker)
         unifiedTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-unified")
         oldTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-old")
         newTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-new")
         addSubview(unifiedTitle)
         addSubview(oldTitle)
         addSubview(newTitle)
+        location.identifier = NSUserInterfaceItemIdentifier("hunk-location")
+        addSubview(location)
         paneDivider.boxType = .separator
         addSubview(paneDivider)
         addSubview(wholeFileButton)
@@ -3472,17 +3695,28 @@ private final class DiffHunkCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        let primaryWidth: CGFloat = mutationMode == nil ? 0 : 88
+        let primaryWidth: CGFloat = mutationMode == nil ? 0 : 86
         let discardWidth: CGFloat = mutationMode == .working ? 62 : 0
         let spacing: CGFloat = discardWidth > 0 ? 4 : 0
         let actionsWidth = primaryWidth + discardWidth + spacing
-        wholeFileButton.frame = NSRect(x: 6, y: 2, width: 24, height: 22)
-        let labelX: CGFloat = 34
-        let actionX = bounds.width - actionsWidth - 10
-        primaryButton.frame = NSRect(x: actionX, y: 2, width: primaryWidth, height: 22)
+        wholeFileButton.frame = NSRect(x: 7, y: 1, width: 22, height: 22)
+        marker.frame = NSRect(x: 8, y: 4, width: 22, height: 16)
+        let labelX: CGFloat = 38
+        let actionX = bounds.width - actionsWidth - 12
+        let showsLocation = bounds.width >= (layoutMode == .sideBySide ? 820 : 500)
+        let locationWidth: CGFloat = showsLocation ? 94 : 0
+        let locationX = max(labelX, actionX - locationWidth - 8)
+        location.isHidden = !showsLocation
+        location.frame = NSRect(
+            x: locationX,
+            y: 4,
+            width: max(0, actionX - locationX - 8),
+            height: 16
+        )
+        primaryButton.frame = NSRect(x: actionX, y: 1, width: primaryWidth, height: 22)
         discardButton.frame = NSRect(
             x: actionX + primaryWidth + spacing,
-            y: 2,
+            y: 1,
             width: discardWidth,
             height: 22
         )
@@ -3491,8 +3725,8 @@ private final class DiffHunkCellView: NSTableCellView {
         case .unified:
             unifiedTitle.frame = NSRect(
                 x: labelX,
-                y: 4,
-                width: max(0, actionX - labelX - 6),
+                y: 3,
+                width: max(0, locationX - labelX - 8),
                 height: titleHeight
             )
             oldTitle.frame = .zero
@@ -3503,15 +3737,15 @@ private final class DiffHunkCellView: NSTableCellView {
             unifiedTitle.frame = .zero
             oldTitle.frame = NSRect(
                 x: labelX,
-                y: 4,
+                y: 3,
                 width: max(0, paneWidth - labelX - 8),
                 height: titleHeight
             )
             let newTitleX = paneWidth + labelX
             newTitle.frame = NSRect(
                 x: newTitleX,
-                y: 4,
-                width: max(0, actionX - newTitleX - 6),
+                y: 3,
+                width: max(0, locationX - newTitleX - 8),
                 height: titleHeight
             )
             paneDivider.frame = NSRect(
@@ -3524,10 +3758,9 @@ private final class DiffHunkCellView: NSTableCellView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.systemBlue.withAlphaComponent(0.08).setFill()
+        AgentGitPalette.hunkHeader.setFill()
         dirtyRect.fill()
-        NSColor.separatorColor.withAlphaComponent(0.45).setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        AgentGitPalette.separator.withAlphaComponent(0.55).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -3550,7 +3783,9 @@ private final class DiffHunkCellView: NSTableCellView {
         if fileID != hunk.fileID {
             isHovered = false
         }
-        let confirmationID = "\(hunk.fileID):\(hunk.lineIDs.sorted())"
+        let confirmationID = "\(hunk.fileID):"
+            + "\(hunk.mutationSnapshotID?.rawValue ?? 0):"
+            + "\(hunk.lineIDs.sorted())"
         if discardConfirmationID != confirmationID || hunk.mutationMode != .working {
             resetDiscardConfirmation()
         }
@@ -3558,6 +3793,7 @@ private final class DiffHunkCellView: NSTableCellView {
         unifiedTitle.stringValue = hunk.title
         oldTitle.stringValue = hunk.title
         newTitle.stringValue = hunk.title
+        location.stringValue = hunk.location
         unifiedTitle.toolTip = hunk.rawHeader
         oldTitle.toolTip = hunk.rawHeader
         newTitle.toolTip = hunk.rawHeader
@@ -3569,7 +3805,7 @@ private final class DiffHunkCellView: NSTableCellView {
         fileID = hunk.fileID
         lineIDs = hunk.lineIDs
         mutationMode = hunk.mutationMode
-        canToggleWholeFile = hunk.canToggleWholeFile
+        canToggleWholeFile = false
         showsWholeFile = hunk.showsWholeFile
         isLoadingWholeFile = hunk.isLoadingWholeFile
         self.wholeFileHandler = wholeFileHandler
@@ -3689,8 +3925,10 @@ private final class DiffHunkCellView: NSTableCellView {
     }
 
     private func updateWholeFileButtonVisibility() {
-        wholeFileButton.isHidden = !canToggleWholeFile
-            || (!isHovered && !showsWholeFile && !isLoadingWholeFile)
+        let showsWholeFileButton = canToggleWholeFile
+            && (isHovered || showsWholeFile || isLoadingWholeFile)
+        wholeFileButton.isHidden = !showsWholeFileButton
+        marker.isHidden = showsWholeFileButton
     }
 }
 
@@ -3714,7 +3952,7 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
         font: .monospacedSystemFont(ofSize: 12.5, weight: .regular),
         textColor: .labelColor,
         alignment: .left,
-        selectable: false
+        selectable: true
     )
     private let contentClip = NSView()
     private var kind: GitDiffLineKind = .context
@@ -3770,7 +4008,7 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
     override func draw(_ dirtyRect: NSRect) {
         backgroundColor.setFill()
         dirtyRect.fill()
-        NSColor.controlBackgroundColor.withAlphaComponent(0.72).setFill()
+        AgentGitPalette.codeGutter.setFill()
         NSRect(x: 0, y: dirtyRect.minY, width: 112, height: dirtyRect.height).fill()
         super.draw(dirtyRect)
     }
@@ -3872,18 +4110,18 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
 
     private static func syntaxColor(for kind: GitSyntaxTokenKind) -> NSColor {
         switch kind {
-        case .keyword: .systemPurple
-        case .string: .systemRed
-        case .number: .systemBlue
-        case .comment: .systemGreen
-        case .heading: .systemBlue
+        case .keyword: AgentGitPalette.syntaxKeyword
+        case .string: AgentGitPalette.syntaxString
+        case .number: AgentGitPalette.syntaxNumber
+        case .comment: AgentGitPalette.syntaxComment
+        case .heading: AgentGitPalette.syntaxHeading
         }
     }
 
     private static func inlineHighlight(for kind: GitDiffLineKind) -> NSColor? {
         switch kind {
-        case .addition: NSColor.systemGreen.withAlphaComponent(0.30)
-        case .deletion: NSColor.systemRed.withAlphaComponent(0.30)
+        case .addition: AgentGitPalette.additionInline
+        case .deletion: AgentGitPalette.deletionInline
         case .context, .metadata: nil
         }
     }
@@ -3901,8 +4139,8 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
 
     private var markerColor: NSColor {
         switch kind {
-        case .addition: .systemGreen
-        case .deletion: .systemRed
+        case .addition: AgentGitPalette.additionText
+        case .deletion: AgentGitPalette.deletionText
         case .metadata: .secondaryLabelColor
         case .context: .clear
         }
@@ -3910,10 +4148,10 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
 
     private var backgroundColor: NSColor {
         switch kind {
-        case .addition: .systemGreen.withAlphaComponent(0.10)
-        case .deletion: .systemRed.withAlphaComponent(0.10)
-        case .metadata: .secondaryLabelColor.withAlphaComponent(0.05)
-        case .context: .clear
+        case .addition: AgentGitPalette.additionBackground
+        case .deletion: AgentGitPalette.deletionBackground
+        case .metadata: AgentGitPalette.metadataBackground
+        case .context: AgentGitPalette.canvas
         }
     }
 }
@@ -4001,7 +4239,7 @@ private final class DiffSideLinePane: NSView {
         font: .monospacedSystemFont(ofSize: 12.5, weight: .regular),
         textColor: .labelColor,
         alignment: .left,
-        selectable: false
+        selectable: true
     )
     private let contentClip = NSView()
     private var kind: GitDiffLineKind?
@@ -4057,10 +4295,13 @@ private final class DiffSideLinePane: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let fillRect = bounds.intersection(dirtyRect)
         backgroundColor.setFill()
-        dirtyRect.fill()
-        NSColor.controlBackgroundColor.withAlphaComponent(0.72).setFill()
-        NSRect(x: 0, y: dirtyRect.minY, width: 56, height: dirtyRect.height).fill()
+        fillRect.fill()
+        AgentGitPalette.codeGutter.setFill()
+        NSRect(x: 0, y: fillRect.minY, width: 56, height: fillRect.height)
+            .intersection(bounds)
+            .fill()
         super.draw(dirtyRect)
     }
 
@@ -4116,8 +4357,8 @@ private final class DiffSideLinePane: NSView {
             return .clear
         }
         return switch kind {
-        case .addition: .systemGreen
-        case .deletion: .systemRed
+        case .addition: AgentGitPalette.additionText
+        case .deletion: AgentGitPalette.deletionText
         case .metadata: .secondaryLabelColor
         case .context: .clear
         }
@@ -4125,13 +4366,13 @@ private final class DiffSideLinePane: NSView {
 
     private var backgroundColor: NSColor {
         guard let kind else {
-            return .controlBackgroundColor.withAlphaComponent(0.24)
+            return AgentGitPalette.codeFiller
         }
         return switch kind {
-        case .addition: .systemGreen.withAlphaComponent(0.10)
-        case .deletion: .systemRed.withAlphaComponent(0.10)
-        case .metadata: .secondaryLabelColor.withAlphaComponent(0.05)
-        case .context: .clear
+        case .addition: AgentGitPalette.additionBackground
+        case .deletion: AgentGitPalette.deletionBackground
+        case .metadata: AgentGitPalette.metadataBackground
+        case .context: AgentGitPalette.canvas
         }
     }
 }

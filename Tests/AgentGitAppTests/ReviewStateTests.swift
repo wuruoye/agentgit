@@ -126,6 +126,96 @@ final class ReviewStateTests: XCTestCase {
         )
     }
 
+    func testNewReviewFilesStartCollapsedAndExistingChoicesArePreserved() {
+        var state = ReviewState()
+
+        XCTAssertTrue(
+            synchronizeReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first", "second"]
+            )
+        )
+        XCTAssertEqual(state.collapsedFileIDs, ["first", "second"])
+
+        state.collapsedFileIDs.remove("first")
+        XCTAssertFalse(
+            synchronizeReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first", "second"]
+            )
+        )
+        XCTAssertEqual(state.collapsedFileIDs, ["second"])
+
+        XCTAssertTrue(
+            synchronizeReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first", "second", "third"]
+            )
+        )
+        XCTAssertEqual(state.collapsedFileIDs, ["second", "third"])
+
+        XCTAssertTrue(
+            synchronizeReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first", "third"]
+            )
+        )
+        XCTAssertEqual(state.collapsedFileIDs, ["third"])
+        XCTAssertEqual(state.knownFileIDs, ["first", "third"])
+    }
+
+    func testUnseenReviewFilesRemainCollapsedUntilExplicitlyExpanded() {
+        var state = ReviewState()
+
+        XCTAssertFalse(isReviewFileExpanded("first", in: state))
+        XCTAssertTrue(
+            setReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first"],
+                isExpanded: true
+            )
+        )
+        XCTAssertTrue(isReviewFileExpanded("first", in: state))
+        XCTAssertFalse(
+            synchronizeReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first"]
+            )
+        )
+        XCTAssertTrue(toggleReviewFileExpansion(in: &state, fileID: "first"))
+        XCTAssertFalse(isReviewFileExpanded("first", in: state))
+
+        XCTAssertTrue(
+            setReviewFileExpansion(
+                in: &state,
+                fileIDs: ["first", "second"],
+                isExpanded: true
+            )
+        )
+        XCTAssertTrue(isReviewFileExpanded("first", in: state))
+        XCTAssertTrue(isReviewFileExpanded("second", in: state))
+    }
+
+    func testNavigatorFolderExpansionDropsFoldersOutsideCurrentReview() {
+        var state = ReviewState(
+            expandedNavigatorFolderIDs: ["current", "removed"]
+        )
+
+        XCTAssertTrue(
+            synchronizeNavigatorFolderExpansion(
+                in: &state,
+                validFolderIDs: ["current", "new"]
+            )
+        )
+        XCTAssertEqual(state.expandedNavigatorFolderIDs, ["current"])
+        XCTAssertFalse(
+            synchronizeNavigatorFolderExpansion(
+                in: &state,
+                validFolderIDs: ["current", "new"]
+            )
+        )
+    }
+
     @MainActor
     func testReviewStateStoreRestoresPersistentReviewStateWithoutFilter() {
         let suiteName = "ReviewStateTests.\(UUID().uuidString)"
@@ -137,6 +227,8 @@ final class ReviewStateTests: XCTestCase {
         let expectedSnapshot = DiffReviewSnapshotID(rawValue: 42)
         let state = ReviewState(
             collapsedFileIDs: ["working:file.swift"],
+            knownFileIDs: ["working:file.swift"],
+            expandedNavigatorFolderIDs: ["navigator-folder:working:Sources"],
             focusedFileID: "working:file.swift",
             filterText: "temporary filter",
             reviewedSnapshotByFileID: ["working:file.swift": expectedSnapshot],
@@ -171,6 +263,11 @@ final class ReviewStateTests: XCTestCase {
         let restored = ReviewStateStore(defaults: defaults)
         let restoredState = restored.state(for: key)
         XCTAssertEqual(restoredState.collapsedFileIDs, state.collapsedFileIDs)
+        XCTAssertEqual(restoredState.knownFileIDs, state.knownFileIDs)
+        XCTAssertEqual(
+            restoredState.expandedNavigatorFolderIDs,
+            state.expandedNavigatorFolderIDs
+        )
         XCTAssertEqual(restoredState.focusedFileID, state.focusedFileID)
         XCTAssertEqual(restoredState.filterText, "")
         XCTAssertEqual(

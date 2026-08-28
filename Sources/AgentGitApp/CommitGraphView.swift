@@ -294,14 +294,10 @@ struct CommitGraphView: View {
     }
 
     private static let palette: [Color] = [
-        .blue,
-        .purple,
-        .orange,
-        .green,
-        .pink,
-        .teal,
-        .indigo,
-        .mint
+        Color(nsColor: AgentGitPalette.statusRenamed),
+        Color(nsColor: AgentGitPalette.statusConflicted),
+        Color(nsColor: AgentGitPalette.statusModified),
+        Color(nsColor: AgentGitPalette.statusAdded)
     ]
 }
 

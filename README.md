@@ -52,6 +52,8 @@ SHA-256 校验文件，产物位于 `.build/release/`。本地开发证书产物
 - **Read-first**：先把 status、diff、log 和 review 做好，再增加 Git 写操作。
 - **事实来自 Git**：不从目录命名或残留配置猜 branch、worktree 和改动状态。
 
+持续审查与验证状态记录在 [产品缺陷与打磨清单](docs/product-polish-checklist.md)。
+
 ## M1：可运行的 Git 客户端纵向切片
 
 M1 完成以下链路：

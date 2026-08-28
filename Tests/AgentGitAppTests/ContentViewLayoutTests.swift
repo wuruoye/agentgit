@@ -136,6 +136,15 @@ final class ContentViewLayoutTests: XCTestCase {
             appearanceName: .darkAqua,
             requiresPendingActions: false
         )
+        try await render(
+            BlockingGitRefreshErrorBar(
+                message: "Git operation completed, but repository status could not be refreshed.",
+                isRefreshing: true
+            ) {},
+            size: NSSize(width: 620, height: 44),
+            fileName: "AgentGitBlocking-refresh-progress.png",
+            requiresPendingActions: false
+        )
     }
 
     func testSidebarOnlyWorktreeSelectionsChangeCurrentReview() {
@@ -311,6 +320,21 @@ final class ContentViewLayoutTests: XCTestCase {
             for: snapshot.id
         )
         reviewStates.flush()
+        let inactiveModel = AppModel(
+            defaults: defaults,
+            repositoryService: service,
+            snapshotStore: ProjectSnapshotStore(fileURL: snapshotCacheURL),
+            reviewContentStore: ReviewContentStore(directoryURL: reviewCacheURL)
+        )
+        inactiveModel.setApplicationActive(false)
+        try await render(
+            WorktreeReviewView(snapshot: snapshot).environment(inactiveModel),
+            size: NSSize(width: 1_200, height: 680),
+            fileName: "AgentGitContent-restored-search-background.png",
+            requiresPendingActions: false,
+            expectedLabels: ["Commit \(target.shortOID)"]
+        )
+
         let model = AppModel(
             defaults: defaults,
             repositoryService: service,
@@ -408,17 +432,44 @@ final class ContentViewLayoutTests: XCTestCase {
 
         try await render(
             ContentView().environment(model),
-            size: NSSize(width: 1_200, height: 680),
+            size: NSSize(
+                width: AgentGitWindowMetrics.minimumWidth,
+                height: AgentGitWindowMetrics.minimumHeight
+            ),
             fileName: "AgentGitContent-minimum.png"
         )
         try await render(
             ContentView().environment(model),
-            size: NSSize(width: 1_440, height: 840),
+            size: NSSize(
+                width: AgentGitWindowMetrics.minimumWidth,
+                height: AgentGitWindowMetrics.minimumHeight
+            ),
+            fileName: "AgentGitContent-minimum-dark.png",
+            appearanceName: .darkAqua
+        )
+        try await render(
+            ContentView().environment(model),
+            size: NSSize(
+                width: AgentGitWindowMetrics.minimumWidth,
+                height: AgentGitWindowMetrics.minimumHeight
+            ),
+            fileName: "AgentGitContent-minimum-high-contrast.png",
+            appearanceName: .accessibilityHighContrastAqua
+        )
+        try await render(
+            ContentView().environment(model),
+            size: NSSize(
+                width: AgentGitWindowMetrics.defaultWidth,
+                height: AgentGitWindowMetrics.defaultHeight
+            ),
             fileName: "AgentGitContent-default.png"
         )
         try await render(
             ContentView().environment(model),
-            size: NSSize(width: 1_440, height: 840),
+            size: NSSize(
+                width: AgentGitWindowMetrics.defaultWidth,
+                height: AgentGitWindowMetrics.defaultHeight
+            ),
             fileName: "AgentGitContent-default-dark.png",
             appearanceName: .darkAqua
         )
@@ -525,9 +576,18 @@ final class ContentViewLayoutTests: XCTestCase {
                 context: commitContext
             )
         )
+        let restoredCommitMessage = """
+        Restored commit review
+
+        Cached historical review keeps the summary concise.
+
+        The complete body remains available for detailed inspection.
+
+        Paragraph spacing and long explanations are preserved.
+        """
         try await reviewStore.saveHistoricalDetails(
             HistoricalReviewDetails(
-                message: "Restored commit review\n\nCached historical review",
+                message: restoredCommitMessage,
                 changes: [selectedChange]
             ),
             for: detailsKey

@@ -8,6 +8,27 @@ import XCTest
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testVisualTestAppearanceRequiresExplicitSupportedValue() {
+        XCTAssertEqual(
+            requestedVisualTestAppearance(
+                environment: ["AGENTGIT_VISUAL_TEST_APPEARANCE": "LIGHT"]
+            ),
+            .aqua
+        )
+        XCTAssertEqual(
+            requestedVisualTestAppearance(
+                environment: ["AGENTGIT_VISUAL_TEST_APPEARANCE": "dark"]
+            ),
+            .darkAqua
+        )
+        XCTAssertNil(requestedVisualTestAppearance(environment: [:]))
+        XCTAssertNil(
+            requestedVisualTestAppearance(
+                environment: ["AGENTGIT_VISUAL_TEST_APPEARANCE": "automatic"]
+            )
+        )
+    }
+
     func testDiffSettingsPersistAcrossModelInstances() throws {
         let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1713,6 +1734,22 @@ final class AppModelTests: XCTestCase {
         let sorted = [olderDirty, recentClean].sorted(by: compareWorktreeSnapshots)
 
         XCTAssertEqual(sorted.map(\.id), [recentClean.id, olderDirty.id])
+
+        let project = GitProject(rootURL: URL(fileURLWithPath: "/projects/sorted"))
+        let presentation = projectWorktreePresentation(
+            snapshot: GitProjectSnapshot(
+                project: project,
+                worktrees: [olderDirty, recentClean],
+                refreshedAt: now
+            ),
+            selectedWorktreeID: nil,
+            showsAll: true,
+            now: now
+        )
+        XCTAssertEqual(
+            presentation.visibleWorktrees.map(\.id),
+            [recentClean.id, olderDirty.id]
+        )
     }
 
     func testDuplicateStoredProjectPathsAreRepairedDuringInitialization() throws {
