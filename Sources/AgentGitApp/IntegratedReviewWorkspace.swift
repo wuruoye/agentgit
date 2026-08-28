@@ -1739,9 +1739,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var focusedFileDiscardCommand: PendingFilePrimaryCommand? {
-        guard isFilesNavigatorFocused,
-              pane == .files,
-              allowsPendingMutations else {
+        guard allowsPendingMutations else {
             return nil
         }
         return pendingFileDiscardCommand(
@@ -5381,39 +5379,51 @@ private struct ReviewDocumentTabBar: View {
                 HStack(spacing: 0) {
                     ForEach(files) { file in
                         let isSelected = selection == .file(file.id)
-                        HStack(spacing: 6) {
-                            Image(systemName: "doc.text")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Text(file.title)
-                                .font(.caption.weight(isSelected ? .semibold : .regular))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 2)
+                        HStack(spacing: 0) {
+                            Button {
+                                selectFile(file.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                    Text(file.title)
+                                        .font(
+                                            .caption.weight(
+                                                isSelected ? .semibold : .regular
+                                            )
+                                        )
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer(minLength: 2)
+                                }
+                                .padding(.leading, 9)
+                                .frame(width: 164, height: 34)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(file.title)
+                            .accessibilityHint("Show file review")
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
+
                             Button {
                                 closeFile(file.id)
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 8, weight: .semibold))
-                                    .frame(width: 14, height: 14)
+                                    .frame(width: 26, height: 34)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(.tertiary)
                             .accessibilityLabel("Close \(file.title)")
                         }
-                        .padding(.horizontal, 9)
                         .frame(width: 190, height: 34)
-                        .contentShape(Rectangle())
                         .background(tabBackground(isSelected: isSelected))
                         .overlay(alignment: .trailing) {
                             Divider()
                         }
-                        .onTapGesture {
-                            selectFile(file.id)
-                        }
                         .help(file.path)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 }
             }
@@ -5853,6 +5863,15 @@ private struct PendingOverviewRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            pendingOverviewAccessibilityLabel(
+                workingCount: workingCount,
+                untrackedCount: untrackedCount,
+                stagedCount: stagedCount
+            )
+        )
+        .accessibilityHint("Select to review pending changes")
     }
 }
 
@@ -5929,7 +5948,34 @@ private struct IntegratedCommitRow: View {
                     .dateTime.year().month().day().hour().minute()
                 )
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(commitRowAccessibilityLabel(commit))
+        .accessibilityHint("Select to review this commit")
     }
+}
+
+func pendingOverviewAccessibilityLabel(
+    workingCount: Int,
+    untrackedCount: Int,
+    stagedCount: Int
+) -> String {
+    "Pending Changes, \(workingCount) working, \(untrackedCount) untracked, "
+        + "\(stagedCount) staged"
+}
+
+func commitRowAccessibilityLabel(_ commit: GitCommit) -> String {
+    var details = [
+        commit.subject,
+        commit.shortOID,
+        commit.authorName,
+        commit.authoredAt.formatted(date: .abbreviated, time: .shortened)
+    ]
+    if !commit.references.isEmpty {
+        details.append(
+            "References " + commit.references.map(\.label).joined(separator: ", ")
+        )
+    }
+    return details.joined(separator: ", ")
 }
 
 private struct CommitReferenceBadge: View {

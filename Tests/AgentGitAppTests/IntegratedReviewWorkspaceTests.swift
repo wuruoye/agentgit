@@ -30,6 +30,31 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
     }
 
+    func testOverviewRowsExposeConciseVoiceOverLabels() {
+        XCTAssertEqual(
+            pendingOverviewAccessibilityLabel(
+                workingCount: 3,
+                untrackedCount: 2,
+                stagedCount: 1
+            ),
+            "Pending Changes, 3 working, 2 untracked, 1 staged"
+        )
+        let commit = GitCommit(
+            oid: "1234567890abcdef",
+            shortOID: "1234567",
+            authorName: "Review Author",
+            authoredAt: Date(timeIntervalSince1970: 100),
+            parentOIDs: [],
+            refNames: ["HEAD -> main"],
+            subject: "Accessible commit"
+        )
+        let label = commitRowAccessibilityLabel(commit)
+        XCTAssertTrue(label.contains("Accessible commit"))
+        XCTAssertTrue(label.contains("1234567"))
+        XCTAssertTrue(label.contains("Review Author"))
+        XCTAssertTrue(label.contains("main"))
+    }
+
     func testPendingAndCommitSelectionsRemainMutuallyExclusive() {
         let first = IntegratedOverviewSelection.commit("first")
         let second = IntegratedOverviewSelection.commit("second")

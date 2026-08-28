@@ -1445,9 +1445,11 @@ final class DiffStackViewTests: XCTestCase {
         fileDiscard.performClick(nil)
         XCTAssertNil(fileAction)
         XCTAssertEqual(fileDiscard.title, "Confirm")
+        XCTAssertEqual(fileDiscard.accessibilityLabel(), "Confirm Discard File")
         fileDiscard.performClick(nil)
         XCTAssertEqual(fileAction, .discard)
         XCTAssertEqual(fileDiscard.title, "Discard")
+        XCTAssertEqual(fileDiscard.accessibilityLabel(), "Discard File")
 
         let hunkCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
@@ -1462,9 +1464,11 @@ final class DiffStackViewTests: XCTestCase {
         hunkDiscard.performClick(nil)
         XCTAssertNil(hunkAction)
         XCTAssertEqual(hunkDiscard.title, "Confirm")
+        XCTAssertEqual(hunkDiscard.accessibilityLabel(), "Confirm Discard Hunk")
         hunkDiscard.performClick(nil)
         XCTAssertEqual(hunkAction, .discard)
         XCTAssertEqual(hunkDiscard.title, "Discard")
+        XCTAssertEqual(hunkDiscard.accessibilityLabel(), "Discard Hunk")
     }
 
     func testKeyboardDiscardCommandUsesFileButtonConfirmation() throws {
@@ -1488,6 +1492,7 @@ final class DiffStackViewTests: XCTestCase {
             }
         )
         XCTAssertTrue(actions.isEmpty)
+        XCTAssertEqual(discardButton.accessibilityLabel(), "Confirm Discard File")
 
         scrollView.display(
             groups: [makeGroup(isFocused: true)],
@@ -1515,6 +1520,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         XCTAssertEqual(actions, [.discard])
         XCTAssertEqual(discardButton.title, "Discard")
+        XCTAssertEqual(discardButton.accessibilityLabel(), "Discard File")
     }
 
     func testDiffRowsAndContextMenuFocusTheirContainingFile() throws {

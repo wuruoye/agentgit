@@ -2546,6 +2546,7 @@ private final class DiffFileCellView: NSTableCellView {
         configureMenuButton()
         configure(primaryButton, action: #selector(runPrimaryAction))
         configure(discardButton, action: #selector(runDiscardAction))
+        resetDiscardConfirmation()
         title.lineBreakMode = .byTruncatingMiddle
     }
 
@@ -2839,6 +2840,10 @@ private final class DiffFileCellView: NSTableCellView {
         discardButton.title = "Confirm"
         discardButton.contentTintColor = .systemRed
         discardButton.toolTip = "Confirm discard; a recovery copy will be saved in Trash"
+        discardButton.setAccessibilityLabel("Confirm Discard File")
+        discardButton.setAccessibilityHelp(
+            "Press again to discard the file and save a recovery copy in Trash"
+        )
         let timer = Timer(
             timeInterval: Self.discardConfirmationDuration,
             target: self,
@@ -2869,6 +2874,10 @@ private final class DiffFileCellView: NSTableCellView {
         discardButton.title = "Discard"
         discardButton.contentTintColor = .secondaryLabelColor
         discardButton.toolTip = "Discard file changes; saves a recovery copy in Trash"
+        discardButton.setAccessibilityLabel("Discard File")
+        discardButton.setAccessibilityHelp(
+            "Requires confirmation and saves a recovery copy in Trash"
+        )
     }
 
     private static func titleText(
@@ -3670,6 +3679,7 @@ private final class DiffHunkCellView: NSTableCellView {
         )
         configure(primaryButton, action: #selector(runPrimaryAction))
         configure(discardButton, action: #selector(runDiscardAction))
+        resetDiscardConfirmation()
         unifiedTitle.lineBreakMode = .byTruncatingTail
         oldTitle.lineBreakMode = .byTruncatingTail
         newTitle.lineBreakMode = .byTruncatingTail
@@ -3892,6 +3902,10 @@ private final class DiffHunkCellView: NSTableCellView {
         discardButton.title = "Confirm"
         discardButton.contentTintColor = .systemRed
         discardButton.toolTip = "Confirm discard hunk; a recovery copy will be saved in Trash"
+        discardButton.setAccessibilityLabel("Confirm Discard Hunk")
+        discardButton.setAccessibilityHelp(
+            "Press again to discard the hunk and save a recovery copy in Trash"
+        )
         let timer = Timer(
             timeInterval: Self.discardConfirmationDuration,
             target: self,
@@ -3922,6 +3936,10 @@ private final class DiffHunkCellView: NSTableCellView {
         discardButton.title = "Discard"
         discardButton.contentTintColor = .secondaryLabelColor
         discardButton.toolTip = "Discard hunk changes; saves a recovery copy in Trash"
+        discardButton.setAccessibilityLabel("Discard Hunk")
+        discardButton.setAccessibilityHelp(
+            "Requires confirmation and saves a recovery copy in Trash"
+        )
     }
 
     private func updateWholeFileButtonVisibility() {
