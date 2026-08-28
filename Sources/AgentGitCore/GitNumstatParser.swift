@@ -1,6 +1,6 @@
 import Foundation
 
-public struct GitDiffStat: Hashable, Sendable {
+public struct GitDiffStat: Hashable, Codable, Sendable {
     public let addedLineCount: Int
     public let deletedLineCount: Int
 

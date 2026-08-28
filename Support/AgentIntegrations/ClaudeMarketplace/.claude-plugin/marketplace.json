@@ -1,0 +1,15 @@
+{
+  "name": "agentgit",
+  "description": "Local AgentGit integrations",
+  "owner": {
+    "name": "AgentGit"
+  },
+  "plugins": [
+    {
+      "name": "agentgit",
+      "description": "Link Claude sessions to the AgentGit worktrees they modify.",
+      "source": "./plugins/agentgit",
+      "category": "productivity"
+    }
+  ]
+}

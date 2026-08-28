@@ -3,6 +3,7 @@ import Foundation
 public enum GitPatchSelectionError: Error, Equatable, Sendable {
     case noChangedLines
     case nonTextualDiff
+    case unsupportedFileMode(String)
 }
 
 /// 从当前 diff 中抽出选中的 changed lines，生成 `git apply --unidiff-zero` 可消费的 patch。
@@ -10,7 +11,8 @@ public enum GitPatchSelectionBuilder {
     public static func patch(
         for diff: GitFileDiff,
         selectedLineIDs: Set<GitDiffLine.ID>,
-        treatsUntrackedAsNewFile: Bool = true
+        treatsUntrackedAsNewFile: Bool = true,
+        newFileMode: String = "100644"
     ) throws -> Data {
         guard diff.state == .textual else {
             throw GitPatchSelectionError.nonTextualDiff
@@ -24,21 +26,49 @@ public enum GitPatchSelectionBuilder {
             throw GitPatchSelectionError.noChangedLines
         }
 
-        let isNewFile = diff.change.indexStatus == "A"
-            || (diff.change.isUntracked && treatsUntrackedAsNewFile)
-        let oldPath = isNewFile ? "/dev/null" : "a/\(diff.change.originalPath ?? diff.change.path)"
-        let newPath = "b/\(diff.change.path)"
+        let isNewFile = usesNewFileHeader(
+            for: diff,
+            selectedLineIDs: selectedLineIDs,
+            treatsUntrackedAsNewFile: treatsUntrackedAsNewFile
+        )
+        let indexUsesDestinationPath = ["R", "C"].contains(
+            diff.change.indexStatus
+        )
+        let contentPath = indexUsesDestinationPath
+            ? diff.change.path
+            : diff.change.originalPath ?? diff.change.path
+        let oldPath = isNewFile ? "/dev/null" : "a/\(contentPath)"
+        let newPath = "b/\(indexUsesDestinationPath ? contentPath : diff.change.path)"
         let oldHeader = oldPath == "/dev/null" ? oldPath : quotePath(oldPath)
         var headers = [
             "diff --git \(quotePath(oldPath == "/dev/null" ? "a/\(diff.change.path)" : oldPath)) \(quotePath(newPath))"
         ]
         if isNewFile {
-            headers.append("new file mode 100644")
+            headers.append("new file mode \(newFileMode)")
         }
         headers.append("--- \(oldHeader)")
         headers.append("+++ \(quotePath(newPath))")
         let patch = headers + hunkBodies
         return Data((patch.joined(separator: "\n") + "\n").utf8)
+    }
+
+    static func usesNewFileHeader(
+        for diff: GitFileDiff,
+        selectedLineIDs: Set<GitDiffLine.ID>,
+        treatsUntrackedAsNewFile: Bool
+    ) -> Bool {
+        if diff.change.isUntracked && treatsUntrackedAsNewFile {
+            return true
+        }
+        guard diff.scope == .staged,
+              diff.change.indexStatus == "A" else {
+            return false
+        }
+        let changedLineIDs = diff.hunks.flatMap(\.lines).compactMap { line in
+            line.kind == .addition || line.kind == .deletion ? line.id : nil
+        }
+        return !changedLineIDs.isEmpty
+            && changedLineIDs.allSatisfy(selectedLineIDs.contains)
     }
 
     private struct Segment {

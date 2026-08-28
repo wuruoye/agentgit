@@ -1,6 +1,6 @@
 import Foundation
 
-public struct GitProject: Identifiable, Hashable, Sendable {
+public struct GitProject: Identifiable, Hashable, Codable, Sendable {
     public let rootURL: URL
 
     public init(rootURL: URL) {
@@ -16,7 +16,7 @@ public struct GitProject: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct GitWorktree: Identifiable, Hashable, Sendable {
+public struct GitWorktree: Identifiable, Hashable, Codable, Sendable {
     public let rootURL: URL
     public let headOID: String?
     public let branchRef: String?

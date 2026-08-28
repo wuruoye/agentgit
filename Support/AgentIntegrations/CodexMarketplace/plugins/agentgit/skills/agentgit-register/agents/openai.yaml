@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentGit Register"
+  short_description: "Register this session before repository writes"
+  default_prompt: "Use $agentgit-register to complete the pending AgentGit worktree registration."

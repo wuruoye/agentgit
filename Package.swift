@@ -9,13 +9,20 @@ let package = Package(
     ],
     products: [
         .library(name: "AgentGitCore", targets: ["AgentGitCore"]),
-        .executable(name: "AgentGitApp", targets: ["AgentGitApp"])
+        .library(name: "AgentGitIntegrationShared", targets: ["AgentGitIntegrationShared"]),
+        .executable(name: "AgentGitApp", targets: ["AgentGitApp"]),
+        .executable(name: "AgentGitHookBridge", targets: ["AgentGitHookBridge"])
     ],
     targets: [
         .target(name: "AgentGitCore"),
+        .target(name: "AgentGitIntegrationShared"),
         .executableTarget(
             name: "AgentGitApp",
-            dependencies: ["AgentGitCore"]
+            dependencies: ["AgentGitCore", "AgentGitIntegrationShared"]
+        ),
+        .executableTarget(
+            name: "AgentGitHookBridge",
+            dependencies: ["AgentGitIntegrationShared"]
         ),
         .testTarget(
             name: "AgentGitCoreTests",
@@ -23,7 +30,11 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentGitAppTests",
-            dependencies: ["AgentGitApp", "AgentGitCore"]
+            dependencies: ["AgentGitApp", "AgentGitCore", "AgentGitIntegrationShared"]
+        ),
+        .testTarget(
+            name: "AgentGitIntegrationSharedTests",
+            dependencies: ["AgentGitIntegrationShared"]
         )
     ],
     swiftLanguageModes: [.v6]

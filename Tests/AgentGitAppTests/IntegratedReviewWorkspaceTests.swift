@@ -1,0 +1,1001 @@
+import AgentGitCore
+import XCTest
+@testable import AgentGitApp
+
+final class IntegratedReviewWorkspaceTests: XCTestCase {
+    func testPendingAndCommitSelectionsRemainMutuallyExclusive() {
+        let first = IntegratedOverviewSelection.commit("first")
+        let second = IntegratedOverviewSelection.commit("second")
+
+        XCTAssertEqual(
+            normalizedOverviewSelection(
+                previous: [.pending],
+                current: [.pending, first]
+            ),
+            [first]
+        )
+        XCTAssertEqual(
+            normalizedOverviewSelection(
+                previous: [first, second],
+                current: [.pending, first, second]
+            ),
+            [.pending]
+        )
+        XCTAssertEqual(
+            normalizedOverviewSelection(previous: [first], current: []),
+            [.pending]
+        )
+    }
+
+    func testCommitRangeSelectionKeepsOnlyVisibleEndpoints() {
+        let firstOID = String(repeating: "a", count: 40)
+        let secondOID = String(repeating: "b", count: 40)
+        let thirdOID = String(repeating: "c", count: 40)
+        let fourthOID = String(repeating: "d", count: 40)
+        let commits = [
+            makeCommit(oid: firstOID, parentOIDs: [secondOID]),
+            makeCommit(oid: secondOID, parentOIDs: [thirdOID]),
+            makeCommit(oid: thirdOID, parentOIDs: [fourthOID]),
+            makeCommit(oid: fourthOID, parentOIDs: [])
+        ]
+
+        XCTAssertEqual(
+            normalizedCommitEndpointSelection(
+                [.commit(firstOID), .commit(secondOID), .commit(fourthOID)],
+                commits: commits
+            ),
+            [.commit(firstOID), .commit(fourthOID)]
+        )
+        XCTAssertEqual(
+            normalizedCommitEndpointSelection(
+                [.commit(secondOID), .commit(thirdOID)],
+                commits: commits
+            ),
+            [.commit(secondOID), .commit(thirdOID)]
+        )
+        XCTAssertEqual(
+            normalizedCommitEndpointSelection(
+                [.commit(firstOID), .commit(secondOID), .commit("missing")],
+                commits: commits
+            ),
+            [.commit(firstOID), .commit(secondOID)]
+        )
+        XCTAssertEqual(
+            normalizedCommitEndpointSelection(
+                [.pending, .commit(firstOID)],
+                commits: commits
+            ),
+            [.pending]
+        )
+    }
+
+    func testFilesNavigatorPrimaryActionMatchesScopeAndSubmoduleState() {
+        let ordinary = GitFileChange(
+            path: "Sources/App.swift",
+            originalPath: nil,
+            indexStatus: "M",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        let working = IntegratedFileItem(
+            id: .pending(scope: .working, changeID: ordinary.id),
+            change: ordinary,
+            scope: .working
+        )
+        let staged = IntegratedFileItem(
+            id: .pending(scope: .staged, changeID: ordinary.id),
+            change: ordinary,
+            scope: .staged
+        )
+        XCTAssertEqual(
+            primaryPendingMutationMode(context: .pending, item: working),
+            .working
+        )
+        XCTAssertEqual(
+            primaryPendingMutationMode(context: .pending, item: staged),
+            .staged
+        )
+        XCTAssertEqual(
+            pendingFilePrimaryCommand(
+                context: .pending,
+                focusedFileID: working.id.stackID,
+                items: [working, staged]
+            ),
+            PendingFilePrimaryCommand(
+                fileID: working.id.stackID,
+                action: .stage
+            )
+        )
+        XCTAssertEqual(
+            pendingFilePrimaryCommand(
+                context: .pending,
+                focusedFileID: staged.id.stackID,
+                items: [working, staged]
+            ),
+            PendingFilePrimaryCommand(
+                fileID: staged.id.stackID,
+                action: .unstage
+            )
+        )
+        XCTAssertNil(
+            pendingFilePrimaryCommand(
+                context: .pending,
+                focusedFileID: "missing",
+                items: [working, staged]
+            )
+        )
+        XCTAssertNil(
+            primaryPendingMutationMode(
+                context: .commit("commit"),
+                item: working
+            )
+        )
+
+        let dirtySubmodule = GitFileChange(
+            path: "Dependencies/Module",
+            originalPath: nil,
+            indexStatus: ".",
+            worktreeStatus: "M",
+            kind: .ordinary,
+            submoduleStatus: GitSubmoduleStatus(
+                commitChanged: false,
+                hasTrackedChanges: true,
+                hasUntrackedChanges: false
+            )
+        )
+        let dirtySubmoduleItem = IntegratedFileItem(
+            id: .pending(scope: .working, changeID: dirtySubmodule.id),
+            change: dirtySubmodule,
+            scope: .working
+        )
+        XCTAssertNil(
+            primaryPendingMutationMode(
+                context: .pending,
+                item: dirtySubmoduleItem
+            )
+        )
+        XCTAssertNil(
+            pendingFilePrimaryCommand(
+                context: .pending,
+                focusedFileID: dirtySubmoduleItem.id.stackID,
+                items: [dirtySubmoduleItem]
+            )
+        )
+    }
+
+    func testFilesNavigatorSeparatesWorkingAndStagedCopiesOfSamePath() {
+        let change = GitFileChange(
+            path: "Sources/App.swift",
+            originalPath: nil,
+            indexStatus: "M",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        let working = IntegratedFileItem(
+            id: .pending(scope: .working, changeID: change.id),
+            change: change,
+            scope: .working
+        )
+        let staged = IntegratedFileItem(
+            id: .pending(scope: .staged, changeID: change.id),
+            change: change,
+            scope: .staged
+        )
+
+        let groups = pendingNavigatorFileGroups(
+            workingItems: [working],
+            untrackedItems: [],
+            stagedItems: [staged]
+        )
+
+        XCTAssertEqual(groups.map(\.title), ["Working", "Staged"])
+        XCTAssertEqual(groups[0].items, [working])
+        XCTAssertEqual(groups[1].items, [staged])
+        XCTAssertNotEqual(groups[0].items[0].id, groups[1].items[0].id)
+    }
+
+    func testDiffFocusDoesNotRequestAFileHeaderScroll() {
+        XCTAssertEqual(
+            diffReviewScrollTarget(
+                focusedFileID: "working:file",
+                fileFocusedFromDiffID: nil
+            ),
+            "working:file"
+        )
+        XCTAssertNil(
+            diffReviewScrollTarget(
+                focusedFileID: "working:file",
+                fileFocusedFromDiffID: "working:file"
+            )
+        )
+        XCTAssertNil(
+            diffReviewScrollTarget(
+                focusedFileID: nil,
+                fileFocusedFromDiffID: nil
+            )
+        )
+    }
+
+    func testRestoresExactCommitAndRangeSelectionsFromHistory() {
+        let rootOID = String(repeating: "a", count: 40)
+        let middleOID = String(repeating: "b", count: 40)
+        let headOID = String(repeating: "c", count: 40)
+        let commits = [
+            makeCommit(oid: headOID, parentOIDs: [middleOID]),
+            makeCommit(oid: middleOID, parentOIDs: [rootOID]),
+            makeCommit(oid: rootOID, parentOIDs: [])
+        ]
+        let commitState = ReviewNavigationState(
+            context: .commit(headOID),
+            selectedCommitIDs: [headOID]
+        )
+        XCTAssertEqual(
+            restoredHistorySelection(commitState, commits: commits),
+            [.commit(headOID)]
+        )
+
+        let rangeState = ReviewNavigationState(
+            context: .range(base: rootOID, head: headOID),
+            selectedCommitIDs: [headOID, middleOID]
+        )
+        XCTAssertEqual(
+            restoredHistorySelection(rangeState, commits: commits),
+            [.commit(headOID), .commit(middleOID)]
+        )
+        let compatibleLegacyRange = ReviewNavigationState(
+            context: rangeState.context,
+            selectedCommitIDs: []
+        )
+        XCTAssertEqual(
+            restoredHistorySelection(
+                compatibleLegacyRange,
+                commits: commits
+            ),
+            [.commit(headOID), .commit(middleOID)]
+        )
+        XCTAssertNil(
+            restoredHistorySelection(
+                ReviewNavigationState(
+                    context: .commit("missing"),
+                    selectedCommitIDs: ["missing"]
+                ),
+                commits: commits
+            )
+        )
+
+        let legacyMultiSelection = ReviewNavigationState(
+            context: .range(
+                base: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                head: headOID
+            ),
+            selectedCommitIDs: [headOID, middleOID, rootOID]
+        )
+        XCTAssertEqual(
+            restoredHistorySelection(
+                legacyMultiSelection,
+                commits: commits
+            ),
+            [.commit(headOID), .commit(rootOID)]
+        )
+        XCTAssertEqual(
+            historyScrollTargetID(
+                selection: [.commit(middleOID), .commit(rootOID)],
+                commits: commits
+            ),
+            middleOID
+        )
+        XCTAssertNil(
+            historyScrollTargetID(
+                selection: [.pending],
+                commits: commits
+            )
+        )
+        XCTAssertEqual(
+            historyRestorationCommitIDs(commitState),
+            [headOID]
+        )
+        XCTAssertEqual(
+            historyRestorationCommitIDs(rangeState),
+            [headOID, middleOID]
+        )
+        XCTAssertEqual(
+            historyRestorationCommitIDs(compatibleLegacyRange),
+            [headOID, rootOID]
+        )
+    }
+
+    func testHistoryFilterNavigationPreservesReachableCommitLocations() throws {
+        let baseOID = String(repeating: "a", count: 40)
+        let searchOID = String(repeating: "b", count: 40)
+        let baseCommit = makeCommit(oid: baseOID, parentOIDs: [])
+        let searchCommit = makeCommit(oid: searchOID, parentOIDs: [baseOID])
+
+        let enteringSearch = try XCTUnwrap(
+            historyFilterNavigationTransition(
+                previousFilter: "",
+                currentFilter: "message:search",
+                selectedCommitIDs: [baseOID],
+                pane: .commits,
+                baseCommits: [baseCommit],
+                searchedCommits: []
+            )
+        )
+        XCTAssertEqual(enteringSearch.previous.context, .commit(baseOID))
+        XCTAssertEqual(enteringSearch.current.context, .pending)
+        XCTAssertEqual(enteringSearch.selection, [.pending])
+
+        let equivalentSearch = try XCTUnwrap(
+            historyFilterNavigationTransition(
+                previousFilter: " message:search ",
+                currentFilter: "message:search",
+                selectedCommitIDs: [searchOID],
+                pane: .files,
+                baseCommits: [baseCommit],
+                searchedCommits: [searchCommit]
+            )
+        )
+        XCTAssertEqual(equivalentSearch.current.context, .commit(searchOID))
+        XCTAssertEqual(equivalentSearch.current.pane, .files)
+        XCTAssertEqual(
+            equivalentSearch.selection,
+            [.commit(searchOID)]
+        )
+
+        let clearingSearch = try XCTUnwrap(
+            historyFilterNavigationTransition(
+                previousFilter: "message:search",
+                currentFilter: "",
+                selectedCommitIDs: [searchOID],
+                pane: .commits,
+                baseCommits: [baseCommit],
+                searchedCommits: [searchCommit]
+            )
+        )
+        XCTAssertEqual(clearingSearch.previous.context, .commit(searchOID))
+        XCTAssertEqual(clearingSearch.current.context, .pending)
+        XCTAssertEqual(clearingSearch.selection, [.pending])
+    }
+
+    func testHistorySearchPageCacheUsesRecentQueriesAndKeepsPagination() throws {
+        let worktreeID = "/worktrees/feature"
+        let firstKey = HistorySearchLoadKey(
+            worktreeID: worktreeID,
+            revision: "head",
+            query: try XCTUnwrap(GitHistorySearchQuery("first"))
+        )
+        let secondKey = HistorySearchLoadKey(
+            worktreeID: worktreeID,
+            revision: "head",
+            query: try XCTUnwrap(GitHistorySearchQuery("second"))
+        )
+        let thirdKey = HistorySearchLoadKey(
+            worktreeID: worktreeID,
+            revision: "head",
+            query: try XCTUnwrap(GitHistorySearchQuery("third"))
+        )
+        let firstPage = GitHistoryPage(
+            commits: [makeCommit(oid: "first", parentOIDs: [])],
+            nextOffset: 100,
+            hasMore: true
+        )
+        let secondPage = GitHistoryPage(
+            commits: [makeCommit(oid: "second", parentOIDs: [])],
+            nextOffset: 20,
+            hasMore: false
+        )
+        let thirdPage = GitHistoryPage(
+            commits: [makeCommit(oid: "third", parentOIDs: [])],
+            nextOffset: 30,
+            hasMore: false
+        )
+        var cache = HistorySearchPageCache(maximumEntryCount: 2)
+
+        cache.insert(firstPage, for: firstKey)
+        cache.insert(secondPage, for: secondKey)
+        XCTAssertEqual(cache.page(for: firstKey), firstPage)
+        cache.insert(thirdPage, for: thirdKey)
+
+        XCTAssertNil(cache.page(for: secondKey))
+        XCTAssertEqual(cache.page(for: firstKey), firstPage)
+        XCTAssertEqual(cache.page(for: thirdKey), thirdPage)
+        cache.removeAll()
+        XCTAssertNil(cache.page(for: firstKey))
+
+        var commitLimitedCache = HistorySearchPageCache(
+            maximumEntryCount: 2,
+            maximumCommitCountPerEntry: 1,
+            maximumEntryByteCount: .max,
+            maximumTotalByteCount: .max
+        )
+        commitLimitedCache.insert(firstPage, for: firstKey)
+        XCTAssertEqual(commitLimitedCache.page(for: firstKey), firstPage)
+        commitLimitedCache.insert(
+            GitHistoryPage(
+                commits: firstPage.commits + secondPage.commits,
+                nextOffset: 2,
+                hasMore: true
+            ),
+            for: firstKey
+        )
+        XCTAssertNil(commitLimitedCache.page(for: firstKey))
+
+        var byteLimitedCache = HistorySearchPageCache(
+            maximumEntryCount: 2,
+            maximumCommitCountPerEntry: 10,
+            maximumEntryByteCount: 1,
+            maximumTotalByteCount: .max
+        )
+        byteLimitedCache.insert(firstPage, for: firstKey)
+        XCTAssertNil(byteLimitedCache.page(for: firstKey))
+
+        var totalLimitedCache = HistorySearchPageCache(
+            maximumEntryCount: 2,
+            maximumCommitCountPerEntry: 10,
+            maximumEntryByteCount: .max,
+            maximumTotalByteCount: 1
+        )
+        totalLimitedCache.insert(firstPage, for: firstKey)
+        XCTAssertNil(totalLimitedCache.page(for: firstKey))
+    }
+
+    func testLaterDiffBatchKeepsFilesLoadedByEarlierBatch() {
+        let firstChange = GitFileChange(
+            path: "Sources/First.swift",
+            originalPath: nil,
+            indexStatus: "M",
+            worktreeStatus: ".",
+            kind: .ordinary
+        )
+        let secondChange = GitFileChange(
+            path: "Sources/Second.swift",
+            originalPath: nil,
+            indexStatus: "M",
+            worktreeStatus: ".",
+            kind: .ordinary
+        )
+        let firstItem = IntegratedFileItem(
+            id: .pending(scope: .staged, changeID: firstChange.id),
+            change: firstChange,
+            scope: .staged
+        )
+        let secondItem = IntegratedFileItem(
+            id: .pending(scope: .staged, changeID: secondChange.id),
+            change: secondChange,
+            scope: .staged
+        )
+        let firstDiff = GitFileDiff(
+            change: firstChange,
+            scope: .staged,
+            hunks: [],
+            state: .textual
+        )
+        let secondDiff = GitFileDiff(
+            change: secondChange,
+            scope: .staged,
+            hunks: [],
+            state: .textual
+        )
+        var result: [IntegratedFileID: GitFileDiff] = [:]
+
+        mergeIntegratedDiffBatch(
+            diffs: [firstDiff],
+            into: &result,
+            items: [firstItem, secondItem]
+        )
+        mergeIntegratedDiffBatch(
+            diffs: [secondDiff],
+            into: &result,
+            items: [firstItem, secondItem]
+        )
+
+        XCTAssertEqual(result[firstItem.id], firstDiff)
+        XCTAssertEqual(result[secondItem.id], secondDiff)
+        XCTAssertEqual(result.count, 2)
+    }
+
+    func testPendingDiffCacheRequiresEveryScopeAndFile() throws {
+        let change = GitFileChange(
+            path: "Sources/Shared.swift",
+            originalPath: nil,
+            indexStatus: "M",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        let workingItem = IntegratedFileItem(
+            id: .pending(scope: .working, changeID: change.id),
+            change: change,
+            scope: .working
+        )
+        let stagedItem = IntegratedFileItem(
+            id: .pending(scope: .staged, changeID: change.id),
+            change: change,
+            scope: .staged
+        )
+        let workingDiff = GitFileDiff(
+            change: change,
+            scope: .working,
+            hunks: [],
+            state: .textual
+        )
+        let stagedDiff = GitFileDiff(
+            change: change,
+            scope: .staged,
+            hunks: [],
+            state: .binary
+        )
+
+        let restored = try XCTUnwrap(
+            completeIntegratedDiffCache(
+                diffs: [workingDiff, stagedDiff],
+                items: [workingItem, stagedItem]
+            )
+        )
+        XCTAssertEqual(restored[workingItem.id], workingDiff)
+        XCTAssertEqual(restored[stagedItem.id], stagedDiff)
+        XCTAssertNil(
+            completeIntegratedDiffCache(
+                diffs: [workingDiff],
+                items: [workingItem, stagedItem]
+            )
+        )
+        let partial = integratedDiffCache(
+            diffs: [workingDiff],
+            items: [workingItem, stagedItem]
+        )
+        XCTAssertEqual(partial, [workingItem.id: workingDiff])
+        XCTAssertEqual(
+            integratedItemsMissingDiff(
+                [workingItem, stagedItem],
+                cached: partial
+            ).map(\.id),
+            [stagedItem.id]
+        )
+        XCTAssertEqual(
+            sortedIntegratedDiffs(restored),
+            [stagedDiff, workingDiff]
+        )
+        XCTAssertTrue(
+            shouldFinalizeDiffCache(
+                ReviewDiffCacheEntry(
+                    diffs: [workingDiff, stagedDiff],
+                    isComplete: false
+                ),
+                missingItemCount: 0
+            )
+        )
+        XCTAssertFalse(
+            shouldFinalizeDiffCache(
+                ReviewDiffCacheEntry(
+                    diffs: [workingDiff],
+                    isComplete: false
+                ),
+                missingItemCount: 1
+            )
+        )
+        XCTAssertFalse(
+            shouldFinalizeDiffCache(
+                ReviewDiffCacheEntry(
+                    diffs: [workingDiff, stagedDiff],
+                    isComplete: true
+                ),
+                missingItemCount: 0
+            )
+        )
+    }
+
+    func testWorkingFileAvailabilityIncludesOnlyExistingRegularFiles() throws {
+        let root = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        ).appendingPathComponent(
+            ".build/test-files/file-availability-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let file = root.appendingPathComponent("file.swift")
+        let directory = root.appendingPathComponent("folder", isDirectory: true)
+        let missing = root.appendingPathComponent("missing.swift")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try Data("let value = 1\n".utf8).write(to: file)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        XCTAssertEqual(
+            existingRegularFileIDs(
+                for: [
+                    WorkingFileCandidate(id: "file", path: file.path),
+                    WorkingFileCandidate(id: "directory", path: directory.path),
+                    WorkingFileCandidate(id: "missing", path: missing.path)
+                ]
+            ),
+            ["file"]
+        )
+    }
+
+    func testRemoteOperationsRequireAnIdleTrackedBranch() {
+        let branch = GitWorktree(
+            rootURL: URL(fileURLWithPath: "/worktrees/feature"),
+            headOID: String(repeating: "a", count: 40),
+            branchRef: "refs/heads/feature",
+            isBare: false,
+            isDetached: false,
+            lockedReason: nil,
+            prunableReason: nil
+        )
+        let upstream = GitBranchStatus(
+            upstreamRef: "origin/feature",
+            aheadCount: 0,
+            behindCount: 0
+        )
+
+        XCTAssertNil(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: nil
+            )
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: nil,
+                isApplyingMutation: false,
+                runningAction: nil
+            ),
+            "Pull requires an upstream branch."
+        )
+        XCTAssertNil(
+            gitRemoteOperationUnavailableReason(
+                action: .push,
+                worktree: branch,
+                branchStatus: nil,
+                isApplyingMutation: false,
+                runningAction: nil
+            )
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: upstream,
+                isApplyingMutation: true,
+                runningAction: nil
+            ),
+            "Wait for the current Git change operation to finish."
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: nil,
+                hasUnresolvedRefreshFailure: true
+            ),
+            "Refresh repository status before running another Git operation."
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: nil,
+                isRefreshingRepository: true
+            ),
+            "Wait for the repository status update to finish."
+        )
+        let unavailableUpstream = GitBranchStatus(
+            upstreamRef: "origin/feature",
+            aheadCount: 0,
+            behindCount: 0,
+            upstreamError: "Ahead/behind: Upstream origin/feature is unavailable."
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: unavailableUpstream,
+                isApplyingMutation: false,
+                runningAction: nil
+            ),
+            "Ahead/behind: Upstream origin/feature is unavailable."
+        )
+        XCTAssertNil(
+            gitRemoteOperationUnavailableReason(
+                action: .push,
+                worktree: branch,
+                branchStatus: unavailableUpstream,
+                isApplyingMutation: false,
+                runningAction: nil
+            )
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: branch,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: .pull
+            ),
+            "Pull is already in progress."
+        )
+
+        let detached = GitWorktree(
+            rootURL: branch.rootURL,
+            headOID: branch.headOID,
+            branchRef: nil,
+            isBare: false,
+            isDetached: true,
+            lockedReason: nil,
+            prunableReason: nil
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: detached,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: nil
+            ),
+            "Pull requires a checked-out branch."
+        )
+
+        let unborn = GitWorktree(
+            rootURL: branch.rootURL,
+            headOID: String(repeating: "0", count: 40),
+            branchRef: "refs/heads/new",
+            isBare: false,
+            isDetached: false,
+            lockedReason: nil,
+            prunableReason: nil
+        )
+        XCTAssertEqual(
+            gitRemoteOperationUnavailableReason(
+                worktree: unborn,
+                branchStatus: upstream,
+                isApplyingMutation: false,
+                runningAction: nil
+            ),
+            "Pull requires an initial commit."
+        )
+        XCTAssertEqual(gitPushActionTitle(branchStatus: nil), "Publish")
+        XCTAssertEqual(gitPushActionTitle(branchStatus: upstream), "Push")
+    }
+
+    func testRemoteOperationFeedbackUsesTransientResultMeaning() {
+        let completed = RemoteOperationFeedback(action: .push, outcome: .completed)
+        let cancelled = RemoteOperationFeedback(action: .pull, outcome: .cancelled)
+
+        XCTAssertEqual(completed.systemImage, "checkmark.circle.fill")
+        XCTAssertEqual(completed.message, "Push completed")
+        XCTAssertEqual(completed.compactTitle, "Push complete")
+        XCTAssertEqual(cancelled.systemImage, "xmark.circle")
+        XCTAssertEqual(cancelled.message, "Pull cancellation requested")
+        XCTAssertEqual(cancelled.compactTitle, "Cancel requested")
+    }
+
+    func testMutationRefreshFailureMessageOnlyExistsForFailedRefresh() {
+        XCTAssertNil(mutationRefreshFailureMessage(.updated))
+        XCTAssertNil(mutationRefreshFailureMessage(.superseded))
+        XCTAssertEqual(
+            mutationRefreshFailureMessage(.failed("status timed out")),
+            "Git operation completed, but repository status could not be refreshed: "
+                + "status timed out"
+        )
+    }
+
+    @MainActor
+    func testCancelledRemoteTaskStillRunsIndependentStatusRefresh() async {
+        var didRefresh = false
+        let parent = Task { @MainActor in
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            return await runIndependentWorktreeRefresh {
+                didRefresh = true
+                return .updated
+            }
+        }
+
+        parent.cancel()
+        let outcome = await parent.value
+
+        XCTAssertEqual(outcome, .updated)
+        XCTAssertTrue(didRefresh)
+    }
+
+    func testFilesNavigatorPreservesFocusAcrossTransientListRebuild() {
+        XCTAssertEqual(
+            acceptedNavigatorFileSelection(
+                current: "working:Sources/App.swift",
+                requested: nil,
+                hasVisibleFiles: true
+            ),
+            "working:Sources/App.swift"
+        )
+        XCTAssertEqual(
+            acceptedNavigatorFileSelection(
+                current: "working:Sources/App.swift",
+                requested: "staged:Sources/App.swift",
+                hasVisibleFiles: true
+            ),
+            "staged:Sources/App.swift"
+        )
+        XCTAssertNil(
+            acceptedNavigatorFileSelection(
+                current: "working:Sources/App.swift",
+                requested: nil,
+                hasVisibleFiles: false
+            )
+        )
+    }
+
+    func testDiffLoadIdentityRejectsStaleWorktreeAndSnapshotResults() {
+        let change = GitFileChange(
+            path: "Sources/App.swift",
+            originalPath: nil,
+            indexStatus: ".",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        let fileID = IntegratedFileID.pending(
+            scope: .working,
+            changeID: change.id
+        )
+        let activityDate = Date(timeIntervalSince1970: 1_000)
+        let options = GitDiffOptions(
+            context: .lines(3),
+            ignoresWhitespace: false
+        )
+        let requested = IntegratedDiffLoadKey(
+            worktreeID: "/worktrees/first",
+            activityDate: activityDate,
+            context: .pending,
+            options: options,
+            fileIDs: [fileID]
+        )
+
+        XCTAssertTrue(
+            acceptsIntegratedDiffLoad(
+                currentWorktreeID: requested.worktreeID,
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentOptions: options,
+                currentFileIDs: [fileID],
+                requested: requested
+            )
+        )
+        XCTAssertFalse(
+            acceptsIntegratedDiffLoad(
+                currentWorktreeID: "/worktrees/second",
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentOptions: options,
+                currentFileIDs: [fileID],
+                requested: requested
+            )
+        )
+        XCTAssertFalse(
+            acceptsIntegratedDiffLoad(
+                currentWorktreeID: requested.worktreeID,
+                currentActivityDate: activityDate.addingTimeInterval(1),
+                currentContext: .pending,
+                currentOptions: options,
+                currentFileIDs: [fileID],
+                requested: requested
+            )
+        )
+        XCTAssertFalse(
+            acceptsIntegratedDiffLoad(
+                currentWorktreeID: requested.worktreeID,
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentOptions: GitDiffOptions(
+                    context: .lines(25),
+                    ignoresWhitespace: false
+                ),
+                currentFileIDs: [fileID],
+                requested: requested
+            )
+        )
+        XCTAssertFalse(
+            acceptsIntegratedDiffLoad(
+                currentWorktreeID: requested.worktreeID,
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentOptions: options,
+                currentFileIDs: [],
+                requested: requested
+            )
+        )
+
+        let sharedCommit = ReviewContext.commit(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        let requestedReview = ReviewStateKey(
+            worktreeID: "/worktrees/first",
+            context: sharedCommit
+        )
+        XCTAssertTrue(
+            reviewStateRequestMatches(
+                currentWorktreeID: "/worktrees/first",
+                currentContext: sharedCommit,
+                requested: requestedReview
+            )
+        )
+        XCTAssertFalse(
+            reviewStateRequestMatches(
+                currentWorktreeID: "/worktrees/second",
+                currentContext: sharedCommit,
+                requested: requestedReview
+            )
+        )
+
+        let availabilityRequest = WorkingFileAvailabilityKey(
+            worktreeID: requested.worktreeID,
+            activityDate: activityDate,
+            context: .pending,
+            fileIDs: [fileID]
+        )
+        XCTAssertTrue(
+            workingFileAvailabilityRequestMatches(
+                currentWorktreeID: requested.worktreeID,
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentFileIDs: [fileID],
+                requested: availabilityRequest
+            )
+        )
+        XCTAssertFalse(
+            workingFileAvailabilityRequestMatches(
+                currentWorktreeID: "/worktrees/second",
+                currentActivityDate: activityDate,
+                currentContext: .pending,
+                currentFileIDs: [fileID],
+                requested: availabilityRequest
+            )
+        )
+    }
+
+    func testOperationResultOnlyUpdatesOriginatingWorktreeAndSequence() {
+        let request = ReviewOperationRequest(
+            worktreeID: "/worktrees/first",
+            sequence: 7
+        )
+        XCTAssertTrue(
+            reviewOperationRequestMatches(
+                currentWorktreeID: "/worktrees/first",
+                currentSequence: 7,
+                requested: request
+            )
+        )
+        XCTAssertFalse(
+            reviewOperationRequestMatches(
+                currentWorktreeID: "/worktrees/second",
+                currentSequence: 7,
+                requested: request
+            )
+        )
+        XCTAssertFalse(
+            reviewOperationRequestMatches(
+                currentWorktreeID: "/worktrees/first",
+                currentSequence: 8,
+                requested: request
+            )
+        )
+    }
+
+    private func makeCommit(
+        oid: String,
+        parentOIDs: [String]
+    ) -> GitCommit {
+        GitCommit(
+            oid: oid,
+            shortOID: String(oid.prefix(7)),
+            authorName: "AgentGit Tests",
+            authoredAt: Date(timeIntervalSince1970: 100),
+            parentOIDs: parentOIDs,
+            refNames: [],
+            subject: oid
+        )
+    }
+}

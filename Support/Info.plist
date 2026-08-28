@@ -32,6 +32,16 @@
     </array>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>AgentGit reads and updates Git repositories you add from Documents.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>AgentGit reads and updates Git repositories you add from Desktop.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>AgentGit reads and updates Git repositories you add from Downloads.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>AgentGit reads and updates Git repositories you add from network volumes.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>AgentGit reads and updates Git repositories you add from removable volumes.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

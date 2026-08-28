@@ -1,6 +1,6 @@
 import Foundation
 
-public enum GitDiffScope: String, CaseIterable, Identifiable, Hashable, Sendable {
+public enum GitDiffScope: String, CaseIterable, Identifiable, Hashable, Codable, Sendable {
     case working
     case staged
 
@@ -17,7 +17,7 @@ public enum GitDiffScope: String, CaseIterable, Identifiable, Hashable, Sendable
 }
 
 /// Diff 的呈现口径。上下文行数与忽略空白都只是 git 参数，改了要重新取一次。
-public enum GitDiffContext: Hashable, Sendable {
+public enum GitDiffContext: Hashable, Codable, Sendable {
     case lines(Int)
     case wholeFile
 
@@ -37,7 +37,7 @@ public enum GitDiffContext: Hashable, Sendable {
     }
 }
 
-public struct GitDiffOptions: Hashable, Sendable {
+public struct GitDiffOptions: Hashable, Codable, Sendable {
     public var context: GitDiffContext
     public var ignoresWhitespace: Bool
 
@@ -55,14 +55,14 @@ public struct GitDiffOptions: Hashable, Sendable {
     }
 }
 
-public enum GitDiffLineKind: Hashable, Sendable {
+public enum GitDiffLineKind: Hashable, Codable, Sendable {
     case context
     case addition
     case deletion
     case metadata
 }
 
-public struct GitDiffLine: Identifiable, Hashable, Sendable {
+public struct GitDiffLine: Identifiable, Hashable, Codable, Sendable {
     public let id: Int
     public let kind: GitDiffLineKind
     public let oldLineNumber: Int?
@@ -99,9 +99,10 @@ public struct GitDiffLine: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct GitDiffHunk: Identifiable, Hashable, Sendable {
+public struct GitDiffHunk: Identifiable, Hashable, Codable, Sendable {
     public let id: Int
     public let header: String
+    public let sectionHeading: String?
     public let oldStart: Int
     public let oldCount: Int
     public let newStart: Int
@@ -111,6 +112,7 @@ public struct GitDiffHunk: Identifiable, Hashable, Sendable {
     public init(
         id: Int,
         header: String,
+        sectionHeading: String? = nil,
         oldStart: Int,
         oldCount: Int,
         newStart: Int,
@@ -119,6 +121,7 @@ public struct GitDiffHunk: Identifiable, Hashable, Sendable {
     ) {
         self.id = id
         self.header = header
+        self.sectionHeading = sectionHeading
         self.oldStart = oldStart
         self.oldCount = oldCount
         self.newStart = newStart
@@ -128,8 +131,9 @@ public struct GitDiffHunk: Identifiable, Hashable, Sendable {
 }
 
 /// 没有 hunk 时到底发生了什么。UI 要能区分二进制、过大、无改动和不可用。
-public enum GitFileDiffState: Hashable, Sendable {
+public enum GitFileDiffState: Hashable, Codable, Sendable {
     case textual
+    case metadata(String)
     case binary
     case tooLarge(lineCount: Int)
     case unavailable(String)
@@ -137,6 +141,7 @@ public enum GitFileDiffState: Hashable, Sendable {
     public var note: String? {
         switch self {
         case .textual: nil
+        case let .metadata(summary): summary
         case .binary: "Binary file"
         case let .tooLarge(lineCount): "Diff too large to display (\(lineCount) lines)"
         case let .unavailable(reason): reason
@@ -144,11 +149,12 @@ public enum GitFileDiffState: Hashable, Sendable {
     }
 }
 
-public struct GitFileDiff: Hashable, Sendable {
+public struct GitFileDiff: Hashable, Codable, Sendable {
     public let change: GitFileChange
     public let scope: GitDiffScope
     public let hunks: [GitDiffHunk]
     public let state: GitFileDiffState
+    public let renderID: UInt64
     /// 存储而非每次现算：文件头每次重绘都要读，现算等于把全文再走一遍。
     public let addedLineCount: Int
     public let deletedLineCount: Int
@@ -167,6 +173,12 @@ public struct GitFileDiff: Hashable, Sendable {
         self.state = state
         self.addedLineCount = addedLineCount
         self.deletedLineCount = deletedLineCount
+        renderID = gitDiffRenderID(
+            hunks: hunks,
+            state: state,
+            addedLineCount: addedLineCount,
+            deletedLineCount: deletedLineCount
+        )
     }
 
     public init(
@@ -190,6 +202,102 @@ public struct GitFileDiff: Hashable, Sendable {
     }
 }
 
+private func gitDiffRenderID(
+    hunks: [GitDiffHunk],
+    state: GitFileDiffState,
+    addedLineCount: Int,
+    deletedLineCount: Int
+) -> UInt64 {
+    var fingerprint = GitDiffRenderFingerprint()
+    switch state {
+    case .textual:
+        fingerprint.combine("textual")
+    case let .metadata(summary):
+        fingerprint.combine("metadata")
+        fingerprint.combine(summary)
+    case .binary:
+        fingerprint.combine("binary")
+    case let .tooLarge(lineCount):
+        fingerprint.combine("too-large")
+        fingerprint.combine(lineCount)
+    case let .unavailable(reason):
+        fingerprint.combine("unavailable")
+        fingerprint.combine(reason)
+    }
+    fingerprint.combine(addedLineCount)
+    fingerprint.combine(deletedLineCount)
+    for hunk in hunks {
+        fingerprint.combine(hunk.id)
+        fingerprint.combine(hunk.header)
+        fingerprint.combine(hunk.sectionHeading)
+        fingerprint.combine(hunk.oldStart)
+        fingerprint.combine(hunk.oldCount)
+        fingerprint.combine(hunk.newStart)
+        fingerprint.combine(hunk.newCount)
+        for line in hunk.lines {
+            fingerprint.combine(line.id)
+            switch line.kind {
+            case .context: fingerprint.combine(0)
+            case .addition: fingerprint.combine(1)
+            case .deletion: fingerprint.combine(2)
+            case .metadata: fingerprint.combine(3)
+            }
+            fingerprint.combine(line.oldLineNumber)
+            fingerprint.combine(line.newLineNumber)
+            fingerprint.combine(line.content)
+            for range in line.inlineRanges {
+                fingerprint.combine(range.location)
+                fingerprint.combine(range.length)
+            }
+        }
+    }
+    return fingerprint.value
+}
+
+private struct GitDiffRenderFingerprint {
+    private(set) var value: UInt64 = 14_695_981_039_346_656_037
+
+    mutating func combine(_ string: String) {
+        for byte in string.utf8 {
+            combineByte(byte)
+        }
+        combineByte(0xFF)
+    }
+
+    mutating func combine(_ string: String?) {
+        guard let string else {
+            combineByte(0xFE)
+            return
+        }
+        combineByte(0x01)
+        combine(string)
+    }
+
+    mutating func combine(_ integer: Int) {
+        var bytes = UInt64(bitPattern: Int64(integer)).littleEndian
+        withUnsafeBytes(of: &bytes) { buffer in
+            for byte in buffer {
+                combineByte(byte)
+            }
+        }
+        combineByte(0xFD)
+    }
+
+    mutating func combine(_ integer: Int?) {
+        guard let integer else {
+            combineByte(0xFC)
+            return
+        }
+        combineByte(0x01)
+        combine(integer)
+    }
+
+    private mutating func combineByte(_ byte: UInt8) {
+        value ^= UInt64(byte)
+        value &*= 1_099_511_628_211
+    }
+}
+
 public enum UnifiedDiffParseError: Error, Equatable, Sendable {
     case invalidUTF8
     case malformedHunkHeader(String)
@@ -204,39 +312,59 @@ public enum UnifiedDiffParser {
         changes: [GitFileChange],
         scope: GitDiffScope
     ) throws -> [GitFileDiff] {
+        try Task.checkCancellation()
         guard let text = String(data: data, encoding: .utf8) else {
             throw UnifiedDiffParseError.invalidUTF8
         }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var chunks: [[String]] = []
         var currentChunk: [String] = []
+        var parsedByChangeID: [GitFileChange.ID: GitFileDiff] = [:]
 
-        for line in lines {
+        func finishCurrentChunk() throws {
+            guard let header = currentChunk.first,
+                  let change = changes.first(where: {
+                    header.hasSuffix(" b/\($0.path)")
+                  }) else {
+                currentChunk.removeAll(keepingCapacity: true)
+                return
+            }
+            let outputLineCount = max(0, currentChunk.count - 1)
+            if currentChunk.last == "" {
+                currentChunk.removeLast()
+            }
+            if outputLineCount > maximumRenderedLines {
+                parsedByChangeID[change.id] = GitFileDiff(
+                    change: change,
+                    scope: scope,
+                    hunks: [],
+                    state: .tooLarge(lineCount: outputLineCount),
+                    addedLineCount: 0,
+                    deletedLineCount: 0
+                )
+            } else {
+                parsedByChangeID[change.id] = try parseRawLines(
+                    currentChunk,
+                    change: change,
+                    scope: scope
+                )
+            }
+            currentChunk.removeAll(keepingCapacity: true)
+        }
+
+        for (index, line) in lines.enumerated() {
+            if index.isMultiple(of: 256) {
+                try Task.checkCancellation()
+            }
             if line.hasPrefix("diff --git "), !currentChunk.isEmpty {
-                chunks.append(currentChunk)
-                currentChunk = []
+                try finishCurrentChunk()
             }
             if !currentChunk.isEmpty || line.hasPrefix("diff --git ") {
                 currentChunk.append(line)
             }
         }
         if !currentChunk.isEmpty {
-            chunks.append(currentChunk)
-        }
-
-        var parsedByChangeID: [GitFileChange.ID: GitFileDiff] = [:]
-        for chunk in chunks {
-            guard let header = chunk.first,
-                  let change = changes.first(where: { header.hasSuffix(" b/\($0.path)") }) else {
-                continue
-            }
-            let patch = chunk.joined(separator: "\n")
-            parsedByChangeID[change.id] = try parse(
-                Data(patch.utf8),
-                change: change,
-                scope: scope
-            )
+            try finishCurrentChunk()
         }
 
         return changes.map { change in
@@ -254,6 +382,36 @@ public enum UnifiedDiffParser {
         change: GitFileChange,
         scope: GitDiffScope
     ) throws -> GitFileDiff {
+        try parseContents(data, change: change, scope: scope)
+    }
+
+    public static func parseBounded(
+        _ data: Data,
+        change: GitFileChange,
+        scope: GitDiffScope
+    ) throws -> GitFileDiff {
+        try Task.checkCancellation()
+        let outputLineCount = data.count(where: { $0 == 0x0A })
+        try Task.checkCancellation()
+        guard outputLineCount <= maximumRenderedLines else {
+            return GitFileDiff(
+                change: change,
+                scope: scope,
+                hunks: [],
+                state: .tooLarge(lineCount: outputLineCount),
+                addedLineCount: 0,
+                deletedLineCount: 0
+            )
+        }
+        return try parseContents(data, change: change, scope: scope)
+    }
+
+    private static func parseContents(
+        _ data: Data,
+        change: GitFileChange,
+        scope: GitDiffScope
+    ) throws -> GitFileDiff {
+        try Task.checkCancellation()
         guard let text = String(data: data, encoding: .utf8) else {
             throw UnifiedDiffParseError.invalidUTF8
         }
@@ -266,6 +424,18 @@ public enum UnifiedDiffParser {
             rawLines.removeLast()
         }
 
+        return try parseRawLines(
+            rawLines,
+            change: change,
+            scope: scope
+        )
+    }
+
+    private static func parseRawLines(
+        _ rawLines: [String],
+        change: GitFileChange,
+        scope: GitDiffScope
+    ) throws -> GitFileDiff {
         var hunks: [GitDiffHunk] = []
         var currentHeader: ParsedHunkHeader?
         var currentLines: [GitDiffLine] = []
@@ -273,6 +443,7 @@ public enum UnifiedDiffParser {
         var newLine = 0
         var lineID = 0
         var state = GitFileDiffState.textual
+        var metadataLines: [String] = []
 
         func finishHunk() {
             guard let currentHeader else {
@@ -282,6 +453,7 @@ public enum UnifiedDiffParser {
                 GitDiffHunk(
                     id: hunks.count,
                     header: currentHeader.raw,
+                    sectionHeading: currentHeader.sectionHeading,
                     oldStart: currentHeader.oldStart,
                     oldCount: currentHeader.oldCount,
                     newStart: currentHeader.newStart,
@@ -291,9 +463,13 @@ public enum UnifiedDiffParser {
             )
         }
 
-        for rawLine in rawLines {
+        for (rawIndex, rawLine) in rawLines.enumerated() {
+            if rawIndex.isMultiple(of: 256) {
+                try Task.checkCancellation()
+            }
             if rawLine.hasPrefix("@@ ") {
                 finishHunk()
+                try Task.checkCancellation()
                 let parsed = try parseHunkHeader(rawLine)
                 currentHeader = parsed
                 currentLines = []
@@ -305,6 +481,8 @@ public enum UnifiedDiffParser {
             guard currentHeader != nil else {
                 if rawLine.hasPrefix("Binary files ") || rawLine == "GIT binary patch" {
                     state = .binary
+                } else if isReviewableMetadataLine(rawLine) {
+                    metadataLines.append(rawLine)
                 }
                 continue
             }
@@ -352,6 +530,11 @@ public enum UnifiedDiffParser {
         }
 
         finishHunk()
+        try Task.checkCancellation()
+
+        if state == .textual, hunks.isEmpty, !metadataLines.isEmpty {
+            state = .metadata(metadataLines.joined(separator: " · "))
+        }
 
         // 超大单文件不建行数组：真正的代价在解析和内存，不在表格渲染。
         let lineCount = hunks.reduce(0) { $0 + $1.lines.count }
@@ -376,6 +559,21 @@ public enum UnifiedDiffParser {
             hunks: hunks,
             state: state
         )
+    }
+
+    private static func isReviewableMetadataLine(_ line: String) -> Bool {
+        [
+            "old mode ",
+            "new mode ",
+            "new file mode ",
+            "deleted file mode ",
+            "similarity index ",
+            "dissimilarity index ",
+            "rename from ",
+            "rename to ",
+            "copy from ",
+            "copy to "
+        ].contains { line.hasPrefix($0) }
     }
 
     public static func addedFile(
@@ -412,13 +610,24 @@ public enum UnifiedDiffParser {
         if text.hasSuffix("\n") {
             contents.removeLast()
         }
-        let lines = contents.enumerated().map { index, content in
+        var lines = contents.enumerated().map { index, content in
             GitDiffLine(
                 id: index,
                 kind: .addition,
                 oldLineNumber: nil,
                 newLineNumber: index + 1,
                 content: content
+            )
+        }
+        if !text.hasSuffix("\n") {
+            lines.append(
+                GitDiffLine(
+                    id: lines.count,
+                    kind: .metadata,
+                    oldLineNumber: nil,
+                    newLineNumber: nil,
+                    content: "\\ No newline at end of file"
+                )
             )
         }
         let hunk = GitDiffHunk(
@@ -453,8 +662,11 @@ public enum UnifiedDiffParser {
 
         let oldRange = try parseCoordinate(String(coordinates[0]), prefix: "-", line: line)
         let newRange = try parseCoordinate(String(coordinates[1]), prefix: "+", line: line)
+        let heading = line[closingRange.upperBound...]
+            .trimmingCharacters(in: .whitespaces)
         return ParsedHunkHeader(
             raw: line,
+            sectionHeading: heading.isEmpty ? nil : heading,
             oldStart: oldRange.start,
             oldCount: oldRange.count,
             newStart: newRange.start,
@@ -484,6 +696,7 @@ public enum UnifiedDiffParser {
 
 private struct ParsedHunkHeader {
     let raw: String
+    let sectionHeading: String?
     let oldStart: Int
     let oldCount: Int
     let newStart: Int

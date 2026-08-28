@@ -1,6 +1,6 @@
 import Foundation
 
-public struct GitCommit: Identifiable, Hashable, Sendable {
+public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
     public let oid: String
     public let shortOID: String
     public let authorName: String
@@ -33,6 +33,147 @@ public struct GitCommit: Identifiable, Hashable, Sendable {
 
     public var isMerge: Bool {
         parentOIDs.count > 1
+    }
+
+    public var references: [GitReferenceDecoration] {
+        GitReferenceDecoration.parse(refNames)
+    }
+}
+
+public enum GitReferenceKind: Int, Hashable, Sendable {
+    case head
+    case localBranch
+    case tag
+    case remoteBranch
+    case other
+}
+
+public struct GitReferenceDecoration: Identifiable, Hashable, Sendable {
+    public let kind: GitReferenceKind
+    public let label: String
+    public let fullName: String
+
+    public var id: String {
+        "\(kind.rawValue):\(fullName)"
+    }
+
+    public static func parse(_ names: [String]) -> [GitReferenceDecoration] {
+        var seen: Set<String> = []
+        return names.compactMap { rawName in
+            let decoration = decoration(rawName)
+            guard seen.insert(decoration.id).inserted else {
+                return nil
+            }
+            return decoration
+        }.sorted { lhs, rhs in
+            if lhs.kind.rawValue != rhs.kind.rawValue {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            return lhs.label.localizedStandardCompare(rhs.label) == .orderedAscending
+        }
+    }
+
+    private static func decoration(_ rawName: String) -> GitReferenceDecoration {
+        if rawName == "HEAD" {
+            return GitReferenceDecoration(kind: .head, label: "HEAD", fullName: rawName)
+        }
+        if rawName.hasPrefix("HEAD -> ") {
+            let target = String(rawName.dropFirst("HEAD -> ".count))
+            return GitReferenceDecoration(
+                kind: .head,
+                label: shortName(target),
+                fullName: target
+            )
+        }
+        if rawName.hasPrefix("tag: ") {
+            let target = String(rawName.dropFirst("tag: ".count))
+            return GitReferenceDecoration(
+                kind: .tag,
+                label: target.removingPrefix("refs/tags/"),
+                fullName: target
+            )
+        }
+        if rawName.hasPrefix("refs/heads/") {
+            return GitReferenceDecoration(
+                kind: .localBranch,
+                label: rawName.removingPrefix("refs/heads/"),
+                fullName: rawName
+            )
+        }
+        if rawName.hasPrefix("refs/remotes/") {
+            return GitReferenceDecoration(
+                kind: .remoteBranch,
+                label: rawName.removingPrefix("refs/remotes/"),
+                fullName: rawName
+            )
+        }
+        return GitReferenceDecoration(
+            kind: .other,
+            label: shortName(rawName),
+            fullName: rawName
+        )
+    }
+
+    private static func shortName(_ name: String) -> String {
+        name.removingPrefix("refs/heads/")
+            .removingPrefix("refs/remotes/")
+            .removingPrefix("refs/tags/")
+    }
+}
+
+public struct GitHistoryPage: Equatable, Codable, Sendable {
+    public let commits: [GitCommit]
+    public let nextOffset: Int
+    public let hasMore: Bool
+
+    public init(commits: [GitCommit], nextOffset: Int, hasMore: Bool) {
+        self.commits = commits
+        self.nextOffset = nextOffset
+        self.hasMore = hasMore
+    }
+}
+
+public enum GitHistorySearchField: Hashable, Sendable {
+    case message
+    case author
+}
+
+public struct GitHistorySearchQuery: Hashable, Sendable {
+    public let field: GitHistorySearchField
+    public let term: String
+
+    public init?(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        let lowercased = trimmed.lowercased()
+        if lowercased.hasPrefix("author:") {
+            let term = String(trimmed.dropFirst("author:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else {
+                return nil
+            }
+            field = .author
+            self.term = term
+        } else if lowercased.hasPrefix("message:") {
+            let term = String(trimmed.dropFirst("message:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else {
+                return nil
+            }
+            field = .message
+            self.term = term
+        } else {
+            field = .message
+            self.term = trimmed
+        }
+    }
+}
+
+private extension String {
+    func removingPrefix(_ prefix: String) -> String {
+        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : self
     }
 }
 

@@ -10,7 +10,7 @@ public struct GitDiffLinePair: Hashable, Sendable {
     }
 }
 
-/// 把 unified diff 的删除/新增 run 对齐成双栏行；context 在两栏各显示一次。
+/// 把 unified diff 的删除/新增 run 配成双栏行；context 在两栏各显示一次。
 public enum SideBySideDiffBuilder {
     public static func pairs(_ lines: [GitDiffLine]) -> [GitDiffLinePair] {
         var result: [GitDiffLinePair] = []

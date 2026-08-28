@@ -78,6 +78,84 @@ final class GitDiffTests: XCTestCase {
         XCTAssertEqual(diff.addedLineCount, 1)
     }
 
+    func testReportsModeAndRenameOnlyChangesAsMetadata() throws {
+        let modePatch = """
+        diff --git a/script.sh b/script.sh
+        old mode 100644
+        new mode 100755
+        """
+        let renameChange = GitFileChange(
+            path: "new-name.txt",
+            originalPath: "old-name.txt",
+            indexStatus: "R",
+            worktreeStatus: ".",
+            kind: .renamedOrCopied
+        )
+        let renamePatch = """
+        diff --git a/old-name.txt b/new-name.txt
+        similarity index 100%
+        rename from old-name.txt
+        rename to new-name.txt
+        """
+
+        let modeDiff = try UnifiedDiffParser.parse(
+            Data(modePatch.utf8),
+            change: change("script.sh"),
+            scope: .working
+        )
+        let renameDiff = try UnifiedDiffParser.parse(
+            Data(renamePatch.utf8),
+            change: renameChange,
+            scope: .staged
+        )
+
+        XCTAssertEqual(
+            modeDiff.state,
+            .metadata("old mode 100644 · new mode 100755")
+        )
+        XCTAssertEqual(
+            renameDiff.state,
+            .metadata(
+                "similarity index 100% · rename from old-name.txt · rename to new-name.txt"
+            )
+        )
+        XCTAssertTrue(modeDiff.hunks.isEmpty)
+        XCTAssertTrue(renameDiff.hunks.isEmpty)
+    }
+
+    func testParserStopsWhenTaskIsAlreadyCancelled() async {
+        let patch = """
+        diff --git a/a.txt b/a.txt
+        --- a/a.txt
+        +++ b/a.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        """
+        let targetChange = change("a.txt")
+        let task = Task.detached {
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            return try UnifiedDiffParser.parse(
+                Data(patch.utf8),
+                change: targetChange,
+                scope: .working
+            )
+        }
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled parsing should throw CancellationError")
+        } catch is CancellationError {
+            return
+        } catch {
+            XCTFail("Unexpected cancellation error: \(error)")
+        }
+    }
+
     func testParsesHunkLineNumbersAndChangeCounts() throws {
         let change = GitFileChange(
             path: "Sources/Feature.swift",
@@ -109,6 +187,7 @@ final class GitDiffTests: XCTestCase {
         XCTAssertEqual(diff.hunks.count, 1)
         XCTAssertEqual(diff.addedLineCount, 2)
         XCTAssertEqual(diff.deletedLineCount, 1)
+        XCTAssertEqual(diff.hunks[0].sectionHeading, "func feature() {")
         XCTAssertEqual(diff.hunks[0].lines[0].oldLineNumber, 1)
         XCTAssertEqual(diff.hunks[0].lines[0].newLineNumber, 1)
         XCTAssertEqual(diff.hunks[0].lines[1].oldLineNumber, 2)
@@ -116,6 +195,92 @@ final class GitDiffTests: XCTestCase {
         XCTAssertNil(diff.hunks[0].lines[2].oldLineNumber)
         XCTAssertEqual(diff.hunks[0].lines[2].newLineNumber, 2)
         XCTAssertEqual(diff.hunks[0].lines.last?.kind, .metadata)
+    }
+
+    func testRenderIDTracksVisibleDiffContentAndStatistics() {
+        let targetChange = change("Sources/Feature.swift")
+        let originalLine = GitDiffLine(
+            id: 0,
+            kind: .addition,
+            oldLineNumber: nil,
+            newLineNumber: 1,
+            content: "let value = 1"
+        )
+        let highlightedLine = GitDiffLine(
+            id: 0,
+            kind: .addition,
+            oldLineNumber: nil,
+            newLineNumber: 1,
+            content: "let value = 1",
+            inlineRanges: [GitDiffInlineRange(location: 4, length: 5)]
+        )
+        func diff(line: GitDiffLine, addedLineCount: Int = 1) -> GitFileDiff {
+            GitFileDiff(
+                change: targetChange,
+                scope: .working,
+                hunks: [
+                    GitDiffHunk(
+                        id: 0,
+                        header: "@@ -0,0 +1 @@",
+                        oldStart: 0,
+                        oldCount: 0,
+                        newStart: 1,
+                        newCount: 1,
+                        lines: [line]
+                    )
+                ],
+                state: .textual,
+                addedLineCount: addedLineCount,
+                deletedLineCount: 0
+            )
+        }
+
+        XCTAssertEqual(diff(line: originalLine).renderID, diff(line: originalLine).renderID)
+        XCTAssertNotEqual(diff(line: originalLine).renderID, diff(line: highlightedLine).renderID)
+        XCTAssertNotEqual(
+            diff(line: originalLine).renderID,
+            diff(line: originalLine, addedLineCount: 2).renderID
+        )
+    }
+
+    func testKeepsSeparateGitHunksAndTheirSectionHeadings() throws {
+        let change = GitFileChange(
+            path: "Sources/Feature.swift",
+            originalPath: nil,
+            indexStatus: ".",
+            worktreeStatus: "M",
+            kind: .ordinary
+        )
+        let patch = """
+        diff --git a/Sources/Feature.swift b/Sources/Feature.swift
+        index 1111111..2222222 100644
+        --- a/Sources/Feature.swift
+        +++ b/Sources/Feature.swift
+        @@ -2,3 +2,3 @@ func firstFeature() {
+         before
+        -oldFirst
+        +newFirst
+         after
+        @@ -20,3 +20,3 @@ func secondFeature() {
+         before
+        -oldSecond
+        +newSecond
+         after
+        """
+
+        let diff = try UnifiedDiffParser.parse(
+            Data(patch.utf8),
+            change: change,
+            scope: .working
+        )
+
+        XCTAssertEqual(diff.hunks.map(\.id), [0, 1])
+        XCTAssertEqual(
+            diff.hunks.map(\.sectionHeading),
+            ["func firstFeature() {", "func secondFeature() {"]
+        )
+        XCTAssertEqual(diff.hunks.map(\.newStart), [2, 20])
+        XCTAssertEqual(diff.hunks.map(\.newCount), [3, 3])
     }
 
     func testCreatesReviewableDiffForUntrackedTextFile() {
@@ -263,6 +428,84 @@ final class GitDiffTests: XCTestCase {
         )
         XCTAssertEqual(workingDiffs.map(\.addedLineCount), [1, 2])
         XCTAssertEqual(stagedDiffs.map(\.addedLineCount), [1])
+    }
+
+    func testLoadsModeAndRenameOnlyMetadataFromRealGitRepository() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-metadata-test-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        try FileManager.default.createDirectory(
+            at: repository,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: container) }
+        let runner = GitCommandRunner()
+        _ = try await runner.run(
+            arguments: ["init", "-b", "main"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["config", "user.name", "AgentGit Tests"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["config", "user.email", "agentgit-tests@example.invalid"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["config", "core.fileMode", "true"],
+            workingDirectory: repository
+        )
+        let scriptURL = repository.appendingPathComponent("script.sh")
+        try Data("echo metadata\n".utf8).write(to: scriptURL)
+        try Data("rename\n".utf8).write(
+            to: repository.appendingPathComponent("old-name.txt")
+        )
+        _ = try await runner.run(arguments: ["add", "."], workingDirectory: repository)
+        _ = try await runner.run(
+            arguments: ["commit", "-m", "Initial metadata files"],
+            workingDirectory: repository
+        )
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: scriptURL.path
+        )
+        _ = try await runner.run(
+            arguments: ["mv", "old-name.txt", "new-name.txt"],
+            workingDirectory: repository
+        )
+
+        let service = GitRepositoryService()
+        let project = try await service.loadProject(at: repository)
+        let worktree = try XCTUnwrap(project.worktrees.first)
+        let modeChange = try XCTUnwrap(
+            worktree.status.changes.first { $0.path == "script.sh" }
+        )
+        let renameChange = try XCTUnwrap(
+            worktree.status.changes.first { $0.path == "new-name.txt" }
+        )
+        let modeDiff = try await service.loadDiff(
+            worktree: worktree.worktree,
+            change: modeChange,
+            scope: .working
+        )
+        let renameDiff = try await service.loadDiff(
+            worktree: worktree.worktree,
+            change: renameChange,
+            scope: .staged
+        )
+
+        XCTAssertEqual(
+            modeDiff.state,
+            .metadata("old mode 100644 · new mode 100755")
+        )
+        XCTAssertEqual(
+            renameDiff.state,
+            .metadata(
+                "similarity index 100% · rename from old-name.txt · rename to new-name.txt"
+            )
+        )
     }
 
     func testLoadsAllCommitDiffsWithOneReviewRequest() async throws {

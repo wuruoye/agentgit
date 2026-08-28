@@ -1,0 +1,17 @@
+{
+  "description": "Require AgentGit registration before Claude writes to a Git worktree.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/AgentGitHookBridge\" guard --provider claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

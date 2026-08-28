@@ -37,15 +37,185 @@ enum DiffStackMutationMode: Hashable {
     }
 }
 
+enum DiffStackFileUtilityAction: Hashable {
+    case openFile
+    case openInVisualStudioCode
+    case revealInFinder
+    case copyRelativePath
+    case copyAbsolutePath
+}
+
+struct DiffStackContextGap: Identifiable, Hashable {
+    let id: String
+    let hiddenLineCount: Int
+    let revealedLines: [GitDiffLine]
+    let nextHunkAnchorID: String?
+    let contextRenderID: UInt64?
+}
+
+enum DiffContextGapBuilder {
+    private struct NumberedContextLine {
+        let lineNumber: Int
+        let line: GitDiffLine
+    }
+
+    static func gaps(
+        fileID: String,
+        compactDiff: GitFileDiff,
+        contextSourceDiff: GitFileDiff?,
+        revealedLineCountByGapID: [String: Int],
+        revealsWholeFile: Bool = false
+    ) -> [DiffStackContextGap] {
+        guard let firstHunk = compactDiff.hunks.first,
+              let lastHunk = compactDiff.hunks.last else {
+            return []
+        }
+        var sourceLines = contextSourceDiff?.hunks
+            .flatMap(\.lines)
+            .compactMap { line -> NumberedContextLine? in
+                guard line.kind == .context,
+                      let lineNumber = line.newLineNumber else {
+                    return nil
+                }
+                return NumberedContextLine(lineNumber: lineNumber, line: line)
+            } ?? []
+        let contextRenderID = contextSourceDiff?.renderID
+        if zip(sourceLines, sourceLines.dropFirst()).contains(where: {
+            $0.lineNumber > $1.lineNumber
+        }) {
+            sourceLines.sort { $0.lineNumber < $1.lineNumber }
+        }
+        var gaps: [DiffStackContextGap] = []
+
+        if revealsWholeFile {
+            let revealedLines = contextLines(
+                in: sourceLines,
+                from: nil,
+                to: firstHunk.newStart
+            )
+            if !revealedLines.isEmpty {
+                gaps.append(
+                    DiffStackContextGap(
+                        id: "\(fileID):context:start->\(firstHunk.id)",
+                        hiddenLineCount: 0,
+                        revealedLines: revealedLines,
+                        nextHunkAnchorID: hunkAnchorID(
+                            fileID: fileID,
+                            hunkID: firstHunk.id
+                        ),
+                        contextRenderID: contextRenderID
+                    )
+                )
+            }
+        }
+
+        gaps.append(contentsOf: zip(compactDiff.hunks, compactDiff.hunks.dropFirst()).compactMap {
+            previousHunk, nextHunk in
+            let gapStart = previousHunk.newStart + previousHunk.newCount
+            let gapEnd = nextHunk.newStart
+            let totalLineCount = gapEnd - gapStart
+            guard totalLineCount > 0 else {
+                return nil
+            }
+
+            let gapID = "\(fileID):context:\(previousHunk.id)->\(nextHunk.id)"
+            let requestedLineCount = revealsWholeFile
+                ? totalLineCount
+                : min(totalLineCount, revealedLineCountByGapID[gapID] ?? 0)
+            let revealedStart = gapEnd - requestedLineCount
+            let revealedLines = contextLines(
+                in: sourceLines,
+                from: revealedStart,
+                to: gapEnd
+            )
+            return DiffStackContextGap(
+                id: gapID,
+                hiddenLineCount: totalLineCount - revealedLines.count,
+                revealedLines: revealedLines,
+                nextHunkAnchorID: hunkAnchorID(fileID: fileID, hunkID: nextHunk.id),
+                contextRenderID: contextRenderID
+            )
+        })
+
+        if revealsWholeFile {
+            let trailingStart = lastHunk.newStart + lastHunk.newCount
+            let revealedLines = contextLines(
+                in: sourceLines,
+                from: trailingStart,
+                to: nil
+            )
+            if !revealedLines.isEmpty {
+                gaps.append(
+                    DiffStackContextGap(
+                        id: "\(fileID):context:\(lastHunk.id)->end",
+                        hiddenLineCount: 0,
+                        revealedLines: revealedLines,
+                        nextHunkAnchorID: nil,
+                        contextRenderID: contextRenderID
+                    )
+                )
+            }
+        }
+
+        return gaps
+    }
+
+    private static func contextLines(
+        in lines: [NumberedContextLine],
+        from lowerLineNumber: Int?,
+        to upperLineNumber: Int?
+    ) -> [GitDiffLine] {
+        let lowerIndex = lowerLineNumber.map { lowerBound(in: lines, for: $0) } ?? 0
+        let upperIndex = upperLineNumber.map { lowerBound(in: lines, for: $0) } ?? lines.count
+        guard lowerIndex < upperIndex else {
+            return []
+        }
+        return lines[lowerIndex..<upperIndex].map(\.line)
+    }
+
+    private static func lowerBound(
+        in lines: [NumberedContextLine],
+        for lineNumber: Int
+    ) -> Int {
+        var lower = 0
+        var upper = lines.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if lines[middle].lineNumber < lineNumber {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        return lower
+    }
+}
+
+private func hunkAnchorID(fileID: String, hunkID: GitDiffHunk.ID) -> String {
+    "\(fileID):hunk:\(hunkID)"
+}
+
 struct DiffStackFile: Identifiable, Hashable {
     let id: String
     let path: String
+    let originalPath: String?
     let status: DiffStackStatus
     let statusLabel: String
     let isExpanded: Bool
     let isFocused: Bool
+    let isReviewed: Bool
+    let showsWholeFile: Bool
+    let isLoadingWholeFile: Bool
+    let canToggleWholeFile: Bool
+    let canOpenWorkingFile: Bool
+    let canOpenInVisualStudioCode: Bool
+    let canApplyPrimaryAction: Bool
+    let canDiscard: Bool
+    let isMutationEnabled: Bool
+    let contextGaps: [DiffStackContextGap]
     let mutationMode: DiffStackMutationMode?
     let diff: GitFileDiff?
+    let imageDiff: GitImageDiff?
 }
 
 struct DiffStackGroup: Identifiable, Hashable {
@@ -63,8 +233,16 @@ struct DiffStackView: NSViewRepresentable {
     let scrollTarget: String?
     let scrollKey: ReviewStateKey
     let scrollStore: ReviewStateStore
+    let isApplicationActive: Bool
+    let loadingMessage: String
+    let mutationActionsEnabled: Bool
+    let onFocusFile: (String) -> Void
     let onToggleFile: (String) -> Void
     let onToggleGroup: (String) -> Void
+    let onToggleReviewed: (String) -> Void
+    let onToggleWholeFile: (String) -> Void
+    let onExpandContext: (String, String) -> Void
+    let onFileUtilityAction: (String, DiffStackFileUtilityAction) -> Void
     let onFileAction: (String, GitPendingSelectionAction) -> Void
     let onSelectionAction: (String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void
 
@@ -79,11 +257,19 @@ struct DiffStackView: NSViewRepresentable {
     }
 
     private func apply(to scrollView: DiffStackScrollView) {
+        scrollView.onFocusFile = onFocusFile
         scrollView.onToggleFile = onToggleFile
         scrollView.onToggleGroup = onToggleGroup
+        scrollView.onToggleReviewed = onToggleReviewed
+        scrollView.onToggleWholeFile = onToggleWholeFile
+        scrollView.onExpandContext = onExpandContext
+        scrollView.onFileUtilityAction = onFileUtilityAction
         scrollView.onFileAction = onFileAction
         scrollView.onSelectionAction = onSelectionAction
         scrollView.bind(store: scrollStore, key: scrollKey)
+        scrollView.isApplicationActive = isApplicationActive
+        scrollView.loadingMessage = loadingMessage
+        scrollView.mutationActionsEnabled = mutationActionsEnabled
         scrollView.display(groups: groups, layout: layout, scrollTarget: scrollTarget)
     }
 }
@@ -92,9 +278,21 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private enum Metrics {
         static let lineHeight: CGFloat = 20
         static let hunkHeight: CGFloat = 26
+        static let imageHeight: CGFloat = 360
+        static let contextEdgeHeight: CGFloat = 14
         static let fileHeight: CGFloat = 38
         static let groupHeight: CGFloat = 30
         static let noteHeight: CGFloat = 30
+        static let unifiedCodeLeading: CGFloat = 134
+        static let unifiedCodeTrailing: CGFloat = 12
+        static let sideCodeLeading: CGFloat = 78
+        static let sideCodeTrailing: CGFloat = 8
+        static let maximumDisplayedColumns = 4_000
+        static let codeCharacterWidth = ("M" as NSString).size(
+            withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+            ]
+        ).width
     }
 
     private struct FileSection {
@@ -111,9 +309,24 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     var onToggleFile: ((String) -> Void)?
+    var onFocusFile: ((String) -> Void)?
     var onToggleGroup: ((String) -> Void)?
+    var onToggleReviewed: ((String) -> Void)?
+    var onToggleWholeFile: ((String) -> Void)?
+    var onExpandContext: ((String, String) -> Void)?
+    var onFileUtilityAction: ((String, DiffStackFileUtilityAction) -> Void)?
     var onFileAction: ((String, GitPendingSelectionAction) -> Void)?
     var onSelectionAction: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
+    var isApplicationActive = true {
+        didSet {
+            guard isApplicationActive != oldValue else {
+                return
+            }
+            updateVisibleImagePreviews()
+        }
+    }
+    var mutationActionsEnabled = true
+    var loadingMessage = "Loading diff…"
 
     private let tableView = DiffCopyingTableView()
     private let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
@@ -127,13 +340,37 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var groupSections: [GroupSection] = []
     private var fileSections: [FileSection] = []
     private var hunkRowIndexes: [Int] = []
+    private var hunkRowIndexByAnchorID: [String: Int] = [:]
     private var groupRowIndexByID: [String: Int] = [:]
     private var fileRowIndexByID: [String: Int] = [:]
+    private var fileSectionIndexByID: [String: Int] = [:]
     private var renderToken: DiffStackToken?
+    private var filePresentationToken: DiffStackFilePresentationToken?
+    private(set) var rowRebuildCount = 0
     private var appliedScrollTarget: String?
     private var scrollStore: ReviewStateStore?
     private var scrollKey: ReviewStateKey?
     private var pendingRestoreOffset: CGFloat?
+    private var pendingHunkAnchor: PendingHunkAnchor?
+    private var pendingCodeAnchor: PendingCodeAnchor?
+    private var layoutMode: DiffLayoutMode = .sideBySide
+    private var maximumCodeColumnCountByHunkID: [String: Int] = [:]
+    private var codeContentWidthByHunkID: [String: CGFloat] = [:]
+    private var codeHorizontalOffsetByHunkID: [String: CGFloat] = [:]
+    private var appliedViewportWidth: CGFloat?
+
+    private struct PendingHunkAnchor {
+        let anchorID: String
+        let viewportY: CGFloat
+    }
+
+    private struct PendingCodeAnchor {
+        let fileID: String
+        let oldLineNumber: Int?
+        let newLineNumber: Int?
+        let viewportY: CGFloat
+        let targetWholeFileState: Bool
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -155,6 +392,17 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if !Self.shouldForwardScrollWheel(
+            horizontalDelta: event.scrollingDeltaX,
+            verticalDelta: event.scrollingDeltaY
+        ) {
+            let tablePoint = tableView.convert(event.locationInWindow, from: nil)
+            scrollCodeHorizontally(
+                by: event.scrollingDeltaX,
+                atTablePoint: tablePoint
+            )
+            return
+        }
         guard Self.shouldForwardScrollWheel(
             horizontalDelta: event.scrollingDeltaX,
             verticalDelta: event.scrollingDeltaY
@@ -182,6 +430,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         scrollKey = key
         appliedScrollTarget = nil
+        pendingHunkAnchor = nil
+        pendingCodeAnchor = nil
+        codeHorizontalOffsetByHunkID = [:]
         let restored = store.scrollOffset(for: key)
         pendingRestoreOffset = restored > 0 ? restored : nil
         contentView.scroll(to: .zero)
@@ -209,15 +460,33 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         scrollTarget: String?
     ) {
         let token = DiffStackToken(groups: groups, layout: layout)
+        let nextFilePresentationToken = DiffStackFilePresentationToken(groups: groups)
         if token != renderToken {
+            if layoutMode != layout {
+                codeHorizontalOffsetByHunkID = [:]
+            }
+            layoutMode = layout
             renderToken = token
+            filePresentationToken = nextFilePresentationToken
             rebuildRows(groups: groups, layout: layout)
-            updateColumnWidth()
+            updateColumnWidth(force: true)
             tableView.reloadData()
             stickyGroupID = nil
             stickyFileID = nil
+            restorePendingCodeAnchor(groups: groups)
+            restorePendingHunkAnchorIfPossible()
             restorePendingOffsetIfPossible()
             updateStickyHeader()
+        } else if let filePresentationToken,
+                  nextFilePresentationToken != filePresentationToken {
+            let changedFileIDs = nextFilePresentationToken.changedFileIDs(
+                from: filePresentationToken
+            )
+            self.filePresentationToken = nextFilePresentationToken
+            updateFilePresentation(
+                groups: groups,
+                changedFileIDs: changedFileIDs
+            )
         }
 
         guard scrollTarget != appliedScrollTarget else {
@@ -245,28 +514,76 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return cell
         case let .file(file):
             let cell = reusableCell(DiffFileCellView.self, identifier: DiffFileCellView.identifier)
-            cell.update(file: file, actionHandler: onFileAction)
-            return cell
-        case let .hunk(header, fileID, lineIDs, mutationMode):
-            let cell = reusableCell(DiffHunkCellView.self, identifier: DiffHunkCellView.identifier)
             cell.update(
-                header: header,
-                fileID: fileID,
-                lineIDs: lineIDs,
-                mutationMode: mutationMode,
-                actionHandler: onSelectionAction
+                file: file,
+                reviewHandler: { [weak self] fileID in
+                    self?.focusFile(fileID)
+                    self?.onToggleReviewed?(fileID)
+                },
+                wholeFileHandler: { [weak self] fileID in
+                    self?.handleWholeFileToggle(fileID: fileID)
+                },
+                actionHandler: { [weak self] fileID, action in
+                    self?.focusFile(fileID)
+                    self?.onFileAction?(fileID, action)
+                },
+                menuHandler: { [weak self] fileID in
+                    self?.contextMenu(forFileID: fileID)
+                }
             )
             return cell
-        case let .line(line, language, _, _):
+        case let .hunk(hunk):
+            let cell = reusableCell(DiffHunkCellView.self, identifier: DiffHunkCellView.identifier)
+            cell.update(
+                hunk: hunk,
+                wholeFileHandler: { [weak self] fileID in
+                    self?.handleWholeFileToggle(fileID: fileID)
+                },
+                actionHandler: { [weak self] fileID, lineIDs, action in
+                    self?.focusFile(fileID)
+                    self?.onSelectionAction?(fileID, lineIDs, action)
+                }
+            )
+            return cell
+        case let .contextEdge(gap, fileID):
+            let cell = reusableCell(
+                DiffContextEdgeCellView.self,
+                identifier: DiffContextEdgeCellView.identifier
+            )
+            cell.update(
+                gap: gap,
+                fileID: fileID,
+                expandHandler: { [weak self] fileID, gap in
+                    self?.handleContextExpansion(fileID: fileID, gap: gap)
+                }
+            )
+            return cell
+        case let .line(line, language, _, hunkID, _):
             let cell = reusableCell(DiffLineCellView.self, identifier: DiffLineCellView.identifier)
             cell.update(line: line, language: language)
+            cell.updateCodeViewport(
+                horizontalOffset: codeHorizontalOffsetByHunkID[hunkID] ?? 0,
+                contentWidth: codeContentWidth(for: hunkID)
+            )
             return cell
-        case let .sideBySide(pair, language, _, _):
+        case let .sideBySide(pair, language, _, hunkID, _):
             let cell = reusableCell(
                 DiffSideBySideCellView.self,
                 identifier: DiffSideBySideCellView.identifier
             )
             cell.update(pair: pair, language: language)
+            cell.updateCodeViewport(
+                horizontalOffset: codeHorizontalOffsetByHunkID[hunkID] ?? 0,
+                contentWidth: codeContentWidth(for: hunkID)
+            )
+            return cell
+        case let .image(imageDiff):
+            let cell = reusableCell(
+                DiffImageCellView.self,
+                identifier: DiffImageCellView.identifier
+            )
+            cell.setApplicationActive(isApplicationActive)
+            cell.update(imageDiff: imageDiff)
             return cell
         case let .note(text):
             let cell = reusableCell(DiffNoteCellView.self, identifier: DiffNoteCellView.identifier)
@@ -280,7 +597,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case .group: Metrics.groupHeight
         case .file: Metrics.fileHeight
         case .hunk: Metrics.hunkHeight
+        case .contextEdge: Metrics.contextEdgeHeight
         case .line, .sideBySide: Metrics.lineHeight
+        case .image: Metrics.imageHeight
         case .note: Metrics.noteHeight
         }
     }
@@ -288,7 +607,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
         case .hunk, .line, .sideBySide: true
-        case .group, .file, .note: false
+        case .group, .file, .contextEdge, .image, .note: false
         }
     }
 
@@ -302,6 +621,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     private func rebuildRows(groups: [DiffStackGroup], layout: DiffLayoutMode) {
+        rowRebuildCount += 1
         var built: [DiffStackRow] = []
         var builtGroupSections: [GroupSection] = []
         var builtFileSections: [FileSection] = []
@@ -357,6 +677,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
 
         rows = built
+        maximumCodeColumnCountByHunkID = Self.maximumCodeColumnCountByHunkID(in: built)
+        codeContentWidthByHunkID = maximumCodeColumnCountByHunkID.mapValues { columnCount in
+            ceil(CGFloat(columnCount) * Metrics.codeCharacterWidth)
+        }
+        codeHorizontalOffsetByHunkID = codeHorizontalOffsetByHunkID.filter {
+            maximumCodeColumnCountByHunkID[$0.key] != nil
+        }
         groupSections = builtGroupSections
         fileSections = builtFileSections
         hunkRowIndexes = built.indices.filter { index in
@@ -365,8 +692,63 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
             return false
         }
+        hunkRowIndexByAnchorID = Dictionary(
+            uniqueKeysWithValues: built.indices.compactMap { index in
+                guard case let .hunk(hunk) = built[index] else {
+                    return nil
+                }
+                return (hunk.anchorID, index)
+            }
+        )
         groupRowIndexByID = groupIndexByID
         fileRowIndexByID = fileIndexByID
+        var sectionIndexByID: [String: Int] = [:]
+        for index in builtFileSections.indices {
+            sectionIndexByID[builtFileSections[index].file.id] = index
+        }
+        fileSectionIndexByID = sectionIndexByID
+    }
+
+    private func updateFilePresentation(
+        groups: [DiffStackGroup],
+        changedFileIDs: Set<String>
+    ) {
+        guard !changedFileIDs.isEmpty else {
+            return
+        }
+        let filesByID = Dictionary(
+            uniqueKeysWithValues: groups.flatMap(\.files).map { ($0.id, $0) }
+        )
+        var changedRows = IndexSet()
+        for fileID in changedFileIDs {
+            guard let updated = filesByID[fileID] else {
+                continue
+            }
+            if let rowIndex = fileRowIndexByID[fileID] {
+                rows[rowIndex] = .file(updated)
+                changedRows.insert(rowIndex)
+            }
+            if let sectionIndex = fileSectionIndexByID[fileID] {
+                let section = fileSections[sectionIndex]
+                fileSections[sectionIndex] = FileSection(
+                    groupID: section.groupID,
+                    headerRow: section.headerRow,
+                    endRow: section.endRow,
+                    file: updated
+                )
+            }
+        }
+        if !changedRows.isEmpty {
+            tableView.reloadData(
+                forRowIndexes: changedRows,
+                columnIndexes: IndexSet(integer: 0)
+            )
+        }
+        if let stickyFileID,
+           changedFileIDs.contains(stickyFileID),
+           let updated = filesByID[stickyFileID] {
+            stickyFileHeader.update(file: updated)
+        }
     }
 
     private func appendContent(
@@ -378,7 +760,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         guard let diff = file.diff else {
-            rows.append(.note("Loading diff…"))
+            rows.append(.note(loadingMessage))
+            return
+        }
+        if let imageDiff = file.imageDiff {
+            rows.append(.image(imageDiff))
             return
         }
         guard !diff.hunks.isEmpty else {
@@ -387,16 +773,49 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
 
         let language = GitSyntaxLanguage(path: file.path)
+        let granularMutationMode = file.status == .conflicted
+            ? nil
+            : file.mutationMode
+        let gapsByNextHunkAnchorID = Dictionary(
+            uniqueKeysWithValues: file.contextGaps.compactMap { gap in
+                gap.nextHunkAnchorID.map { ($0, gap) }
+            }
+        )
+        let trailingGaps = file.contextGaps.filter { $0.nextHunkAnchorID == nil }
         for hunk in diff.hunks {
+            let anchorID = hunkAnchorID(fileID: file.id, hunkID: hunk.id)
+            let gap = gapsByNextHunkAnchorID[anchorID]
+            if let gap {
+                if gap.hiddenLineCount > 0 {
+                    rows.append(.contextEdge(gap, fileID: file.id))
+                }
+                appendContextLines(
+                    gap.revealedLines,
+                    language: language,
+                    file: file,
+                    hunkID: anchorID,
+                    layout: layout,
+                    into: &rows
+                )
+            }
             let changedLineIDs = Set(
                 hunk.lines.filter { $0.kind == .addition || $0.kind == .deletion }.map(\.id)
             )
             rows.append(
                 .hunk(
-                    hunk.header,
-                    fileID: file.id,
-                    lineIDs: changedLineIDs,
-                    mutationMode: file.mutationMode
+                    DiffStackHunkRow(
+                        anchorID: anchorID,
+                        title: Self.hunkTitle(hunk),
+                        rawHeader: hunk.header,
+                        layout: layout,
+                        fileID: file.id,
+                        lineIDs: changedLineIDs,
+                        mutationMode: granularMutationMode,
+                        isMutationEnabled: file.isMutationEnabled,
+                        showsWholeFile: file.showsWholeFile,
+                        isLoadingWholeFile: file.isLoadingWholeFile,
+                        canToggleWholeFile: file.canToggleWholeFile
+                    )
                 )
             )
             switch layout {
@@ -407,7 +826,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                             line,
                             language,
                             fileID: file.id,
-                            mutationMode: file.mutationMode
+                            hunkID: anchorID,
+                            mutationMode: granularMutationMode
                         )
                     )
                 }
@@ -418,10 +838,82 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                             pair,
                             language,
                             fileID: file.id,
-                            mutationMode: file.mutationMode
+                            hunkID: anchorID,
+                            mutationMode: granularMutationMode
                         )
                     )
                 }
+            }
+        }
+        let trailingHunkID = diff.hunks.last.map {
+            hunkAnchorID(fileID: file.id, hunkID: $0.id)
+        }
+        for gap in trailingGaps {
+            guard let trailingHunkID else {
+                continue
+            }
+            if gap.hiddenLineCount > 0 {
+                rows.append(.contextEdge(gap, fileID: file.id))
+            }
+            appendContextLines(
+                gap.revealedLines,
+                language: language,
+                file: file,
+                hunkID: trailingHunkID,
+                layout: layout,
+                into: &rows
+            )
+        }
+    }
+
+    private static func hunkTitle(_ hunk: GitDiffHunk) -> String {
+        if let sectionHeading = hunk.sectionHeading, !sectionHeading.isEmpty {
+            return sectionHeading
+        }
+        let oldRange = lineRange(start: hunk.oldStart, count: hunk.oldCount)
+        let newRange = lineRange(start: hunk.newStart, count: hunk.newCount)
+        return "Lines \(oldRange) → \(newRange)"
+    }
+
+    private static func lineRange(start: Int, count: Int) -> String {
+        guard count > 1 else {
+            return "\(start)"
+        }
+        return "\(start)–\(start + count - 1)"
+    }
+
+    private func appendContextLines(
+        _ lines: [GitDiffLine],
+        language: GitSyntaxLanguage,
+        file: DiffStackFile,
+        hunkID: String,
+        layout: DiffLayoutMode,
+        into rows: inout [DiffStackRow]
+    ) {
+        switch layout {
+        case .unified:
+            for line in lines {
+                rows.append(
+                    .line(
+                        line,
+                        language,
+                        fileID: file.id,
+                        hunkID: hunkID,
+                        mutationMode: file.mutationMode
+                    )
+                )
+            }
+        case .sideBySide:
+            for pair in SideBySideDiffBuilder.pairs(lines) {
+                rows.append(
+                    .sideBySide(
+                        pair,
+                        language,
+                        fileID: file.id,
+                        hunkID: hunkID,
+                        mutationMode: file.mutationMode
+                    )
+                )
             }
         }
     }
@@ -432,11 +924,74 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 guard file.isExpanded, let diff = file.diff else {
                     return fileTotal + 1
                 }
-                return fileTotal + 1 + diff.hunks.reduce(diff.hunks.count) { count, hunk in
-                    count + hunk.lines.count
+                if file.imageDiff != nil {
+                    return fileTotal + 2
                 }
+                return fileTotal + 1
+                    + file.contextGaps.count(where: { $0.hiddenLineCount > 0 })
+                    + file.contextGaps.reduce(0) { $0 + $1.revealedLines.count }
+                    + diff.hunks.reduce(diff.hunks.count) { count, hunk in
+                        count + hunk.lines.count
+                    }
             }
         }
+    }
+
+    private static func maximumCodeColumnCountByHunkID(
+        in rows: [DiffStackRow]
+    ) -> [String: Int] {
+        rows.reduce(into: [:]) { maximumByHunkID, row in
+            switch row {
+            case let .line(line, _, _, hunkID, _):
+                maximumByHunkID[hunkID] = max(
+                    maximumByHunkID[hunkID] ?? 0,
+                    displayedColumnCount(line.content)
+                )
+            case let .sideBySide(pair, _, _, hunkID, _):
+                maximumByHunkID[hunkID] = max(
+                    maximumByHunkID[hunkID] ?? 0,
+                    max(
+                        displayedColumnCount(pair.old?.content ?? ""),
+                        displayedColumnCount(pair.new?.content ?? "")
+                    )
+                )
+            case .group, .file, .hunk, .contextEdge, .image, .note:
+                break
+            }
+        }
+    }
+
+    static func displayedColumnCount(_ content: String) -> Int {
+        var columnCount = 0
+        for character in content {
+            if character == "\t" {
+                columnCount += 4 - columnCount % 4
+            } else if character.unicodeScalars.contains(where: {
+                isWideCodePoint($0.value)
+            }) {
+                columnCount += 2
+            } else {
+                columnCount += 1
+            }
+            if columnCount >= Metrics.maximumDisplayedColumns {
+                return Metrics.maximumDisplayedColumns + 2
+            }
+        }
+        return columnCount + 2
+    }
+
+    private static func isWideCodePoint(_ value: UInt32) -> Bool {
+        (0x1100...0x115F).contains(value)
+            || (0x2329...0x232A).contains(value)
+            || (0x2E80...0xA4CF).contains(value)
+            || (0xAC00...0xD7A3).contains(value)
+            || (0xF900...0xFAFF).contains(value)
+            || (0xFE10...0xFE19).contains(value)
+            || (0xFE30...0xFE6F).contains(value)
+            || (0xFF00...0xFF60).contains(value)
+            || (0xFFE0...0xFFE6).contains(value)
+            || (0x1F300...0x1FAFF).contains(value)
+            || (0x20000...0x3FFFD).contains(value)
     }
 
     private func scroll(toFileID fileID: String) {
@@ -449,6 +1004,158 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         contentView.scroll(to: target)
         reflectScrolledClipView(contentView)
         updateStickyHeader()
+    }
+
+    private func handleWholeFileToggle(fileID: String) {
+        guard let sectionIndex = fileSectionIndexByID[fileID] else {
+            return
+        }
+        let file = fileSections[sectionIndex].file
+        focusFile(fileID)
+        pendingCodeAnchor = captureCodeAnchor(
+            fileID: fileID,
+            targetWholeFileState: !file.showsWholeFile
+        )
+        onToggleWholeFile?(fileID)
+    }
+
+    private func handleContextExpansion(fileID: String, gap: DiffStackContextGap) {
+        focusFile(fileID)
+        if let nextHunkAnchorID = gap.nextHunkAnchorID,
+           let anchorRow = hunkRowIndexByAnchorID[nextHunkAnchorID] {
+            tableView.layoutSubtreeIfNeeded()
+            pendingHunkAnchor = PendingHunkAnchor(
+                anchorID: nextHunkAnchorID,
+                viewportY: tableView.rect(ofRow: anchorRow).minY - contentView.bounds.minY
+            )
+        }
+        onExpandContext?(fileID, gap.id)
+    }
+
+    private func captureCodeAnchor(
+        fileID: String,
+        targetWholeFileState: Bool
+    ) -> PendingCodeAnchor? {
+        tableView.layoutSubtreeIfNeeded()
+        let targetY = contentView.bounds.minY
+            + (stickyClip.isHidden ? 0 : stickyClip.frame.height)
+        let visibleRange = tableView.rows(in: contentView.bounds)
+        let visibleIndexes = visibleRange.location == NSNotFound
+            ? []
+            : Array(visibleRange.location..<NSMaxRange(visibleRange))
+        let visibleCandidates = visibleIndexes.compactMap { rowIndex -> (Int, GitDiffLine)? in
+            guard let line = representativeLine(in: rows[rowIndex], fileID: fileID) else {
+                return nil
+            }
+            return (rowIndex, line)
+        }
+        let visibleCandidate = visibleCandidates.min { lhs, rhs in
+            abs(tableView.rect(ofRow: lhs.0).minY - targetY)
+                < abs(tableView.rect(ofRow: rhs.0).minY - targetY)
+        }
+        let fallbackCandidate = fileSectionIndexByID[fileID].flatMap { sectionIndex in
+            let section = fileSections[sectionIndex]
+            return (section.headerRow..<section.endRow).lazy.compactMap {
+                rowIndex -> (Int, GitDiffLine)? in
+                guard let line = self.representativeLine(
+                    in: self.rows[rowIndex],
+                    fileID: fileID
+                ) else {
+                    return nil
+                }
+                return (rowIndex, line)
+            }.first
+        }
+        let candidate = visibleCandidate ?? fallbackCandidate
+        guard let candidate else {
+            return nil
+        }
+        return PendingCodeAnchor(
+            fileID: fileID,
+            oldLineNumber: candidate.1.oldLineNumber,
+            newLineNumber: candidate.1.newLineNumber,
+            viewportY: tableView.rect(ofRow: candidate.0).minY - contentView.bounds.minY,
+            targetWholeFileState: targetWholeFileState
+        )
+    }
+
+    private func restorePendingCodeAnchor(groups: [DiffStackGroup]) {
+        guard let anchor = pendingCodeAnchor,
+              let file = groups.lazy.flatMap({ $0.files }).first(where: {
+                  $0.id == anchor.fileID
+              }),
+              file.showsWholeFile == anchor.targetWholeFileState else {
+            return
+        }
+        let candidates = rows.indices.compactMap { rowIndex -> (Int, GitDiffLine)? in
+            guard let line = representativeLine(in: rows[rowIndex], fileID: anchor.fileID) else {
+                return nil
+            }
+            return (rowIndex, line)
+        }
+        let exact = candidates.first { candidate in
+            candidate.1.oldLineNumber == anchor.oldLineNumber
+                && candidate.1.newLineNumber == anchor.newLineNumber
+        }
+        let target = exact ?? candidates.min { lhs, rhs in
+            lineDistance(lhs.1, from: anchor) < lineDistance(rhs.1, from: anchor)
+        }
+        guard let target else {
+            pendingCodeAnchor = nil
+            return
+        }
+        restoreViewport(row: target.0, viewportY: anchor.viewportY)
+        pendingCodeAnchor = nil
+    }
+
+    private func restorePendingHunkAnchorIfPossible() {
+        guard let anchor = pendingHunkAnchor,
+              let row = hunkRowIndexByAnchorID[anchor.anchorID] else {
+            return
+        }
+        restoreViewport(row: row, viewportY: anchor.viewportY)
+        pendingHunkAnchor = nil
+    }
+
+    private func restoreViewport(row: Int, viewportY: CGFloat) {
+        let desiredOffset = tableView.rect(ofRow: row).minY - viewportY
+        let maxOffset = max(0, tableView.bounds.height - contentView.bounds.height)
+        contentView.scroll(
+            to: NSPoint(x: 0, y: min(max(0, desiredOffset), maxOffset))
+        )
+        reflectScrolledClipView(contentView)
+        updateStickyHeader()
+    }
+
+    private func representativeLine(
+        in row: DiffStackRow,
+        fileID: String
+    ) -> GitDiffLine? {
+        switch row {
+        case let .line(line, _, candidateFileID, _, _):
+            guard candidateFileID == fileID,
+                  line.oldLineNumber != nil || line.newLineNumber != nil else {
+                return nil
+            }
+            return line
+        case let .sideBySide(pair, _, candidateFileID, _, _):
+            guard candidateFileID == fileID else {
+                return nil
+            }
+            return [pair.new, pair.old].compactMap { $0 }.first {
+                $0.oldLineNumber != nil || $0.newLineNumber != nil
+            }
+        case .group, .file, .hunk, .contextEdge, .image, .note:
+            return nil
+        }
+    }
+
+    private func lineDistance(_ line: GitDiffLine, from anchor: PendingCodeAnchor) -> Int {
+        if let anchorLine = anchor.newLineNumber ?? anchor.oldLineNumber,
+           let lineNumber = line.newLineNumber ?? line.oldLineNumber {
+            return abs(lineNumber - anchorLine)
+        }
+        return Int.max
     }
 
     @discardableResult
@@ -516,7 +1223,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         tableView.usesAutomaticRowHeights = false
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.backgroundColor = .textBackgroundColor
-        tableView.focusRingType = .none
+        tableView.focusRingType = .default
+        tableView.setAccessibilityLabel("Diff Review")
+        tableView.setAccessibilityHelp(
+            "Use Tab and Shift-Tab to navigate hunks. Use Command-C to copy selected rows."
+        )
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = true
         tableView.selectionHighlightStyle = .regular
@@ -532,6 +1243,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         tableView.hunkNavigationHandler = { [weak self] offset in
             self?.moveHunk(by: offset) ?? false
         }
+        tableView.cancelPendingActionHandler = { [weak self] in
+            self?.cancelPendingDiscardConfirmations() ?? false
+        }
         documentView = tableView
 
         // 分组头与文件头共用一个裁剪容器，下一组 / 文件会自然把当前头推走。
@@ -546,8 +1260,19 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         stickyFileHeader.clickHandler = { [weak self] fileID in
             self?.handleStickyClick(fileID: fileID)
         }
+        stickyFileHeader.reviewHandler = { [weak self] fileID in
+            self?.focusFile(fileID)
+            self?.onToggleReviewed?(fileID)
+        }
+        stickyFileHeader.wholeFileHandler = { [weak self] fileID in
+            self?.handleWholeFileToggle(fileID: fileID)
+        }
         stickyFileHeader.actionHandler = { [weak self] fileID, action in
+            self?.focusFile(fileID)
             self?.onFileAction?(fileID, action)
+        }
+        stickyFileHeader.menuHandler = { [weak self] fileID in
+            self?.contextMenu(forFileID: fileID)
         }
         addSubview(stickyClip, positioned: .above, relativeTo: contentView)
 
@@ -558,6 +1283,29 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             name: NSView.boundsDidChangeNotification,
             object: contentView
         )
+    }
+
+    private func cancelPendingDiscardConfirmations() -> Bool {
+        var cancelled = stickyFileHeader.cancelDiscardConfirmation()
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        guard visibleRows.location != NSNotFound else {
+            return cancelled
+        }
+        for row in visibleRows.location..<NSMaxRange(visibleRows) {
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+            ) else {
+                continue
+            }
+            if let fileCell = cell as? DiffFileCellView {
+                cancelled = fileCell.cancelDiscardConfirmation() || cancelled
+            } else if let hunkCell = cell as? DiffHunkCellView {
+                cancelled = hunkCell.cancelDiscardConfirmation() || cancelled
+            }
+        }
+        return cancelled
     }
 
     @objc private func clipViewBoundsChanged() {
@@ -634,6 +1382,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         if stickyClip.frame != clipFrame {
             stickyClip.frame = clipFrame
         }
+        stickyClip.update(
+            groupHeight: groupVisibleHeight,
+            fileHeight: fileVisibleHeight
+        )
         let horizontalInset = max(0, (clipFrame.width - tableColumn.width) / 2)
         let groupFrame = NSRect(
             x: horizontalInset,
@@ -742,6 +1494,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     private func handleStickyClick(fileID: String) {
         // 先把真实文件头滚回顶部，折叠后视口仍停在这个文件上。
+        focusFile(fileID)
         scroll(toFileID: fileID)
         onToggleFile?(fileID)
     }
@@ -752,25 +1505,60 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         switch rows[row] {
         case let .file(file):
+            focusFile(file.id)
             onToggleFile?(file.id)
             return true
         case let .group(group, _):
             onToggleGroup?(group.id)
             return true
-        case .hunk, .line, .sideBySide, .note:
+        case .hunk, .line, .sideBySide, .contextEdge, .image, .note:
+            focusFile(atRow: row)
             return false
         }
     }
 
+    private func focusFile(_ fileID: String) {
+        onFocusFile?(fileID)
+    }
+
+    @discardableResult
+    func focusFile(atRow row: Int) -> Bool {
+        guard let section = fileSection(containingRow: row) else {
+            return false
+        }
+        focusFile(section.file.id)
+        return true
+    }
+
+    private func fileSection(containingRow row: Int) -> FileSection? {
+        var lowerBound = 0
+        var upperBound = fileSections.count - 1
+        while lowerBound <= upperBound {
+            let index = (lowerBound + upperBound) / 2
+            let section = fileSections[index]
+            if row < section.headerRow {
+                upperBound = index - 1
+            } else if row >= section.endRow {
+                lowerBound = index + 1
+            } else {
+                return section
+            }
+        }
+        return nil
+    }
+
     func contextMenu(clickedRow: Int, selectedRows: IndexSet) -> NSMenu {
+        focusFile(atRow: clickedRow)
         let menu = NSMenu()
-        let copyItem = NSMenuItem(
-            title: "Copy Selected Lines",
-            action: #selector(DiffCopyingTableView.copy(_:)),
-            keyEquivalent: ""
-        )
-        copyItem.target = tableView
-        menu.addItem(copyItem)
+        if !copyText(for: selectedRows).isEmpty {
+            let copyItem = NSMenuItem(
+                title: "Copy Selected Lines",
+                action: #selector(DiffCopyingTableView.copy(_:)),
+                keyEquivalent: ""
+            )
+            copyItem.target = tableView
+            menu.addItem(copyItem)
+        }
 
         guard rows.indices.contains(clickedRow) else {
             return menu
@@ -778,34 +1566,97 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
         switch rows[clickedRow] {
         case let .file(file):
+            addMenuItem(
+                "Open File",
+                command: .fileUtility(file.id, .openFile),
+                to: menu,
+                isEnabled: file.canOpenWorkingFile
+            )
+            addMenuItem(
+                "Open with Visual Studio Code",
+                command: .fileUtility(file.id, .openInVisualStudioCode),
+                to: menu,
+                isEnabled: file.canOpenWorkingFile && file.canOpenInVisualStudioCode
+            )
+            addMenuItem(
+                "Reveal in Finder",
+                command: .fileUtility(file.id, .revealInFinder),
+                to: menu
+            )
+            let copyPathMenu = NSMenu(title: "Copy Path")
+            addMenuItem(
+                "Relative Path",
+                command: .fileUtility(file.id, .copyRelativePath),
+                to: copyPathMenu
+            )
+            addMenuItem(
+                "Absolute Path",
+                command: .fileUtility(file.id, .copyAbsolutePath),
+                to: copyPathMenu
+            )
+            let copyPathItem = NSMenuItem(title: "Copy Path", action: nil, keyEquivalent: "")
+            copyPathItem.submenu = copyPathMenu
+            menu.addItem(copyPathItem)
+            if file.diff != nil {
+                menu.addItem(.separator())
+                if file.canToggleWholeFile {
+                    addMenuItem(
+                        file.showsWholeFile ? "Show Changed Hunks" : "Show Whole File",
+                        command: .wholeFile(file.id),
+                        to: menu,
+                        isEnabled: !file.isLoadingWholeFile
+                    )
+                }
+                addMenuItem(
+                    file.isReviewed ? "Mark as Unreviewed" : "Mark as Reviewed",
+                    command: .review(file.id),
+                    to: menu
+                )
+            }
             guard let mode = file.mutationMode else {
                 return menu
             }
-            menu.addItem(.separator())
-            addMenuItem(
-                mode.fileActionTitle,
-                command: .file(file.id, mode.primaryAction),
-                to: menu
-            )
-            if mode == .working {
-                addMenuItem("Discard File…", command: .file(file.id, .discard), to: menu)
+            if file.canApplyPrimaryAction || (mode == .working && file.canDiscard) {
+                menu.addItem(.separator())
+            }
+            if file.canApplyPrimaryAction {
+                addMenuItem(
+                    mode.fileActionTitle,
+                    command: .file(file.id, mode.primaryAction),
+                    to: menu,
+                    isEnabled: file.isMutationEnabled
+                )
+            }
+            if mode == .working, file.canDiscard {
+                addDiscardConfirmationMenuItem(
+                    "Discard File",
+                    command: .file(file.id, .discard),
+                    to: menu,
+                    isEnabled: file.isMutationEnabled
+                )
             }
 
-        case let .hunk(_, fileID, lineIDs, mutationMode):
-            guard let mutationMode, !lineIDs.isEmpty else {
+        case let .hunk(hunk):
+            guard let mutationMode = hunk.mutationMode, !hunk.lineIDs.isEmpty else {
                 return menu
             }
             menu.addItem(.separator())
             addMenuItem(
                 mutationMode.hunkActionTitle,
-                command: .selection(fileID, lineIDs, mutationMode.primaryAction),
-                to: menu
+                command: .selection(
+                    hunk.fileID,
+                    hunk.lineIDs,
+                    mutationMode.primaryAction
+                ),
+                to: menu,
+                isEnabled: hunk.isMutationEnabled
             )
             if mutationMode == .working {
-                addMenuItem(
-                    "Discard Hunk…",
-                    command: .selection(fileID, lineIDs, .discard),
-                    to: menu
+                addDiscardConfirmationMenuItem(
+                    "Discard Hunk",
+                    command: .selection(hunk.fileID, hunk.lineIDs, .discard),
+                    to: menu,
+                    isEnabled: hunk.isMutationEnabled
                 )
             }
 
@@ -823,25 +1674,35 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 addMenuItem(
                     "Stage Selected \(noun)",
                     command: .selection(selection.fileID, selection.lineIDs, .stage),
-                    to: menu
+                    to: menu,
+                    isEnabled: mutationActionsEnabled
                 )
-                addMenuItem(
-                    "Discard Selected \(noun)…",
+                addDiscardConfirmationMenuItem(
+                    "Discard Selected \(noun)",
                     command: .selection(selection.fileID, selection.lineIDs, .discard),
-                    to: menu
+                    to: menu,
+                    isEnabled: mutationActionsEnabled
                 )
             case .staged:
                 addMenuItem(
                     "Unstage Selected \(noun)",
                     command: .selection(selection.fileID, selection.lineIDs, .unstage),
-                    to: menu
+                    to: menu,
+                    isEnabled: mutationActionsEnabled
                 )
             }
 
-        case .group, .note:
+        case .group, .contextEdge, .image, .note:
             break
         }
         return menu
+    }
+
+    private func contextMenu(forFileID fileID: String) -> NSMenu? {
+        guard let row = fileRowIndexByID[fileID] else {
+            return nil
+        }
+        return contextMenu(clickedRow: row, selectedRows: [])
     }
 
     private struct ChangedLineSelection {
@@ -867,11 +1728,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             let rowMode: DiffStackMutationMode?
             let rowLineIDs: Set<GitDiffLine.ID>
             switch rows[rowIndex] {
-            case let .line(line, _, candidateFileID, candidateMode):
+            case let .line(line, _, candidateFileID, _, candidateMode):
                 rowFileID = candidateFileID
                 rowMode = candidateMode
                 rowLineIDs = line.kind == .addition || line.kind == .deletion ? [line.id] : []
-            case let .sideBySide(pair, _, candidateFileID, candidateMode):
+            case let .sideBySide(pair, _, candidateFileID, _, candidateMode):
                 rowFileID = candidateFileID
                 rowMode = candidateMode
                 rowLineIDs = Set(
@@ -883,7 +1744,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                         return line.id
                     }
                 )
-            case .group, .file, .hunk, .note:
+            case .group, .file, .hunk, .contextEdge, .image, .note:
                 continue
             }
             guard let rowMode, !rowLineIDs.isEmpty else {
@@ -909,7 +1770,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private func addMenuItem(
         _ title: String,
         command: DiffMutationMenuCommand.Value,
-        to menu: NSMenu
+        to menu: NSMenu,
+        isEnabled: Bool = true
     ) {
         let item = NSMenuItem(
             title: title,
@@ -918,6 +1780,25 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         )
         item.target = self
         item.representedObject = DiffMutationMenuCommand(command)
+        item.isEnabled = isEnabled
+        menu.addItem(item)
+    }
+
+    private func addDiscardConfirmationMenuItem(
+        _ title: String,
+        command: DiffMutationMenuCommand.Value,
+        to menu: NSMenu,
+        isEnabled: Bool = true
+    ) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let confirmationMenu = NSMenu(title: title)
+        addMenuItem(
+            "Confirm \(title) — Save Backup in Trash",
+            command: command,
+            to: confirmationMenu
+        )
+        item.submenu = confirmationMenu
+        item.isEnabled = isEnabled
         menu.addItem(item)
     }
 
@@ -926,15 +1807,25 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         switch command.value {
+        case let .wholeFile(fileID):
+            onToggleWholeFile?(fileID)
+        case let .review(fileID):
+            onToggleReviewed?(fileID)
         case let .file(fileID, action):
             onFileAction?(fileID, action)
         case let .selection(fileID, lineIDs, action):
             onSelectionAction?(fileID, lineIDs, action)
+        case let .fileUtility(fileID, action):
+            onFileUtilityAction?(fileID, action)
         }
     }
 
-    private func updateColumnWidth() {
+    private func updateColumnWidth(force: Bool = false) {
         let viewportWidth = contentView.bounds.width
+        guard force || appliedViewportWidth != viewportWidth else {
+            return
+        }
+        appliedViewportWidth = viewportWidth
         // table 总宽等于 viewport；列宽由 AppKit 从总宽中扣除 inset style 的左右 padding。
         if tableView.frame.width != viewportWidth {
             tableView.setFrameSize(
@@ -942,6 +1833,135 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             )
         }
         tableView.sizeLastColumnToFit()
+        for hunkID in Array(codeHorizontalOffsetByHunkID.keys) {
+            let offset = codeHorizontalOffsetByHunkID[hunkID] ?? 0
+            codeHorizontalOffsetByHunkID[hunkID] = min(
+                offset,
+                maximumCodeHorizontalOffset(for: hunkID)
+            )
+        }
+        updateVisibleCodeViewports()
+    }
+
+    private func codeContentWidth(for hunkID: String) -> CGFloat {
+        codeContentWidthByHunkID[hunkID] ?? 0
+    }
+
+    private var codeViewportWidth: CGFloat {
+        switch layoutMode {
+        case .unified:
+            return max(
+                0,
+                tableColumn.width
+                    - Metrics.unifiedCodeLeading
+                    - Metrics.unifiedCodeTrailing
+            )
+        case .sideBySide:
+            return max(
+                0,
+                tableColumn.width / 2
+                    - Metrics.sideCodeLeading
+                    - Metrics.sideCodeTrailing
+            )
+        }
+    }
+
+    private func maximumCodeHorizontalOffset(for hunkID: String) -> CGFloat {
+        max(0, codeContentWidth(for: hunkID) - codeViewportWidth)
+    }
+
+    @discardableResult
+    func scrollCodeHorizontally(by delta: CGFloat, atTablePoint tablePoint: NSPoint) -> Bool {
+        guard let hunkID = codeHunkID(atTablePoint: tablePoint) else {
+            return false
+        }
+        let currentOffset = codeHorizontalOffsetByHunkID[hunkID] ?? 0
+        let proposedOffset = currentOffset - delta
+        let clampedOffset = min(
+            max(0, proposedOffset),
+            maximumCodeHorizontalOffset(for: hunkID)
+        )
+        guard clampedOffset != currentOffset else {
+            return true
+        }
+        codeHorizontalOffsetByHunkID[hunkID] = clampedOffset
+        updateVisibleCodeViewports(for: hunkID)
+        return true
+    }
+
+    private func codeHunkID(atTablePoint tablePoint: NSPoint) -> String? {
+        let row = tableView.row(at: tablePoint)
+        guard rows.indices.contains(row),
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) else {
+            return nil
+        }
+        let cellPoint = cell.convert(tablePoint, from: tableView)
+        switch rows[row] {
+        case let .line(_, _, _, hunkID, _):
+            return cellPoint.x >= Metrics.unifiedCodeLeading ? hunkID : nil
+        case let .sideBySide(_, _, _, hunkID, _):
+            let paneWidth = cell.bounds.width / 2
+            guard paneWidth > 0 else {
+                return nil
+            }
+            let paneX = cellPoint.x.truncatingRemainder(dividingBy: paneWidth)
+            return paneX >= Metrics.sideCodeLeading ? hunkID : nil
+        case .group, .file, .hunk, .contextEdge, .image, .note:
+            return nil
+        }
+    }
+
+    private func updateVisibleCodeViewports(for targetHunkID: String? = nil) {
+        let visibleRows = tableView.rows(in: contentView.bounds)
+        guard visibleRows.location != NSNotFound else {
+            return
+        }
+        for row in visibleRows.location..<NSMaxRange(visibleRows) {
+            guard rows.indices.contains(row) else {
+                continue
+            }
+            let hunkID: String
+            switch rows[row] {
+            case let .line(_, _, _, candidateHunkID, _),
+                 let .sideBySide(_, _, _, candidateHunkID, _):
+                hunkID = candidateHunkID
+            case .group, .file, .hunk, .contextEdge, .image, .note:
+                continue
+            }
+            if let targetHunkID, hunkID != targetHunkID {
+                continue
+            }
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+            ) as? DiffCodeViewport else {
+                continue
+            }
+            cell.updateCodeViewport(
+                horizontalOffset: codeHorizontalOffsetByHunkID[hunkID] ?? 0,
+                contentWidth: codeContentWidth(for: hunkID)
+            )
+        }
+    }
+
+    private func updateVisibleImagePreviews() {
+        let visibleRows = tableView.rows(in: contentView.bounds)
+        guard visibleRows.location != NSNotFound else {
+            return
+        }
+        for row in visibleRows.location..<NSMaxRange(visibleRows) {
+            guard rows.indices.contains(row),
+                  case .image = rows[row],
+                  let cell = tableView.view(
+                      atColumn: 0,
+                      row: row,
+                      makeIfNecessary: false
+                  ) as? DiffImageCellView else {
+                continue
+            }
+            cell.setApplicationActive(isApplicationActive)
+        }
     }
 
     private func copyText(for selectedRows: IndexSet) -> String {
@@ -950,25 +1970,39 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 return nil
             }
             switch rows[rowIndex] {
-            case let .hunk(header, _, _, _):
-                return header
-            case let .line(line, _, _, _):
+            case let .hunk(hunk):
+                return hunk.rawHeader
+            case let .line(line, _, _, _, _):
                 return line.copyText
-            case let .sideBySide(pair, _, _, _):
+            case let .sideBySide(pair, _, _, _, _):
                 let values = [pair.old?.copyText, pair.new?.copyText].compactMap { $0 }
                 if values.count == 2, values[0] == values[1] {
                     return values[0]
                 }
                 return values.joined(separator: "\n")
-            case .file, .group, .note:
+            case .file, .group, .contextEdge, .image, .note:
                 return nil
             }
         }.joined(separator: "\n")
     }
 }
 
-/// 只比较结构与 hunk 存储地址，避免每次 SwiftUI 更新都深比较上万行。
+/// 只比较结构与预计算内容身份，避免每次 SwiftUI 更新都深比较上万行。
 private struct DiffStackToken: Equatable {
+    private struct EmptyGroupEntry: Equatable {
+        let id: String
+        let title: String?
+        let emptyMessage: String
+        let isExpanded: Bool
+    }
+
+    private struct ContextGapEntry: Equatable {
+        let id: String
+        let hiddenLineCount: Int
+        let revealedLineCount: Int
+        let contextRenderID: UInt64?
+    }
+
     private struct Entry: Equatable {
         let id: String
         let groupID: String
@@ -976,30 +2010,42 @@ private struct DiffStackToken: Equatable {
         let groupIsExpanded: Bool
         let statusLabel: String
         let path: String
+        let originalPath: String?
         let isExpanded: Bool
-        let isFocused: Bool
+        let showsWholeFile: Bool
+        let isLoadingWholeFile: Bool
+        let canToggleWholeFile: Bool
+        let canOpenWorkingFile: Bool
+        let canOpenInVisualStudioCode: Bool
+        let canApplyPrimaryAction: Bool
+        let canDiscard: Bool
+        let isMutationEnabled: Bool
+        let contextGaps: [ContextGapEntry]
         let mutationMode: DiffStackMutationMode?
-        let hunkStorageAddress: UInt
-        let hunkCount: Int
-        let state: GitFileDiffState?
-        let hasDiff: Bool
+        let diffRenderID: UInt64?
+        let oldImageHash: Int?
+        let newImageHash: Int?
     }
 
     private let entries: [Entry]
-    private let emptyGroupIDs: [String]
+    private let emptyGroups: [EmptyGroupEntry]
     private let layout: DiffLayoutMode
 
     init(groups: [DiffStackGroup], layout: DiffLayoutMode) {
         var entries: [Entry] = []
-        var emptyGroupIDs: [String] = []
+        var emptyGroups: [EmptyGroupEntry] = []
         for group in groups {
             if group.files.isEmpty {
-                emptyGroupIDs.append(group.id)
+                emptyGroups.append(
+                    EmptyGroupEntry(
+                        id: group.id,
+                        title: group.title,
+                        emptyMessage: group.emptyMessage,
+                        isExpanded: group.isExpanded
+                    )
+                )
             }
             for file in group.files {
-                let address = file.diff?.hunks.withUnsafeBufferPointer { buffer in
-                    buffer.baseAddress.map { UInt(bitPattern: $0) } ?? 0
-                } ?? 0
                 entries.append(
                     Entry(
                         id: file.id,
@@ -1008,45 +2054,109 @@ private struct DiffStackToken: Equatable {
                         groupIsExpanded: group.isExpanded,
                         statusLabel: file.statusLabel,
                         path: file.path,
+                        originalPath: file.originalPath,
                         isExpanded: file.isExpanded,
-                        isFocused: file.isFocused,
+                        showsWholeFile: file.showsWholeFile,
+                        isLoadingWholeFile: file.isLoadingWholeFile,
+                        canToggleWholeFile: file.canToggleWholeFile,
+                        canOpenWorkingFile: file.canOpenWorkingFile,
+                        canOpenInVisualStudioCode: file.canOpenInVisualStudioCode,
+                        canApplyPrimaryAction: file.canApplyPrimaryAction,
+                        canDiscard: file.canDiscard,
+                        isMutationEnabled: file.isMutationEnabled,
+                        contextGaps: file.contextGaps.map {
+                            ContextGapEntry(
+                                id: $0.id,
+                                hiddenLineCount: $0.hiddenLineCount,
+                                revealedLineCount: $0.revealedLines.count,
+                                contextRenderID: $0.contextRenderID
+                            )
+                        },
                         mutationMode: file.mutationMode,
-                        hunkStorageAddress: address,
-                        hunkCount: file.diff?.hunks.count ?? 0,
-                        state: file.diff?.state,
-                        hasDiff: file.diff != nil
+                        diffRenderID: file.diff?.renderID,
+                        oldImageHash: file.imageDiff?.oldImage?.contentHash,
+                        newImageHash: file.imageDiff?.newImage?.contentHash
                     )
                 )
             }
         }
         self.entries = entries
-        self.emptyGroupIDs = emptyGroupIDs
+        self.emptyGroups = emptyGroups
         self.layout = layout
     }
+}
+
+private struct DiffStackFilePresentationToken: Equatable {
+    private struct Entry: Equatable {
+        let id: String
+        let isFocused: Bool
+        let isReviewed: Bool
+    }
+
+    private let entries: [Entry]
+
+    init(groups: [DiffStackGroup]) {
+        entries = groups.flatMap(\.files).map {
+            Entry(
+                id: $0.id,
+                isFocused: $0.isFocused,
+                isReviewed: $0.isReviewed
+            )
+        }
+    }
+
+    func changedFileIDs(
+        from previous: DiffStackFilePresentationToken
+    ) -> Set<String> {
+        let previousByID = Dictionary(
+            uniqueKeysWithValues: previous.entries.map { ($0.id, $0) }
+        )
+        return Set(entries.compactMap { entry in
+            previousByID[entry.id] == entry ? nil : entry.id
+        })
+    }
+}
+
+private struct DiffStackHunkRow {
+    let anchorID: String
+    let title: String
+    let rawHeader: String
+    let layout: DiffLayoutMode
+    let fileID: String
+    let lineIDs: Set<GitDiffLine.ID>
+    let mutationMode: DiffStackMutationMode?
+    let isMutationEnabled: Bool
+    let showsWholeFile: Bool
+    let isLoadingWholeFile: Bool
+    let canToggleWholeFile: Bool
 }
 
 private enum DiffStackRow {
     case group(DiffStackGroup, count: Int)
     case file(DiffStackFile)
-    case hunk(
-        String,
-        fileID: String,
-        lineIDs: Set<GitDiffLine.ID>,
-        mutationMode: DiffStackMutationMode?
-    )
+    case hunk(DiffStackHunkRow)
+    case contextEdge(DiffStackContextGap, fileID: String)
     case line(
         GitDiffLine,
         GitSyntaxLanguage,
         fileID: String,
+        hunkID: String,
         mutationMode: DiffStackMutationMode?
     )
     case sideBySide(
         GitDiffLinePair,
         GitSyntaxLanguage,
         fileID: String,
+        hunkID: String,
         mutationMode: DiffStackMutationMode?
     )
+    case image(GitImageDiff)
     case note(String)
+}
+
+@MainActor
+func shouldToggleDiffRow(for hitView: NSView?) -> Bool {
+    !(hitView is NSButton)
 }
 
 private final class DiffCopyingTableView: NSTableView {
@@ -1054,9 +2164,14 @@ private final class DiffCopyingTableView: NSTableView {
     var rowClickHandler: ((Int) -> Bool)?
     var dynamicMenuProvider: ((Int, IndexSet) -> NSMenu?)?
     var hunkNavigationHandler: ((Int) -> Bool)?
+    var cancelPendingActionHandler: (() -> Bool)?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if !shouldToggleDiffRow(for: hitTest(point)) {
+            super.mouseDown(with: event)
+            return
+        }
         let clickedRow = row(at: point)
         if clickedRow >= 0, rowClickHandler?(clickedRow) == true {
             return
@@ -1066,6 +2181,11 @@ private final class DiffCopyingTableView: NSTableView {
 
     override func keyDown(with event: NSEvent) {
         let shortcutModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.keyCode == 53,
+           shortcutModifiers.isEmpty,
+           cancelPendingActionHandler?() == true {
+            return
+        }
         if event.keyCode == 48 {
             if shortcutModifiers.isEmpty, hunkNavigationHandler?(1) == true {
                 return
@@ -1080,6 +2200,13 @@ private final class DiffCopyingTableView: NSTableView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard cancelPendingActionHandler?() != true else {
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -1105,8 +2232,11 @@ private final class DiffCopyingTableView: NSTableView {
 
 private final class DiffMutationMenuCommand: NSObject {
     enum Value {
+        case wholeFile(String)
+        case review(String)
         case file(String, GitPendingSelectionAction)
         case selection(String, Set<GitDiffLine.ID>, GitPendingSelectionAction)
+        case fileUtility(String, DiffStackFileUtilityAction)
     }
 
     let value: Value
@@ -1135,7 +2265,11 @@ private func disclosureImage(isExpanded: Bool) -> NSImage? {
 }
 
 private final class DiffStickyClipView: NSView {
+    private var groupHeight: CGFloat = 0
+    private var fileHeight: CGFloat = 0
+
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1144,6 +2278,26 @@ private final class DiffStickyClipView: NSView {
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: groupHeight).fill()
+        NSColor.controlBackgroundColor.setFill()
+        NSRect(x: 0, y: groupHeight, width: bounds.width, height: fileHeight).fill()
+        if fileHeight > 0 {
+            NSColor.separatorColor.setFill()
+            NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        }
+    }
+
+    func update(groupHeight: CGFloat, fileHeight: CGFloat) {
+        guard self.groupHeight != groupHeight || self.fileHeight != fileHeight else {
+            return
+        }
+        self.groupHeight = groupHeight
+        self.fileHeight = fileHeight
+        needsDisplay = true
     }
 }
 
@@ -1196,20 +2350,24 @@ private final class DiffGroupCellView: NSTableCellView {
     func update(group: DiffStackGroup, count: Int) {
         groupID = group.id
         chevron.image = disclosureImage(isExpanded: group.isExpanded)
-        label.stringValue = "\((group.title ?? "").uppercased())  ·  \(count)"
+        label.stringValue = "\((group.title ?? "").uppercased()) · \(count)"
         toolTip = group.isExpanded
-            ? "Collapse all \(count) files"
-            : "Expand all \(count) files"
+            ? "Collapse all \(countedLabel(count, singular: "file"))"
+            : "Expand all \(countedLabel(count, singular: "file"))"
         needsLayout = true
         needsDisplay = true
     }
 }
 
 private final class DiffFileCellView: NSTableCellView {
+    private static let discardConfirmationDuration: TimeInterval = 3
     static let identifier = NSUserInterfaceItemIdentifier("diff-file")
 
     var clickHandler: ((String) -> Void)?
+    var reviewHandler: ((String) -> Void)?
+    var wholeFileHandler: ((String) -> Void)?
     var actionHandler: ((String, GitPendingSelectionAction) -> Void)?
+    var menuHandler: ((String) -> NSMenu?)?
 
     private let chevron = makeDisclosureImageView()
     private let status = DiffTextField(
@@ -1230,9 +2388,19 @@ private final class DiffFileCellView: NSTableCellView {
         alignment: .right,
         selectable: false
     )
+    private let menuButton = NSButton(title: "", target: nil, action: nil)
+    private let wholeFileButton = NSButton(title: "", target: nil, action: nil)
+    private let reviewButton = NSButton(title: "", target: nil, action: nil)
     private let primaryButton = NSButton(title: "", target: nil, action: nil)
     private let discardButton = NSButton(title: "Discard", target: nil, action: nil)
     private var isFocused = false
+    private var isReviewed = false
+    private var canReview = false
+    private var canToggleWholeFile = false
+    private var canApplyPrimaryAction = false
+    private var canDiscard = false
+    private var isConfirmingDiscard = false
+    private var discardConfirmationTimer: Timer?
     private var fileID = ""
     private var mutationMode: DiffStackMutationMode?
 
@@ -1244,14 +2412,35 @@ private final class DiffFileCellView: NSTableCellView {
         addSubview(status)
         addSubview(title)
         addSubview(stats)
+        addSubview(menuButton)
+        addSubview(wholeFileButton)
+        addSubview(reviewButton)
         addSubview(primaryButton)
         addSubview(discardButton)
+        configureWholeFileButton()
+        configureReviewButton()
+        configureMenuButton()
         configure(primaryButton, action: #selector(runPrimaryAction))
         configure(discardButton, action: #selector(runDiscardAction))
+        title.lineBreakMode = .byTruncatingMiddle
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            resetDiscardConfirmation()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard !cancelDiscardConfirmation() else {
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     /// 表格内的行由 NSTableView 统一派发点击，只有吸顶实例会装 clickHandler。
@@ -1266,26 +2455,44 @@ private final class DiffFileCellView: NSTableCellView {
     override func layout() {
         super.layout()
         let statsWidth: CGFloat = 100
-        let primaryWidth: CGFloat = mutationMode == nil ? 0 : 62
-        let discardWidth: CGFloat = mutationMode == .working ? 62 : 0
-        let actionSpacing: CGFloat = mutationMode == nil ? 0 : 4
+        let primaryWidth: CGFloat = canApplyPrimaryAction ? 62 : 0
+        let discardWidth: CGFloat = canDiscard ? 62 : 0
+        let actionSpacing: CGFloat = primaryWidth > 0 && discardWidth > 0 ? 4 : 0
         let actionsWidth = primaryWidth + discardWidth
             + (discardWidth > 0 ? actionSpacing : 0)
-        let actionX = bounds.width - actionsWidth - 10
+        let menuWidth: CGFloat = 24
+        let menuSpacing: CGFloat = 4
+        let reviewWidth: CGFloat = canReview ? 24 : 0
+        let reviewSpacing: CGFloat = canReview ? 4 : 0
+        let wholeFileWidth: CGFloat = canToggleWholeFile ? 24 : 0
+        let wholeFileSpacing: CGFloat = canToggleWholeFile ? 4 : 0
+        let menuX = bounds.width - menuWidth - 10
+        let actionX = menuX - actionsWidth - (actionsWidth > 0 ? menuSpacing : 0)
+        let reviewX = actionX - reviewWidth - reviewSpacing
+        let wholeFileX = reviewX - wholeFileWidth - wholeFileSpacing
+        let statsX = wholeFileX - statsWidth - 6
         chevron.frame = NSRect(x: 10, y: 12, width: 14, height: 15)
         status.frame = NSRect(x: 26, y: 12, width: 16, height: 15)
         title.frame = NSRect(
             x: 48,
             y: 11,
-            width: max(0, bounds.width - 48 - statsWidth - actionsWidth - 24),
+            width: max(0, statsX - 54),
             height: 17
         )
         stats.frame = NSRect(
-            x: actionX - statsWidth - 6,
+            x: statsX,
             y: 12,
             width: statsWidth,
             height: 15
         )
+        menuButton.frame = NSRect(x: menuX, y: 7, width: menuWidth, height: 24)
+        wholeFileButton.frame = NSRect(
+            x: wholeFileX,
+            y: 7,
+            width: wholeFileWidth,
+            height: 24
+        )
+        reviewButton.frame = NSRect(x: reviewX, y: 7, width: reviewWidth, height: 24)
         primaryButton.frame = NSRect(x: actionX, y: 8, width: primaryWidth, height: 22)
         discardButton.frame = NSRect(
             x: actionX + primaryWidth + actionSpacing,
@@ -1298,6 +2505,10 @@ private final class DiffFileCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         NSColor.controlBackgroundColor.setFill()
         dirtyRect.fill()
+        if isReviewed {
+            NSColor.systemGreen.withAlphaComponent(0.07).setFill()
+            dirtyRect.fill()
+        }
         if isFocused {
             NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
             dirtyRect.fill()
@@ -1311,21 +2522,94 @@ private final class DiffFileCellView: NSTableCellView {
 
     func update(
         file: DiffStackFile,
-        actionHandler: ((String, GitPendingSelectionAction) -> Void)? = nil
+        reviewHandler: ((String) -> Void)? = nil,
+        wholeFileHandler: ((String) -> Void)? = nil,
+        actionHandler: ((String, GitPendingSelectionAction) -> Void)? = nil,
+        menuHandler: ((String) -> NSMenu?)? = nil
     ) {
+        if fileID != file.id || file.mutationMode != .working {
+            resetDiscardConfirmation()
+        }
         fileID = file.id
         isFocused = file.isFocused
+        isReviewed = file.isReviewed
+        canReview = file.diff != nil
+        canToggleWholeFile = file.canToggleWholeFile
+        canApplyPrimaryAction = file.mutationMode != nil && file.canApplyPrimaryAction
+        canDiscard = file.mutationMode == .working && file.canDiscard
         mutationMode = file.mutationMode
+        self.reviewHandler = reviewHandler ?? self.reviewHandler
+        self.wholeFileHandler = wholeFileHandler ?? self.wholeFileHandler
         self.actionHandler = actionHandler ?? self.actionHandler
+        self.menuHandler = menuHandler ?? self.menuHandler
         chevron.image = disclosureImage(isExpanded: file.isExpanded)
         status.stringValue = file.statusLabel
         status.textColor = Self.color(for: file.status)
-        title.attributedStringValue = Self.titleText(path: file.path)
+        title.attributedStringValue = Self.titleText(
+            path: file.path,
+            originalPath: file.originalPath
+        )
         stats.attributedStringValue = Self.statsText(for: file.diff)
+        let wholeFileTitle: String
+        let wholeFileSymbol: String
+        if file.isLoadingWholeFile {
+            wholeFileTitle = "Loading Whole File…"
+            wholeFileSymbol = "ellipsis"
+        } else if file.showsWholeFile {
+            wholeFileTitle = "Show Changed Hunks"
+            wholeFileSymbol = "rectangle.compress.vertical"
+        } else {
+            wholeFileTitle = "Show Whole File"
+            wholeFileSymbol = "rectangle.dashed"
+        }
+        wholeFileButton.image = NSImage(
+            systemSymbolName: wholeFileSymbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        )
+        wholeFileButton.isHidden = !file.canToggleWholeFile
+        wholeFileButton.isEnabled = !file.isLoadingWholeFile
+        wholeFileButton.contentTintColor = file.showsWholeFile
+            ? .controlAccentColor
+            : .tertiaryLabelColor
+        wholeFileButton.toolTip = wholeFileTitle
+        wholeFileButton.setAccessibilityLabel(wholeFileTitle)
+        let reviewSymbol = file.isReviewed ? "checkmark.circle.fill" : "circle"
+        reviewButton.image = NSImage(
+            systemSymbolName: reviewSymbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        )
+        reviewButton.contentTintColor = file.isReviewed ? .systemGreen : .tertiaryLabelColor
+        reviewButton.isHidden = !canReview
+        let reviewTitle = file.isReviewed ? "Mark as Unreviewed" : "Mark as Reviewed"
+        reviewButton.toolTip = reviewTitle
+        reviewButton.setAccessibilityLabel(reviewTitle)
         primaryButton.title = file.mutationMode?.fileActionTitle ?? ""
-        primaryButton.isHidden = file.mutationMode == nil
-        discardButton.isHidden = file.mutationMode != .working
-        toolTip = file.path
+        primaryButton.isHidden = !canApplyPrimaryAction
+        primaryButton.isEnabled = file.isMutationEnabled
+        primaryButton.contentTintColor = file.isMutationEnabled
+            ? .labelColor
+            : .tertiaryLabelColor
+        primaryButton.toolTip = file.status == .conflicted
+            ? "Stage the file after resolving its conflict markers"
+            : primaryButton.title
+        discardButton.isHidden = !canDiscard
+        discardButton.isEnabled = file.isMutationEnabled
+        if !isConfirmingDiscard {
+            discardButton.contentTintColor = file.isMutationEnabled
+                ? .secondaryLabelColor
+                : .tertiaryLabelColor
+        }
+        if !file.isMutationEnabled {
+            resetDiscardConfirmation()
+        }
+        let pathToolTip = file.originalPath.map { "\($0) → \(file.path)" } ?? file.path
+        toolTip = file.status == .conflicted
+            ? "\(pathToolTip)\nResolve conflict markers in the working file, then Stage the file."
+            : pathToolTip
         needsLayout = true
         needsDisplay = true
     }
@@ -1333,38 +2617,183 @@ private final class DiffFileCellView: NSTableCellView {
     private func configure(_ button: NSButton, action: Selector) {
         button.target = self
         button.action = action
-        button.bezelStyle = .inline
+        button.bezelStyle = .recessed
         button.controlSize = .small
         button.font = .systemFont(ofSize: 11, weight: .medium)
+    }
+
+    private func configureReviewButton() {
+        reviewButton.identifier = NSUserInterfaceItemIdentifier("review-toggle")
+        reviewButton.target = self
+        reviewButton.action = #selector(toggleReviewed)
+        reviewButton.bezelStyle = .inline
+        reviewButton.imagePosition = .imageOnly
+        reviewButton.imageScaling = .scaleNone
+    }
+
+    private func configureMenuButton() {
+        menuButton.identifier = NSUserInterfaceItemIdentifier("file-actions-menu")
+        menuButton.target = self
+        menuButton.action = #selector(showFileActions)
+        menuButton.bezelStyle = .inline
+        menuButton.imagePosition = .imageOnly
+        menuButton.imageScaling = .scaleNone
+        menuButton.image = NSImage(
+            systemSymbolName: "ellipsis",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        )
+        menuButton.contentTintColor = .secondaryLabelColor
+        menuButton.toolTip = "File Actions"
+        menuButton.setAccessibilityLabel("File Actions")
+    }
+
+    private func configureWholeFileButton() {
+        wholeFileButton.identifier = NSUserInterfaceItemIdentifier("whole-file-toggle")
+        wholeFileButton.target = self
+        wholeFileButton.action = #selector(toggleWholeFile)
+        wholeFileButton.bezelStyle = .inline
+        wholeFileButton.imagePosition = .imageOnly
+        wholeFileButton.imageScaling = .scaleNone
+    }
+
+    @objc private func toggleWholeFile() {
+        resetDiscardConfirmation()
+        wholeFileHandler?(fileID)
+    }
+
+    @objc private func toggleReviewed() {
+        resetDiscardConfirmation()
+        reviewHandler?(fileID)
+    }
+
+    @objc private func showFileActions() {
+        resetDiscardConfirmation()
+        guard let menu = menuHandler?(fileID) else {
+            return
+        }
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: menuButton.bounds.maxY + 2),
+            in: menuButton
+        )
     }
 
     @objc private func runPrimaryAction() {
         guard let action = mutationMode?.primaryAction else {
             return
         }
+        resetDiscardConfirmation()
         actionHandler?(fileID, action)
     }
 
     @objc private func runDiscardAction() {
+        guard isConfirmingDiscard else {
+            beginDiscardConfirmation()
+            return
+        }
+        resetDiscardConfirmation()
         actionHandler?(fileID, .discard)
     }
 
-    private static func titleText(path: String) -> NSAttributedString {
+    private func beginDiscardConfirmation() {
+        resetDiscardConfirmation()
+        isConfirmingDiscard = true
+        discardButton.title = "Confirm"
+        discardButton.contentTintColor = .systemRed
+        discardButton.toolTip = "Confirm discard; a recovery copy will be saved in Trash"
+        let timer = Timer(
+            timeInterval: Self.discardConfirmationDuration,
+            target: self,
+            selector: #selector(expireDiscardConfirmation),
+            userInfo: nil,
+            repeats: false
+        )
+        discardConfirmationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func expireDiscardConfirmation() {
+        resetDiscardConfirmation()
+    }
+
+    func cancelDiscardConfirmation() -> Bool {
+        guard isConfirmingDiscard else {
+            return false
+        }
+        resetDiscardConfirmation()
+        return true
+    }
+
+    private func resetDiscardConfirmation() {
+        discardConfirmationTimer?.invalidate()
+        discardConfirmationTimer = nil
+        isConfirmingDiscard = false
+        discardButton.title = "Discard"
+        discardButton.contentTintColor = .secondaryLabelColor
+        discardButton.toolTip = "Discard file changes; saves a recovery copy in Trash"
+    }
+
+    private static func titleText(
+        path: String,
+        originalPath: String?
+    ) -> NSAttributedString {
         let name = (path as NSString).lastPathComponent
         let parent = (path as NSString).deletingLastPathComponent
-        let text = NSMutableAttributedString(
-            string: name,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: NSColor.labelColor
-            ]
+        let text = NSMutableAttributedString()
+        if let originalPath {
+            let originalName = (originalPath as NSString).lastPathComponent
+            if originalName != name {
+                text.append(
+                    NSAttributedString(
+                        string: originalName,
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                            .foregroundColor: NSColor.secondaryLabelColor
+                        ]
+                    )
+                )
+                text.append(
+                    NSAttributedString(
+                        string: " → ",
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                            .foregroundColor: NSColor.tertiaryLabelColor
+                        ]
+                    )
+                )
+            }
+        }
+        text.append(
+            NSAttributedString(
+                string: name,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                    .foregroundColor: NSColor.labelColor
+                ]
+            )
         )
-        guard !parent.isEmpty else {
+
+        let pathDetail: String
+        if let originalPath {
+            let originalParent = (originalPath as NSString).deletingLastPathComponent
+            if originalParent != parent {
+                pathDetail = [originalParent, parent]
+                    .map { $0.isEmpty ? "." : $0 }
+                    .joined(separator: " → ")
+            } else {
+                pathDetail = parent
+            }
+        } else {
+            pathDetail = parent
+        }
+        guard !pathDetail.isEmpty else {
             return text
         }
         text.append(
             NSAttributedString(
-                string: "  \(parent)",
+                string: " · \(pathDetail)",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 11, weight: .regular),
                     .foregroundColor: NSColor.tertiaryLabelColor
@@ -1409,6 +2838,514 @@ private final class DiffFileCellView: NSTableCellView {
     }
 }
 
+private final class DiffImageCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("diff-image")
+
+    private let beforePane = DiffImagePaneView(
+        title: "Before",
+        identifier: "diff-image-before"
+    )
+    private let afterPane = DiffImagePaneView(
+        title: "After",
+        identifier: "diff-image-after"
+    )
+    private let separator = DiffImageSeparatorView()
+    private var renderedOldImageID: DiffImagePreviewID?
+    private var renderedNewImageID: DiffImagePreviewID?
+    private var hasRenderedImages = false
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(beforePane)
+        addSubview(afterPane)
+        addSubview(separator)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        let verticalPadding: CGFloat = 10
+        let separatorWidth: CGFloat = 1
+        let paneWidth = floor(max(0, bounds.width - 24 - separatorWidth) / 2)
+        let contentWidth = paneWidth * 2 + separatorWidth
+        let originX = floor((bounds.width - contentWidth) / 2)
+        let paneHeight = max(0, bounds.height - verticalPadding * 2)
+        beforePane.frame = NSRect(
+            x: originX,
+            y: verticalPadding,
+            width: paneWidth,
+            height: paneHeight
+        )
+        separator.frame = NSRect(
+            x: beforePane.frame.maxX,
+            y: verticalPadding + 1,
+            width: separatorWidth,
+            height: max(0, paneHeight - 2)
+        )
+        afterPane.frame = NSRect(
+            x: separator.frame.maxX,
+            y: verticalPadding,
+            width: paneWidth,
+            height: paneHeight
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        dirtyRect.fill()
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        super.draw(dirtyRect)
+    }
+
+    func setApplicationActive(_ isActive: Bool) {
+        beforePane.setApplicationActive(isActive)
+        afterPane.setApplicationActive(isActive)
+    }
+
+    func update(imageDiff: GitImageDiff) {
+        let oldImageID = imageDiff.oldImage.map(DiffImagePreviewID.init)
+        let newImageID = imageDiff.newImage.map(DiffImagePreviewID.init)
+        guard !hasRenderedImages
+                || renderedOldImageID != oldImageID
+                || renderedNewImageID != newImageID else {
+            return
+        }
+        hasRenderedImages = true
+        renderedOldImageID = oldImageID
+        renderedNewImageID = newImageID
+        beforePane.update(
+            image: imageDiff.oldImage,
+            emptyMessage: "No previous image"
+        )
+        afterPane.update(
+            image: imageDiff.newImage,
+            emptyMessage: "Image deleted"
+        )
+        needsLayout = true
+        needsDisplay = true
+    }
+}
+
+private final class DiffImageSeparatorView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.separatorColor.setFill()
+        dirtyRect.fill()
+    }
+}
+
+private final class DiffImagePaneView: NSView {
+    private let titleLabel = DiffTextField(
+        font: .systemFont(ofSize: 11, weight: .semibold),
+        textColor: .secondaryLabelColor,
+        alignment: .left,
+        selectable: false
+    )
+    private let metadataLabel = DiffTextField(
+        font: .systemFont(ofSize: 10, weight: .regular),
+        textColor: .tertiaryLabelColor,
+        alignment: .right,
+        selectable: false
+    )
+    private let canvas = DiffImageCanvasView()
+    private let placeholderLabel = DiffTextField(
+        font: .systemFont(ofSize: 12, weight: .medium),
+        textColor: .tertiaryLabelColor,
+        alignment: .center,
+        selectable: false
+    )
+    private var renderedBlobID: DiffImagePreviewID?
+    private var hasRenderedContent = false
+    private var previewTask: Task<Void, Never>?
+    private var currentBlob: GitImageBlob?
+    private var currentEmptyMessage = ""
+    private var isApplicationActive = true
+    private let paneTitle: String
+
+    override var isFlipped: Bool { true }
+
+    init(title: String, identifier: String) {
+        paneTitle = title
+        super.init(frame: .zero)
+        self.identifier = NSUserInterfaceItemIdentifier(identifier)
+        titleLabel.stringValue = title
+        metadataLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(titleLabel)
+        addSubview(metadataLabel)
+        addSubview(canvas)
+        addSubview(placeholderLabel)
+        canvas.updateAccessibility(
+            label: "\(title) image",
+            value: "No image loaded"
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        previewTask?.cancel()
+    }
+
+    override func layout() {
+        super.layout()
+        let horizontalPadding: CGFloat = 12
+        let headerHeight: CGFloat = 38
+        let titleWidth: CGFloat = 52
+        titleLabel.frame = NSRect(
+            x: horizontalPadding,
+            y: 11,
+            width: titleWidth,
+            height: 16
+        )
+        metadataLabel.frame = NSRect(
+            x: horizontalPadding + titleWidth + 8,
+            y: 11,
+            width: max(0, bounds.width - horizontalPadding * 2 - titleWidth - 8),
+            height: 16
+        )
+        canvas.frame = NSRect(
+            x: 10,
+            y: headerHeight,
+            width: max(0, bounds.width - 20),
+            height: max(0, bounds.height - headerHeight - 10)
+        )
+        placeholderLabel.frame = NSRect(
+            x: canvas.frame.minX + 12,
+            y: canvas.frame.midY - 10,
+            width: max(0, canvas.frame.width - 24),
+            height: 20
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        NSColor.separatorColor.withAlphaComponent(0.7).setStroke()
+        let border = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 6,
+            yRadius: 6
+        )
+        border.lineWidth = 1
+        border.stroke()
+        NSColor.separatorColor.withAlphaComponent(0.7).setFill()
+        NSRect(x: 1, y: 37, width: max(0, bounds.width - 2), height: 1).fill()
+        super.draw(dirtyRect)
+    }
+
+    func update(image blob: GitImageBlob?, emptyMessage: String) {
+        currentBlob = blob
+        currentEmptyMessage = emptyMessage
+        let blobID = blob.map(DiffImagePreviewID.init)
+        let contentChanged = !hasRenderedContent || renderedBlobID != blobID
+        guard isApplicationActive else {
+            if contentChanged {
+                renderedBlobID = blobID
+                hasRenderedContent = false
+            }
+            suspendPreviewIfNeeded(force: contentChanged)
+            return
+        }
+        guard contentChanged else {
+            return
+        }
+        hasRenderedContent = true
+        renderedBlobID = blobID
+        previewTask?.cancel()
+        previewTask = nil
+
+        guard let blob else {
+            canvas.image = nil
+            metadataLabel.stringValue = ""
+            placeholderLabel.stringValue = emptyMessage
+            placeholderLabel.isHidden = false
+            toolTip = emptyMessage
+            canvas.updateAccessibility(
+                label: "\(paneTitle) image",
+                value: emptyMessage
+            )
+            return
+        }
+        let byteText = ByteCountFormatter.string(
+            fromByteCount: Int64(blob.contents.count),
+            countStyle: .file
+        )
+        let previewID = DiffImagePreviewID(blob)
+        metadataLabel.stringValue = "\(blob.path) · \(byteText)"
+        toolTip = metadataLabel.stringValue
+        if let preview = DiffImagePreviewCache.shared.preview(for: previewID) {
+            apply(preview, path: blob.path, byteText: byteText)
+            return
+        }
+        canvas.image = nil
+        placeholderLabel.stringValue = "Loading preview…"
+        placeholderLabel.isHidden = false
+        canvas.updateAccessibility(
+            label: "\(paneTitle) image",
+            value: "Loading preview for \(blob.path)"
+        )
+        let contents = blob.contents
+        previewTask = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                DiffImagePreviewDecoder.decode(contents)
+            }
+            let preview = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  self.renderedBlobID == previewID else {
+                return
+            }
+            self.previewTask = nil
+            guard let preview else {
+                self.canvas.image = nil
+                self.placeholderLabel.stringValue = "Unable to decode image"
+                self.placeholderLabel.isHidden = false
+                self.canvas.updateAccessibility(
+                    label: "\(self.paneTitle) image",
+                    value: "Unable to decode \(blob.path)"
+                )
+                self.needsDisplay = true
+                return
+            }
+            DiffImagePreviewCache.shared.insert(preview, for: previewID)
+            self.apply(preview, path: blob.path, byteText: byteText)
+        }
+    }
+
+    func setApplicationActive(_ isActive: Bool) {
+        guard isApplicationActive != isActive else {
+            return
+        }
+        isApplicationActive = isActive
+        if isActive {
+            guard !hasRenderedContent else {
+                return
+            }
+            update(image: currentBlob, emptyMessage: currentEmptyMessage)
+        } else {
+            suspendPreviewIfNeeded()
+        }
+    }
+
+    private func suspendPreviewIfNeeded(force: Bool = false) {
+        guard force || previewTask != nil || !hasRenderedContent else {
+            return
+        }
+        previewTask?.cancel()
+        previewTask = nil
+        hasRenderedContent = false
+        canvas.image = nil
+        if currentBlob == nil {
+            metadataLabel.stringValue = ""
+            placeholderLabel.stringValue = currentEmptyMessage
+            toolTip = currentEmptyMessage
+            canvas.updateAccessibility(
+                label: "\(paneTitle) image",
+                value: currentEmptyMessage
+            )
+        } else {
+            placeholderLabel.stringValue = "Preview paused in background"
+            toolTip = placeholderLabel.stringValue
+            canvas.updateAccessibility(
+                label: "\(paneTitle) image",
+                value: "Preview paused in background"
+            )
+        }
+        placeholderLabel.isHidden = false
+        needsDisplay = true
+    }
+
+    private func apply(
+        _ preview: DiffImagePreview,
+        path: String,
+        byteText: String
+    ) {
+        canvas.image = NSImage(
+            cgImage: preview.image,
+            size: NSSize(
+                width: CGFloat(preview.image.width),
+                height: CGFloat(preview.image.height)
+            )
+        )
+        metadataLabel.stringValue = [
+            path,
+            "\(preview.originalPixelWidth)×\(preview.originalPixelHeight)",
+            byteText
+        ].joined(separator: " · ")
+        canvas.updateAccessibility(
+            label: "\(paneTitle) image",
+            value: metadataLabel.stringValue
+        )
+        placeholderLabel.isHidden = true
+        toolTip = metadataLabel.stringValue
+        needsDisplay = true
+    }
+}
+
+private final class DiffImageCanvasView: NSView {
+    private let imageView = NSImageView()
+
+    var image: NSImage? {
+        get { imageView.image }
+        set { imageView.image = newValue }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = NSUserInterfaceItemIdentifier("diff-image-canvas")
+        imageView.identifier = NSUserInterfaceItemIdentifier("diff-image-content")
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        imageView.frame = bounds.insetBy(dx: 12, dy: 12)
+    }
+
+    func updateAccessibility(label: String, value: String) {
+        imageView.setAccessibilityLabel(label)
+        imageView.setAccessibilityValue(value)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        dirtyRect.fill()
+        let squareSize: CGFloat = 10
+        let alternateColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.08)
+        alternateColor.setFill()
+        var y: CGFloat = 0
+        var row = 0
+        while y < bounds.height {
+            var x: CGFloat = row.isMultiple(of: 2) ? 0 : squareSize
+            while x < bounds.width {
+                NSRect(
+                    x: x,
+                    y: y,
+                    width: min(squareSize, bounds.width - x),
+                    height: min(squareSize, bounds.height - y)
+                ).fill()
+                x += squareSize * 2
+            }
+            y += squareSize
+            row += 1
+        }
+        super.draw(dirtyRect)
+    }
+}
+
+private final class DiffContextEdgeCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("diff-context-edge")
+
+    private let button = NSButton(title: "", target: nil, action: nil)
+    private var fileID = ""
+    private var gap: DiffStackContextGap?
+    private var expandHandler: ((String, DiffStackContextGap) -> Void)?
+    private var isHovered = false
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        button.identifier = NSUserInterfaceItemIdentifier("hunk-context-expand")
+        button.target = self
+        button.action = #selector(expand)
+        button.bezelStyle = .inline
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.contentTintColor = .secondaryLabelColor
+        button.image = NSImage(
+            systemSymbolName: "ellipsis",
+            accessibilityDescription: "Expand hidden context"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
+        )
+        addSubview(button)
+        addTrackingArea(
+            NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self
+            )
+        )
+        updateHoverAppearance()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        button.frame = NSRect(x: 6, y: 0, width: 24, height: bounds.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        dirtyRect.fill()
+        NSColor.separatorColor.withAlphaComponent(0.55).setFill()
+        NSRect(x: 34, y: bounds.midY, width: max(0, bounds.width - 34), height: 1).fill()
+        super.draw(dirtyRect)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateHoverAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateHoverAppearance()
+    }
+
+    func update(
+        gap: DiffStackContextGap,
+        fileID: String,
+        expandHandler: @escaping (String, DiffStackContextGap) -> Void
+    ) {
+        self.gap = gap
+        self.fileID = fileID
+        self.expandHandler = expandHandler
+        let shownLineCount = min(20, gap.hiddenLineCount)
+        let title = gap.hiddenLineCount == shownLineCount
+            ? "Show \(shownLineCount) hidden lines"
+            : "Show \(shownLineCount) of \(gap.hiddenLineCount) hidden lines"
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    @objc private func expand() {
+        guard let gap else {
+            return
+        }
+        expandHandler?(fileID, gap)
+    }
+
+    private func updateHoverAppearance() {
+        button.alphaValue = isHovered ? 1 : 0.48
+    }
+}
+
 private final class DiffNoteCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-note")
 
@@ -1441,34 +3378,96 @@ private final class DiffNoteCellView: NSTableCellView {
 }
 
 private final class DiffHunkCellView: NSTableCellView {
+    private static let discardConfirmationDuration: TimeInterval = 3
     static let identifier = NSUserInterfaceItemIdentifier("diff-hunk")
 
-    private let label = DiffTextField(
-        font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
-        textColor: .systemBlue,
+    private let unifiedTitle = DiffTextField(
+        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
+        textColor: .labelColor,
         alignment: .left,
         selectable: false
     )
+    private let oldTitle = DiffTextField(
+        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
+        textColor: .labelColor,
+        alignment: .left,
+        selectable: false
+    )
+    private let newTitle = DiffTextField(
+        font: .monospacedSystemFont(ofSize: 11.5, weight: .medium),
+        textColor: .labelColor,
+        alignment: .left,
+        selectable: false
+    )
+    private let paneDivider = NSBox()
+    private let wholeFileButton = NSButton(title: "", target: nil, action: nil)
     private let primaryButton = NSButton(title: "", target: nil, action: nil)
     private let discardButton = NSButton(title: "Discard", target: nil, action: nil)
     private var fileID = ""
     private var lineIDs: Set<GitDiffLine.ID> = []
     private var mutationMode: DiffStackMutationMode?
+    private var discardConfirmationID = ""
+    private var isConfirmingDiscard = false
+    private var discardConfirmationTimer: Timer?
+    private var canToggleWholeFile = false
+    private var showsWholeFile = false
+    private var isLoadingWholeFile = false
+    private var isHovered = false
+    private var layoutMode: DiffLayoutMode = .unified
+    private var wholeFileHandler: ((String) -> Void)?
     private var actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
 
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        addSubview(label)
+        unifiedTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-unified")
+        oldTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-old")
+        newTitle.identifier = NSUserInterfaceItemIdentifier("hunk-title-new")
+        addSubview(unifiedTitle)
+        addSubview(oldTitle)
+        addSubview(newTitle)
+        paneDivider.boxType = .separator
+        addSubview(paneDivider)
+        addSubview(wholeFileButton)
         addSubview(primaryButton)
         addSubview(discardButton)
+        wholeFileButton.identifier = NSUserInterfaceItemIdentifier("hunk-whole-file-toggle")
+        wholeFileButton.target = self
+        wholeFileButton.action = #selector(toggleWholeFile)
+        wholeFileButton.bezelStyle = .inline
+        wholeFileButton.imagePosition = .imageOnly
+        wholeFileButton.imageScaling = .scaleNone
+        addTrackingArea(
+            NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self
+            )
+        )
         configure(primaryButton, action: #selector(runPrimaryAction))
         configure(discardButton, action: #selector(runDiscardAction))
+        unifiedTitle.lineBreakMode = .byTruncatingTail
+        oldTitle.lineBreakMode = .byTruncatingTail
+        newTitle.lineBreakMode = .byTruncatingTail
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            resetDiscardConfirmation()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard !cancelDiscardConfirmation() else {
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     override func layout() {
@@ -1477,12 +3476,8 @@ private final class DiffHunkCellView: NSTableCellView {
         let discardWidth: CGFloat = mutationMode == .working ? 62 : 0
         let spacing: CGFloat = discardWidth > 0 ? 4 : 0
         let actionsWidth = primaryWidth + discardWidth + spacing
-        label.frame = NSRect(
-            x: 10,
-            y: 4,
-            width: max(0, bounds.width - actionsWidth - 28),
-            height: max(0, bounds.height - 8)
-        )
+        wholeFileButton.frame = NSRect(x: 6, y: 2, width: 24, height: 22)
+        let labelX: CGFloat = 34
         let actionX = bounds.width - actionsWidth - 10
         primaryButton.frame = NSRect(x: actionX, y: 2, width: primaryWidth, height: 22)
         discardButton.frame = NSRect(
@@ -1491,37 +3486,144 @@ private final class DiffHunkCellView: NSTableCellView {
             width: discardWidth,
             height: 22
         )
+        let titleHeight = max(0, bounds.height - 8)
+        switch layoutMode {
+        case .unified:
+            unifiedTitle.frame = NSRect(
+                x: labelX,
+                y: 4,
+                width: max(0, actionX - labelX - 6),
+                height: titleHeight
+            )
+            oldTitle.frame = .zero
+            newTitle.frame = .zero
+            paneDivider.frame = .zero
+        case .sideBySide:
+            let paneWidth = bounds.width / 2
+            unifiedTitle.frame = .zero
+            oldTitle.frame = NSRect(
+                x: labelX,
+                y: 4,
+                width: max(0, paneWidth - labelX - 8),
+                height: titleHeight
+            )
+            let newTitleX = paneWidth + labelX
+            newTitle.frame = NSRect(
+                x: newTitleX,
+                y: 4,
+                width: max(0, actionX - newTitleX - 6),
+                height: titleHeight
+            )
+            paneDivider.frame = NSRect(
+                x: paneWidth - 0.5,
+                y: 0,
+                width: 1,
+                height: bounds.height
+            )
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.systemBlue.withAlphaComponent(0.08).setFill()
         dirtyRect.fill()
+        NSColor.separatorColor.withAlphaComponent(0.45).setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateWholeFileButtonVisibility()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateWholeFileButtonVisibility()
+    }
+
     func update(
-        header: String,
-        fileID: String,
-        lineIDs: Set<GitDiffLine.ID>,
-        mutationMode: DiffStackMutationMode?,
+        hunk: DiffStackHunkRow,
+        wholeFileHandler: ((String) -> Void)?,
         actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
     ) {
-        label.stringValue = header
-        self.fileID = fileID
-        self.lineIDs = lineIDs
-        self.mutationMode = mutationMode
+        if fileID != hunk.fileID {
+            isHovered = false
+        }
+        let confirmationID = "\(hunk.fileID):\(hunk.lineIDs.sorted())"
+        if discardConfirmationID != confirmationID || hunk.mutationMode != .working {
+            resetDiscardConfirmation()
+        }
+        discardConfirmationID = confirmationID
+        unifiedTitle.stringValue = hunk.title
+        oldTitle.stringValue = hunk.title
+        newTitle.stringValue = hunk.title
+        unifiedTitle.toolTip = hunk.rawHeader
+        oldTitle.toolTip = hunk.rawHeader
+        newTitle.toolTip = hunk.rawHeader
+        layoutMode = hunk.layout
+        unifiedTitle.isHidden = hunk.layout != .unified
+        oldTitle.isHidden = hunk.layout != .sideBySide
+        newTitle.isHidden = hunk.layout != .sideBySide
+        paneDivider.isHidden = hunk.layout != .sideBySide
+        fileID = hunk.fileID
+        lineIDs = hunk.lineIDs
+        mutationMode = hunk.mutationMode
+        canToggleWholeFile = hunk.canToggleWholeFile
+        showsWholeFile = hunk.showsWholeFile
+        isLoadingWholeFile = hunk.isLoadingWholeFile
+        self.wholeFileHandler = wholeFileHandler
         self.actionHandler = actionHandler
-        primaryButton.title = mutationMode?.hunkActionTitle ?? ""
-        primaryButton.isHidden = mutationMode == nil || lineIDs.isEmpty
-        discardButton.isHidden = mutationMode != .working || lineIDs.isEmpty
-        toolTip = "Tab: Next Hunk  ·  Shift-Tab: Previous Hunk"
+        primaryButton.title = hunk.mutationMode?.hunkActionTitle ?? ""
+        primaryButton.isHidden = hunk.mutationMode == nil || hunk.lineIDs.isEmpty
+        primaryButton.isEnabled = hunk.isMutationEnabled
+        primaryButton.contentTintColor = hunk.isMutationEnabled
+            ? .labelColor
+            : .tertiaryLabelColor
+        discardButton.isHidden = hunk.mutationMode != .working || hunk.lineIDs.isEmpty
+        discardButton.isEnabled = hunk.isMutationEnabled
+        if !isConfirmingDiscard {
+            discardButton.contentTintColor = hunk.isMutationEnabled
+                ? .secondaryLabelColor
+                : .tertiaryLabelColor
+        }
+        if !hunk.isMutationEnabled {
+            resetDiscardConfirmation()
+        }
+        let wholeFileTitle: String
+        let wholeFileSymbol: String
+        if hunk.isLoadingWholeFile {
+            wholeFileTitle = "Loading Whole File…"
+            wholeFileSymbol = "ellipsis"
+        } else if hunk.showsWholeFile {
+            wholeFileTitle = "Show Changed Hunks"
+            wholeFileSymbol = "rectangle.compress.vertical"
+        } else {
+            wholeFileTitle = "Show Whole File"
+            wholeFileSymbol = "rectangle.dashed"
+        }
+        wholeFileButton.image = NSImage(
+            systemSymbolName: wholeFileSymbol,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        )
+        wholeFileButton.isEnabled = !hunk.isLoadingWholeFile
+        wholeFileButton.contentTintColor = hunk.showsWholeFile
+            ? .controlAccentColor
+            : .secondaryLabelColor
+        wholeFileButton.toolTip = wholeFileTitle
+        wholeFileButton.setAccessibilityLabel(wholeFileTitle)
+        updateWholeFileButtonVisibility()
+        toolTip = "\(hunk.rawHeader)\nTab: Next Hunk  ·  Shift-Tab: Previous Hunk"
         needsLayout = true
+        needsDisplay = true
     }
 
     private func configure(_ button: NSButton, action: Selector) {
         button.target = self
         button.action = action
-        button.bezelStyle = .inline
+        button.bezelStyle = .recessed
         button.controlSize = .small
         button.font = .systemFont(ofSize: 11, weight: .medium)
     }
@@ -1530,15 +3632,74 @@ private final class DiffHunkCellView: NSTableCellView {
         guard let action = mutationMode?.primaryAction else {
             return
         }
+        resetDiscardConfirmation()
         actionHandler?(fileID, lineIDs, action)
     }
 
+    @objc private func toggleWholeFile() {
+        resetDiscardConfirmation()
+        wholeFileHandler?(fileID)
+    }
+
     @objc private func runDiscardAction() {
+        guard isConfirmingDiscard else {
+            beginDiscardConfirmation()
+            return
+        }
+        resetDiscardConfirmation()
         actionHandler?(fileID, lineIDs, .discard)
+    }
+
+    private func beginDiscardConfirmation() {
+        resetDiscardConfirmation()
+        isConfirmingDiscard = true
+        discardButton.title = "Confirm"
+        discardButton.contentTintColor = .systemRed
+        discardButton.toolTip = "Confirm discard hunk; a recovery copy will be saved in Trash"
+        let timer = Timer(
+            timeInterval: Self.discardConfirmationDuration,
+            target: self,
+            selector: #selector(expireDiscardConfirmation),
+            userInfo: nil,
+            repeats: false
+        )
+        discardConfirmationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func expireDiscardConfirmation() {
+        resetDiscardConfirmation()
+    }
+
+    func cancelDiscardConfirmation() -> Bool {
+        guard isConfirmingDiscard else {
+            return false
+        }
+        resetDiscardConfirmation()
+        return true
+    }
+
+    private func resetDiscardConfirmation() {
+        discardConfirmationTimer?.invalidate()
+        discardConfirmationTimer = nil
+        isConfirmingDiscard = false
+        discardButton.title = "Discard"
+        discardButton.contentTintColor = .secondaryLabelColor
+        discardButton.toolTip = "Discard hunk changes; saves a recovery copy in Trash"
+    }
+
+    private func updateWholeFileButtonVisibility() {
+        wholeFileButton.isHidden = !canToggleWholeFile
+            || (!isHovered && !showsWholeFile && !isLoadingWholeFile)
     }
 }
 
-private final class DiffLineCellView: NSTableCellView {
+@MainActor
+private protocol DiffCodeViewport: AnyObject {
+    func updateCodeViewport(horizontalOffset: CGFloat, contentWidth: CGFloat)
+}
+
+private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
     static let identifier = NSUserInterfaceItemIdentifier("diff-line")
 
     private let oldLineNumber = DiffTextField.lineNumber()
@@ -1555,7 +3716,12 @@ private final class DiffLineCellView: NSTableCellView {
         alignment: .left,
         selectable: false
     )
+    private let contentClip = NSView()
     private var kind: GitDiffLineKind = .context
+    private var horizontalOffset: CGFloat = 0
+    private var codeContentWidth: CGFloat = 0
+    private var renderedLine: GitDiffLine?
+    private var renderedLanguage: GitSyntaxLanguage?
 
     override var isFlipped: Bool { true }
 
@@ -1564,7 +3730,12 @@ private final class DiffLineCellView: NSTableCellView {
         addSubview(oldLineNumber)
         addSubview(newLineNumber)
         addSubview(marker)
-        addSubview(content)
+        contentClip.identifier = NSUserInterfaceItemIdentifier("diff-unified-code-clip")
+        contentClip.wantsLayer = true
+        contentClip.layer?.masksToBounds = true
+        content.identifier = NSUserInterfaceItemIdentifier("diff-unified-code-content")
+        contentClip.addSubview(content)
+        addSubview(contentClip)
     }
 
     required init?(coder: NSCoder) {
@@ -1582,11 +3753,17 @@ private final class DiffLineCellView: NSTableCellView {
             height: bounds.height
         )
         marker.frame = NSRect(x: lineNumberWidth * 2, y: 0, width: 22, height: bounds.height)
-        content.frame = NSRect(
+        contentClip.frame = NSRect(
             x: lineNumberWidth * 2 + 22,
             y: 0,
             width: max(0, bounds.width - lineNumberWidth * 2 - 34),
             height: bounds.height
+        )
+        content.frame = NSRect(
+            x: -horizontalOffset,
+            y: 0,
+            width: max(contentClip.bounds.width, codeContentWidth),
+            height: contentClip.bounds.height
         )
     }
 
@@ -1599,6 +3776,11 @@ private final class DiffLineCellView: NSTableCellView {
     }
 
     func update(line: GitDiffLine, language: GitSyntaxLanguage) {
+        guard renderedLine != line || renderedLanguage != language else {
+            return
+        }
+        renderedLine = line
+        renderedLanguage = language
         kind = line.kind
         oldLineNumber.stringValue = line.oldLineNumber.map(String.init) ?? ""
         newLineNumber.stringValue = line.newLineNumber.map(String.init) ?? ""
@@ -1606,6 +3788,16 @@ private final class DiffLineCellView: NSTableCellView {
         marker.textColor = markerColor
         content.attributedStringValue = Self.contentText(for: line, language: language)
         needsDisplay = true
+    }
+
+    func updateCodeViewport(horizontalOffset: CGFloat, contentWidth: CGFloat) {
+        guard self.horizontalOffset != horizontalOffset
+                || codeContentWidth != contentWidth else {
+            return
+        }
+        self.horizontalOffset = horizontalOffset
+        codeContentWidth = contentWidth
+        needsLayout = true
     }
 
     /// 单行过长时 NSTextField 的排版会卡死；只截显示，复制仍是整行。
@@ -1726,11 +3918,14 @@ private final class DiffLineCellView: NSTableCellView {
     }
 }
 
-private final class DiffSideBySideCellView: NSTableCellView {
+private final class DiffSideBySideCellView: NSTableCellView, DiffCodeViewport {
     static let identifier = NSUserInterfaceItemIdentifier("diff-side-by-side")
 
     private let oldPane = DiffSideLinePane(side: .old)
     private let newPane = DiffSideLinePane(side: .new)
+    private let divider = NSBox()
+    private var renderedPair: GitDiffLinePair?
+    private var renderedLanguage: GitSyntaxLanguage?
 
     override var isFlipped: Bool { true }
 
@@ -1738,6 +3933,8 @@ private final class DiffSideBySideCellView: NSTableCellView {
         super.init(frame: frameRect)
         addSubview(oldPane)
         addSubview(newPane)
+        divider.boxType = .separator
+        addSubview(divider)
     }
 
     required init?(coder: NSCoder) {
@@ -1746,28 +3943,43 @@ private final class DiffSideBySideCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        let dividerX = floor(bounds.width / 2)
-        oldPane.frame = NSRect(x: 0, y: 0, width: dividerX, height: bounds.height)
+        let paneWidth = bounds.width / 2
+        oldPane.frame = NSRect(x: 0, y: 0, width: paneWidth, height: bounds.height)
         newPane.frame = NSRect(
-            x: dividerX + 1,
+            x: paneWidth,
             y: 0,
-            width: max(0, bounds.width - dividerX - 1),
+            width: paneWidth,
+            height: bounds.height
+        )
+        divider.frame = NSRect(
+            x: paneWidth - 0.5,
+            y: 0,
+            width: 1,
             height: bounds.height
         )
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        NSColor.separatorColor.setFill()
-        let dividerX = floor(bounds.width / 2)
-        NSRect(x: dividerX, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
-    }
-
     func update(pair: GitDiffLinePair, language: GitSyntaxLanguage) {
+        guard renderedPair != pair || renderedLanguage != language else {
+            return
+        }
+        renderedPair = pair
+        renderedLanguage = language
         oldPane.update(line: pair.old, language: language)
         newPane.update(line: pair.new, language: language)
         needsLayout = true
         needsDisplay = true
+    }
+
+    func updateCodeViewport(horizontalOffset: CGFloat, contentWidth: CGFloat) {
+        oldPane.updateCodeViewport(
+            horizontalOffset: horizontalOffset,
+            contentWidth: contentWidth
+        )
+        newPane.updateCodeViewport(
+            horizontalOffset: horizontalOffset,
+            contentWidth: contentWidth
+        )
     }
 }
 
@@ -1791,7 +4003,10 @@ private final class DiffSideLinePane: NSView {
         alignment: .left,
         selectable: false
     )
+    private let contentClip = NSView()
     private var kind: GitDiffLineKind?
+    private var horizontalOffset: CGFloat = 0
+    private var codeContentWidth: CGFloat = 0
 
     override var isFlipped: Bool { true }
 
@@ -1800,7 +4015,16 @@ private final class DiffSideLinePane: NSView {
         super.init(frame: .zero)
         addSubview(lineNumber)
         addSubview(marker)
-        addSubview(content)
+        let sideName = switch side {
+        case .old: "old"
+        case .new: "new"
+        }
+        contentClip.identifier = NSUserInterfaceItemIdentifier("diff-\(sideName)-code-clip")
+        contentClip.wantsLayer = true
+        contentClip.layer?.masksToBounds = true
+        content.identifier = NSUserInterfaceItemIdentifier("diff-\(sideName)-code-content")
+        contentClip.addSubview(content)
+        addSubview(contentClip)
     }
 
     required init?(coder: NSCoder) {
@@ -1818,11 +4042,17 @@ private final class DiffSideLinePane: NSView {
             width: markerWidth,
             height: bounds.height
         )
-        content.frame = NSRect(
+        contentClip.frame = NSRect(
             x: lineNumberWidth + markerWidth,
             y: 0,
             width: max(0, bounds.width - lineNumberWidth - markerWidth - 8),
             height: bounds.height
+        )
+        content.frame = NSRect(
+            x: -horizontalOffset,
+            y: 0,
+            width: max(contentClip.bounds.width, codeContentWidth),
+            height: contentClip.bounds.height
         )
     }
 
@@ -1857,6 +4087,16 @@ private final class DiffSideLinePane: NSView {
             language: language
         )
         needsDisplay = true
+    }
+
+    func updateCodeViewport(horizontalOffset: CGFloat, contentWidth: CGFloat) {
+        guard self.horizontalOffset != horizontalOffset
+                || codeContentWidth != contentWidth else {
+            return
+        }
+        self.horizontalOffset = horizontalOffset
+        codeContentWidth = contentWidth
+        needsLayout = true
     }
 
     private var markerText: String {

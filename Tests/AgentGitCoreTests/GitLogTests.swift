@@ -11,7 +11,7 @@ final class GitLogParserTests: XCTestCase {
                 "Example Author",
                 "2026-08-25T17:14:20+08:00",
                 "03e4e003f1d3d9dd574d8adf0e11c5ca098fcb13",
-                "HEAD -> feat/gate, origin/feat/gate",
+                "HEAD -> refs/heads/feat/gate, refs/remotes/origin/feat/gate, tag: refs/tags/v1.2",
                 "svc 只留凭据那道 gate"
             ].joined(separator: "\u{1f}"),
             [
@@ -30,7 +30,16 @@ final class GitLogParserTests: XCTestCase {
 
         XCTAssertEqual(commits.count, 2)
         XCTAssertEqual(commits[0].shortOID, "99b88fa")
-        XCTAssertEqual(commits[0].refNames, ["HEAD -> feat/gate", "origin/feat/gate"])
+        XCTAssertEqual(
+            commits[0].refNames,
+            [
+                "HEAD -> refs/heads/feat/gate",
+                "refs/remotes/origin/feat/gate",
+                "tag: refs/tags/v1.2"
+            ]
+        )
+        XCTAssertEqual(commits[0].references.map(\.kind), [.head, .tag, .remoteBranch])
+        XCTAssertEqual(commits[0].references.map(\.label), ["feat/gate", "v1.2", "origin/feat/gate"])
         XCTAssertFalse(commits[0].isMerge)
         XCTAssertEqual(commits[1].parentOIDs.count, 2)
         XCTAssertTrue(commits[1].isMerge)
@@ -57,6 +66,17 @@ final class GitLogParserTests: XCTestCase {
 
     func testRejectsMalformedRecord() {
         XCTAssertThrowsError(try GitLogParser.parse(Data("oid\u{1f}short".utf8)))
+    }
+
+    func testParsesHistorySearchScope() throws {
+        let message = try XCTUnwrap(GitHistorySearchQuery("  renderer fix  "))
+        let author = try XCTUnwrap(GitHistorySearchQuery("AUTHOR: Bob Example"))
+
+        XCTAssertEqual(message.field, .message)
+        XCTAssertEqual(message.term, "renderer fix")
+        XCTAssertEqual(author.field, .author)
+        XCTAssertEqual(author.term, "Bob Example")
+        XCTAssertNil(GitHistorySearchQuery("author:   "))
     }
 }
 

@@ -1,0 +1,9 @@
+{
+  "name": "agentgit",
+  "version": "0.1.0+codex.20260828063214",
+  "description": "Register Claude sessions before they write to a Git worktree.",
+  "author": {
+    "name": "AgentGit"
+  },
+  "keywords": ["git", "worktree", "session", "hooks", "skills"]
+}

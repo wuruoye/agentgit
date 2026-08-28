@@ -1,7 +1,7 @@
 import Foundation
 
 /// 行内高亮区间。偏移用 UTF-16，渲染层可以直接拿去做 NSRange，不再逐行换算。
-public struct GitDiffInlineRange: Hashable, Sendable {
+public struct GitDiffInlineRange: Hashable, Codable, Sendable {
     public let location: Int
     public let length: Int
 
@@ -22,6 +22,9 @@ public enum InlineDiffCalculator {
         var index = 0
 
         while index < result.count {
+            guard !Task.isCancelled else {
+                return result
+            }
             guard result[index].kind == .deletion else {
                 index += 1
                 continue
@@ -39,6 +42,9 @@ public enum InlineDiffCalculator {
             let deletionCount = additionStart - deletionStart
             let additionCount = index - additionStart
             for offset in 0..<min(deletionCount, additionCount) {
+                guard !Task.isCancelled else {
+                    return result
+                }
                 let oldIndex = deletionStart + offset
                 let newIndex = additionStart + offset
                 let (oldRanges, newRanges) = ranges(
