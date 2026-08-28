@@ -113,6 +113,12 @@ struct IntegratedReviewWorkspace: View {
         )
         _pane = State(initialValue: initialPane)
         _commitFilterText = State(initialValue: initialHistoryFilter)
+        _selection = State(
+            initialValue: unresolvedOverviewSelection(
+                context: initialContext,
+                selectedCommitIDs: initialSelectedCommitIDs
+            )
+        )
         _requestedRestoredContext = State(
             initialValue: initialContext == .pending
                 ? nil
@@ -2461,7 +2467,10 @@ struct IntegratedReviewWorkspace: View {
             selection = restoredSelection
             requestedRestoredContext = nil
         } else {
-            selection = [.pending]
+            selection = unresolvedOverviewSelection(
+                context: state.context,
+                selectedCommitIDs: state.selectedCommitIDs
+            )
             requestedRestoredContext = state
         }
     }
@@ -2866,7 +2875,8 @@ struct IntegratedReviewWorkspace: View {
             hasMoreHistory = cachedPage.hasMore
             restoreLastContextIfPossible(
                 commits: cachedPage.commits,
-                hasMore: cachedPage.hasMore
+                hasMore: cachedPage.hasMore,
+                query: nil
             )
             completedHistoryKey = key
             return
@@ -2890,7 +2900,8 @@ struct IntegratedReviewWorkspace: View {
             hasMoreHistory = page.hasMore
             restoreLastContextIfPossible(
                 commits: page.commits,
-                hasMore: page.hasMore
+                hasMore: page.hasMore,
+                query: nil
             )
             completedHistoryKey = key
             await model.cacheHistoryPage(
@@ -2956,7 +2967,8 @@ struct IntegratedReviewWorkspace: View {
             hasMoreHistory = page.hasMore
             restoreLastContextIfPossible(
                 commits: combinedCommits,
-                hasMore: page.hasMore
+                hasMore: page.hasMore,
+                query: nil
             )
             await model.cacheHistoryPage(
                 GitHistoryPage(
@@ -2980,8 +2992,16 @@ struct IntegratedReviewWorkspace: View {
 
     private func restoreLastContextIfPossible(
         commits: [GitCommit],
-        hasMore: Bool
+        hasMore: Bool,
+        query: GitHistorySearchQuery?
     ) {
+        let expectedQuery = expectedHistoryRestorationQuery(
+            requestedRestoration: requestedRestoredContext,
+            activeQuery: historySearchQuery
+        )
+        guard expectedQuery == query else {
+            return
+        }
         guard let requested = requestedRestoredContext else {
             let availableIDs = Set(commits.map(\.id))
             if !selectedCommitIDSet.isSubset(of: availableIDs), !hasMore {
@@ -3151,7 +3171,8 @@ struct IntegratedReviewWorkspace: View {
             isSearchingHistory = false
             restoreLastContextIfPossible(
                 commits: cachedPage.commits,
-                hasMore: cachedPage.hasMore
+                hasMore: cachedPage.hasMore,
+                query: key.query
             )
             completedHistorySearchKey = key
             return
@@ -3188,7 +3209,8 @@ struct IntegratedReviewWorkspace: View {
             historySearchPageCache.insert(page, for: key)
             restoreLastContextIfPossible(
                 commits: page.commits,
-                hasMore: page.hasMore
+                hasMore: page.hasMore,
+                query: key.query
             )
             completedHistorySearchKey = key
         } catch is CancellationError {
@@ -3249,7 +3271,8 @@ struct IntegratedReviewWorkspace: View {
             )
             restoreLastContextIfPossible(
                 commits: searchedCommits,
-                hasMore: page.hasMore
+                hasMore: page.hasMore,
+                query: key.query
             )
         } catch is CancellationError {
             return
@@ -4198,6 +4221,37 @@ func normalizedOverviewSelection(
         return [.pending]
     }
     return current.subtracting([.pending])
+}
+
+func unresolvedOverviewSelection(
+    context: ReviewContext,
+    selectedCommitIDs: Set<GitCommit.ID>
+) -> Set<IntegratedOverviewSelection> {
+    if context == .pending {
+        return [.pending]
+    }
+    var commitIDs = selectedCommitIDs
+    if commitIDs.isEmpty {
+        switch context {
+        case .pending:
+            break
+        case let .commit(commitID):
+            commitIDs = [commitID]
+        case let .range(_, head):
+            commitIDs = [head]
+        }
+    }
+    return Set(commitIDs.map(IntegratedOverviewSelection.commit))
+}
+
+func expectedHistoryRestorationQuery(
+    requestedRestoration: ReviewNavigationState?,
+    activeQuery: GitHistorySearchQuery?
+) -> GitHistorySearchQuery? {
+    guard let requestedRestoration else {
+        return activeQuery
+    }
+    return GitHistorySearchQuery(requestedRestoration.historyFilter)
 }
 
 func normalizedCommitEndpointSelection(

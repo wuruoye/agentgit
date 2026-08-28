@@ -79,6 +79,57 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
     }
 
+    func testUnresolvedRestorationNeverHighlightsPendingForCommitReview() {
+        XCTAssertEqual(
+            unresolvedOverviewSelection(
+                context: .pending,
+                selectedCommitIDs: []
+            ),
+            [.pending]
+        )
+        XCTAssertEqual(
+            unresolvedOverviewSelection(
+                context: .commit("commit"),
+                selectedCommitIDs: []
+            ),
+            [.commit("commit")]
+        )
+        XCTAssertEqual(
+            unresolvedOverviewSelection(
+                context: .range(base: "base", head: "head"),
+                selectedCommitIDs: ["head", "oldest"]
+            ),
+            [.commit("head"), .commit("oldest")]
+        )
+    }
+
+    func testHistoryRestorationOnlyAcceptsTheSavedSearchSource() throws {
+        let requestedQuery = try XCTUnwrap(GitHistorySearchQuery("fix(Ultron)"))
+        let otherQuery = try XCTUnwrap(GitHistorySearchQuery("author:someone"))
+        let requested = ReviewNavigationState(
+            context: .commit("commit"),
+            selectedCommitIDs: ["commit"],
+            pane: .commits,
+            historyFilter: "fix(Ultron)"
+        )
+
+        XCTAssertEqual(
+            expectedHistoryRestorationQuery(
+                requestedRestoration: requested,
+                activeQuery: otherQuery
+            ),
+            requestedQuery
+        )
+        XCTAssertEqual(
+            expectedHistoryRestorationQuery(
+                requestedRestoration: nil,
+                activeQuery: otherQuery
+            ),
+            otherQuery
+        )
+        XCTAssertNotEqual(requestedQuery, otherQuery)
+    }
+
     func testCommitRangeSelectionKeepsOnlyVisibleEndpoints() {
         let firstOID = String(repeating: "a", count: 40)
         let secondOID = String(repeating: "b", count: 40)
