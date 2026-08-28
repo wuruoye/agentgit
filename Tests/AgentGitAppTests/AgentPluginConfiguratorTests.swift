@@ -73,7 +73,7 @@ final class AgentPluginConfiguratorTests: XCTestCase {
               "installed": [
                 {
                   "pluginId": "agentgit@personal",
-                  "version": "0.1.0+codex.20260828051207",
+                  "version": "0.1.0+codex.fixture",
                   "installed": true,
                   "enabled": true
                 }
@@ -93,7 +93,7 @@ final class AgentPluginConfiguratorTests: XCTestCase {
             [
                 AgentInstalledPlugin(
                     pluginID: "agentgit@personal",
-                    version: "0.1.0+codex.20260828051207",
+                    version: "0.1.0+codex.fixture",
                     installed: true,
                     enabled: true
                 )
@@ -107,7 +107,7 @@ final class AgentPluginConfiguratorTests: XCTestCase {
             [
               {
                 "id": "agentgit@agentgit",
-                "version": "0.1.0+codex.20260828051207",
+                "version": "0.1.0+codex.fixture",
                 "scope": "user",
                 "enabled": false,
                 "installPath": "/Users/example/.claude/plugins/cache/agentgit/agentgit/version"
@@ -122,20 +122,66 @@ final class AgentPluginConfiguratorTests: XCTestCase {
         )
 
         XCTAssertEqual(plugins.first?.pluginID, "agentgit@agentgit")
-        XCTAssertEqual(plugins.first?.version, "0.1.0+codex.20260828051207")
+        XCTAssertEqual(plugins.first?.version, "0.1.0+codex.fixture")
         XCTAssertEqual(plugins.first?.installed, true)
         XCTAssertEqual(plugins.first?.enabled, false)
     }
 
-    func testPluginDescriptorDeclaresHookSkillAndSessionNavigation() {
+    func testPluginDescriptorDeclaresSkillAndSessionNavigation() {
         for provider in AgentProvider.allCases {
             let plugin = AgentIntegrationPlugin.plugin(for: provider)
 
             XCTAssertEqual(plugin.provider, provider)
-            XCTAssertEqual(plugin.version, "0.1.0+codex.20260828051207")
             XCTAssertEqual(
                 Set(plugin.capabilities),
-                [.hooks, .skill, .sessionNavigation]
+                [.skill, .sessionNavigation]
+            )
+            XCTAssertTrue(plugin.manifestRelativePath.hasSuffix("plugin.json"))
+        }
+    }
+
+    func testMarketplaceInstallerReadsBundledManifestVersions() throws {
+        let rootURL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        ).appendingPathComponent(
+            ".build/test-repositories/plugin-version-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let resourceURL = rootURL.appendingPathComponent("Resources", isDirectory: true)
+        let versions: [AgentProvider: String] = [
+            .codex: "1.2.3+codex.current",
+            .claude: "1.2.3+codex.current"
+        ]
+        for provider in AgentProvider.allCases {
+            let plugin = AgentIntegrationPlugin.plugin(for: provider)
+            let manifestURL = resourceURL
+                .appendingPathComponent("AgentIntegrations", isDirectory: true)
+                .appendingPathComponent(plugin.marketplaceResourceName, isDirectory: true)
+                .appendingPathComponent(plugin.manifestRelativePath)
+            try FileManager.default.createDirectory(
+                at: manifestURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONSerialization.data(withJSONObject: [
+                "name": "agentgit",
+                "version": try XCTUnwrap(versions[provider])
+            ])
+            try data.write(to: manifestURL)
+        }
+        let installer = AgentIntegrationMarketplaceInstaller(
+            bundleResourceURL: resourceURL,
+            applicationSupportURL: rootURL.appendingPathComponent(
+                "Application Support/AgentGit",
+                isDirectory: true
+            )
+        )
+
+        for provider in AgentProvider.allCases {
+            XCTAssertEqual(
+                try installer.bundledVersion(.plugin(for: provider)),
+                versions[provider]
             )
         }
     }

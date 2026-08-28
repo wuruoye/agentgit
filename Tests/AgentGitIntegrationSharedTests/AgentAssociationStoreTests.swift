@@ -47,7 +47,7 @@ final class AgentAssociationStoreTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
-    func testConcurrentStoreInstancesPreserveEverySession() throws {
+    func testConcurrentStoreInstancesPreserveThreeMostRecentSessions() throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -78,12 +78,98 @@ final class AgentAssociationStoreTests: XCTestCase {
 
         XCTAssertTrue(errors.values.isEmpty, errors.values.joined(separator: "\n"))
         let associations = try AgentAssociationStore(storeURL: storeURL).list()
-        XCTAssertEqual(associations.count, 48)
-        XCTAssertEqual(Set(associations.map(\.id)).count, 48)
+        XCTAssertEqual(associations.count, 3)
+        XCTAssertEqual(
+            associations.map(\.sessionID),
+            ["session-47", "session-46", "session-45"]
+        )
         let lockAttributes = try FileManager.default.attributesOfItem(
             atPath: storeURL.appendingPathExtension("lock").path
         )
         XCTAssertEqual((lockAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testFourthSessionEvictsLeastRecentlyUsedAssociation() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-lru-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: container) }
+        let store = AgentAssociationStore(
+            storeURL: container.appendingPathComponent("associations.json")
+        )
+        let worktreePath = "/worktrees/lru"
+        for index in 1...3 {
+            _ = try store.upsert(
+                AgentAssociation(
+                    provider: index.isMultiple(of: 2) ? .claude : .codex,
+                    sessionID: "session-\(index)",
+                    worktreePath: worktreePath,
+                    title: "Task \(index)",
+                    updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+                )
+            )
+        }
+        _ = try store.upsert(
+            AgentAssociation(
+                provider: .codex,
+                sessionID: "session-1",
+                worktreePath: worktreePath,
+                title: "",
+                updatedAt: Date(timeIntervalSince1970: 4)
+            )
+        )
+        _ = try store.upsert(
+            AgentAssociation(
+                provider: .claude,
+                sessionID: "session-4",
+                worktreePath: worktreePath,
+                title: "Task 4",
+                updatedAt: Date(timeIntervalSince1970: 5)
+            )
+        )
+
+        let associations = try store.list()
+        XCTAssertEqual(
+            associations.map(\.sessionID),
+            ["session-4", "session-1", "session-3"]
+        )
+        XCTAssertEqual(
+            associations.first { $0.sessionID == "session-1" }?.title,
+            "Task 1"
+        )
+        XCTAssertFalse(associations.contains { $0.sessionID == "session-2" })
+    }
+
+    func testListMigratesExistingStoreToThreeSessionsPerWorktree() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-limit-migration-\(UUID().uuidString)")
+        let storeURL = container.appendingPathComponent("associations.json")
+        defer { try? FileManager.default.removeItem(at: container) }
+        try FileManager.default.createDirectory(
+            at: container,
+            withIntermediateDirectories: true
+        )
+        let associations = (1...4).map { index in
+            AgentAssociation(
+                provider: index.isMultiple(of: 2) ? .claude : .codex,
+                sessionID: "session-\(index)",
+                worktreePath: "/worktrees/migration",
+                title: "Task \(index)",
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(associations).write(to: storeURL)
+        let store = AgentAssociationStore(storeURL: storeURL)
+
+        XCTAssertEqual(
+            try store.list().map(\.sessionID),
+            ["session-4", "session-3", "session-2"]
+        )
+        XCTAssertEqual(
+            try store.list().map(\.sessionID),
+            ["session-4", "session-3", "session-2"]
+        )
     }
 
     func testRegistrationAuditStoresRecentEventsWithPrivatePermissions() throws {
@@ -119,6 +205,59 @@ final class AgentAssociationStoreTests: XCTestCase {
         XCTAssertEqual(events.first?.outcome, .rejected)
         let attributes = try FileManager.default.attributesOfItem(atPath: storeURL.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testRegistrationAuditDropsUnsupportedLegacyEventsOnRead() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-audit-migration-\(UUID().uuidString)")
+        let storeURL = container.appendingPathComponent("registration-events.json")
+        defer { try? FileManager.default.removeItem(at: container) }
+        try FileManager.default.createDirectory(
+            at: container,
+            withIntermediateDirectories: true
+        )
+        let validEvent = AgentRegistrationEvent(
+            id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+            provider: .codex,
+            action: .register,
+            outcome: .succeeded,
+            sessionID: "current-session",
+            worktreePath: "/worktrees/current",
+            message: "Current registration",
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let validObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: encoder.encode(validEvent)
+            ) as? [String: Any]
+        )
+        let unsupportedObject: [String: Any] = [
+            "id": "22222222-2222-4222-8222-222222222222",
+            "provider": "codex",
+            "action": "unsupported",
+            "outcome": "unsupported",
+            "sessionID": "old-session",
+            "worktreePath": "/worktrees/old",
+            "message": "Unsupported event",
+            "createdAt": "1970-01-01T00:00:50Z"
+        ]
+        try JSONSerialization.data(
+            withJSONObject: [unsupportedObject, validObject]
+        ).write(to: storeURL)
+        let store = AgentRegistrationAuditStore(storeURL: storeURL)
+
+        let events = try store.list()
+
+        XCTAssertEqual(events, [validEvent])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let migrated = try decoder.decode(
+            [AgentRegistrationEvent].self,
+            from: Data(contentsOf: storeURL)
+        )
+        XCTAssertEqual(migrated, [validEvent])
     }
 
     func testRecoversCorruptAssociationStoreWithPrivateBackup() throws {

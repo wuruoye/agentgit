@@ -2,16 +2,15 @@ import AgentGitIntegrationShared
 import Foundation
 
 enum AgentIntegrationCapability: String, CaseIterable, Hashable, Sendable {
-    case hooks = "Hooks"
     case skill = "Registration Skill"
     case sessionNavigation = "Session Jump"
 }
 
 struct AgentIntegrationPlugin: Identifiable, Hashable, Sendable {
     let provider: AgentProvider
-    let version: String
     let marketplaceResourceName: String
     let marketplaceName: String
+    let manifestRelativePath: String
     let capabilities: [AgentIntegrationCapability]
 
     var id: AgentProvider {
@@ -27,18 +26,18 @@ struct AgentIntegrationPlugin: Identifiable, Hashable, Sendable {
         case .codex:
             AgentIntegrationPlugin(
                 provider: provider,
-                version: "0.1.0+codex.20260828051207",
                 marketplaceResourceName: "CodexMarketplace",
                 marketplaceName: "personal",
-                capabilities: [.hooks, .skill, .sessionNavigation]
+                manifestRelativePath: "plugins/agentgit/.codex-plugin/plugin.json",
+                capabilities: [.skill, .sessionNavigation]
             )
         case .claude:
             AgentIntegrationPlugin(
                 provider: provider,
-                version: "0.1.0+codex.20260828051207",
                 marketplaceResourceName: "ClaudeMarketplace",
                 marketplaceName: "agentgit",
-                capabilities: [.hooks, .skill, .sessionNavigation]
+                manifestRelativePath: "plugins/agentgit/.claude-plugin/plugin.json",
+                capabilities: [.skill, .sessionNavigation]
             )
         }
     }
@@ -105,11 +104,17 @@ struct AgentPluginListDocument: Decodable {
 
 enum AgentIntegrationMarketplaceError: LocalizedError {
     case bundledMarketplaceMissing(String)
+    case bundledManifestMissing(String)
+    case bundledManifestInvalid(String)
 
     var errorDescription: String? {
         switch self {
         case let .bundledMarketplaceMissing(name):
             "The bundled \(name) integration marketplace is missing."
+        case let .bundledManifestMissing(name):
+            "The bundled \(name) integration manifest is missing."
+        case let .bundledManifestInvalid(name):
+            "The bundled \(name) integration manifest is invalid."
         }
     }
 }
@@ -127,21 +132,7 @@ struct AgentIntegrationMarketplaceInstaller: Sendable {
     }
 
     func materialize(_ plugin: AgentIntegrationPlugin) throws -> URL {
-        let sourceURL = bundleResourceURL
-            .appendingPathComponent("AgentIntegrations", isDirectory: true)
-            .appendingPathComponent(
-                plugin.marketplaceResourceName,
-                isDirectory: true
-            )
-        var sourceIsDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(
-            atPath: sourceURL.path,
-            isDirectory: &sourceIsDirectory
-        ), sourceIsDirectory.boolValue else {
-            throw AgentIntegrationMarketplaceError.bundledMarketplaceMissing(
-                plugin.provider.displayName
-            )
-        }
+        let sourceURL = try marketplaceSourceURL(plugin)
         let integrationsURL = applicationSupportURL.appendingPathComponent(
             "AgentIntegrations",
             isDirectory: true
@@ -178,4 +169,48 @@ struct AgentIntegrationMarketplaceInstaller: Sendable {
             throw error
         }
     }
+
+    func bundledVersion(_ plugin: AgentIntegrationPlugin) throws -> String {
+        let manifestURL = try marketplaceSourceURL(plugin)
+            .appendingPathComponent(plugin.manifestRelativePath)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            throw AgentIntegrationMarketplaceError.bundledManifestMissing(
+                plugin.provider.displayName
+            )
+        }
+        guard let document = try? JSONDecoder().decode(
+            AgentIntegrationPluginManifest.self,
+            from: Data(contentsOf: manifestURL)
+        ), !document.version.isEmpty else {
+            throw AgentIntegrationMarketplaceError.bundledManifestInvalid(
+                plugin.provider.displayName
+            )
+        }
+        return document.version
+    }
+
+    private func marketplaceSourceURL(
+        _ plugin: AgentIntegrationPlugin
+    ) throws -> URL {
+        let sourceURL = bundleResourceURL
+            .appendingPathComponent("AgentIntegrations", isDirectory: true)
+            .appendingPathComponent(
+                plugin.marketplaceResourceName,
+                isDirectory: true
+            )
+        var sourceIsDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: sourceURL.path,
+            isDirectory: &sourceIsDirectory
+        ), sourceIsDirectory.boolValue else {
+            throw AgentIntegrationMarketplaceError.bundledMarketplaceMissing(
+                plugin.provider.displayName
+            )
+        }
+        return sourceURL
+    }
+}
+
+private struct AgentIntegrationPluginManifest: Decodable {
+    let version: String
 }

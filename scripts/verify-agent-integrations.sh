@@ -106,100 +106,83 @@ CLAUDE_CACHE="$(claude plugin list --json \
         '.[] | select((.pluginId // .id) == $id) | .installPath')"
 
 for plugin_root in "${CODEX_CACHE}" "${CLAUDE_CACHE}"; do
-    test -x "${plugin_root}/bin/AgentGitHookBridge"
+    test -x "${plugin_root}/bin/AgentGitSkillBridge"
     test -x "${plugin_root}/scripts/register.sh"
-    test -f "${plugin_root}/hooks/hooks.json"
+    test -x "${plugin_root}/scripts/status.sh"
     test -f "${plugin_root}/skills/agentgit-register/SKILL.md"
-    jq -e '
-        .hooks.PreToolUse[0].matcher == "Bash|Edit|Write|NotebookEdit"
-        and (.hooks.PreToolUse[0].hooks[0] | has("statusMessage") | not)
-    ' "${plugin_root}/hooks/hooks.json" >/dev/null
+    test ! -e "${plugin_root}/hooks"
+    if find "${plugin_root}" -type f ! -path '*/bin/*' -print0 \
+        | xargs -0 rg -i -l 'hook'; then
+        exit 1
+    fi
 done
 
-verify_hook_skill_flow() {
+verify_skill_flow() {
     local provider="$1"
     local plugin_root="$2"
-    local tool_name="$3"
-    local session_id="$4"
+    local session_id="$3"
     local repository
     local data_directory
-    local handoff_directory
-    local hook_input
-    local read_hook_input
-    local hook_error
-    local token
 
-    repository="$(mktemp -d "${VERIFICATION_ROOT}/${provider}-hook-repository.XXXXXX")"
-    data_directory="$(mktemp -d "${VERIFICATION_ROOT}/${provider}-hook-data.XXXXXX")"
-    handoff_directory="$(mktemp -d "${VERIFICATION_ROOT}/${provider}-hook-handoff.XXXXXX")"
+    repository="$(mktemp -d "${VERIFICATION_ROOT}/${provider}-skill-repository.XXXXXX")"
+    data_directory="$(mktemp -d "${VERIFICATION_ROOT}/${provider}-skill-data.XXXXXX")"
     /usr/bin/git -C "${repository}" init -b main >/dev/null
-    hook_input="$(jq -cn \
+
+    (
+        cd "${repository}"
+        AGENTGIT_DATA_DIRECTORY="${data_directory}" \
+            "${plugin_root}/scripts/status.sh" "${session_id}"
+    ) | jq -e \
+        --arg provider "${provider}" \
         --arg session "${session_id}" \
-        --arg cwd "${repository}" \
-        --arg tool "${tool_name}" \
-        '{session_id:$session,cwd:$cwd,hook_event_name:"PreToolUse",tool_name:$tool,tool_input:{command:"git add README.md"}}')"
-    read_hook_input="$(jq -cn \
+        --arg worktree "${repository}" \
+        '.provider == $provider
+            and .sessionID == $session
+            and .worktreePath == $worktree
+            and .state == "registrationRequired"'
+
+    (
+        cd "${repository}"
+        AGENTGIT_DATA_DIRECTORY="${data_directory}" \
+            "${plugin_root}/scripts/register.sh" \
+            "${session_id}" \
+            "Skill Verification" \
+            "Link the current session to the worktree."
+    ) | jq -e \
+        --arg provider "${provider}" \
         --arg session "${session_id}" \
-        --arg cwd "${repository}" \
-        --arg tool "${tool_name}" \
-        '{session_id:$session,cwd:$cwd,hook_event_name:"PreToolUse",tool_name:$tool,tool_input:{command:"git status --short"}}')"
-    hook_error="${VERIFICATION_ROOT}/${provider}-hook-block.txt"
+        --arg worktree "${repository}" \
+        '.provider == $provider
+            and .sessionID == $session
+            and .worktreePath == $worktree
+            and .state == "registered"'
 
-    AGENTGIT_DATA_DIRECTORY="${data_directory}" \
-        AGENTGIT_HANDOFF_DIRECTORY="${handoff_directory}" \
-        "${plugin_root}/bin/AgentGitHookBridge" \
-        guard --provider "${provider}" \
-        <<< "${read_hook_input}"
-    test -z "$(find "${data_directory}" -mindepth 1 -print -quit)"
+    (
+        cd "${repository}"
+        AGENTGIT_DATA_DIRECTORY="${data_directory}" \
+            "${plugin_root}/scripts/status.sh" "${session_id}"
+    ) | jq -e '.state == "registered" and .title == "Skill Verification"'
 
-    set +e
-    AGENTGIT_DATA_DIRECTORY="${data_directory}" \
-        AGENTGIT_HANDOFF_DIRECTORY="${handoff_directory}" \
-        "${plugin_root}/bin/AgentGitHookBridge" \
-        guard --provider "${provider}" \
-        <<< "${hook_input}" \
-        2> "${hook_error}"
-    hook_status=$?
-    set -e
-    test "${hook_status}" -eq 2
-    token="$(grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' "${hook_error}" | tail -n 1)"
-    test -n "${token}"
-
-    AGENTGIT_DATA_DIRECTORY="${data_directory}" \
-        AGENTGIT_HANDOFF_DIRECTORY="${handoff_directory}" \
-        "${plugin_root}/bin/AgentGitHookBridge" \
-        inspect --token "${token}" \
-        | jq -e --arg provider "${provider}" --arg worktree "${repository}" \
-            '.provider == $provider and .worktreePath == $worktree'
-
-    AGENTGIT_DATA_DIRECTORY="${data_directory}" \
-        AGENTGIT_HANDOFF_DIRECTORY="${handoff_directory}" \
-        "${plugin_root}/scripts/register.sh" \
-        "${token}" \
-        "Hook Skill Verification" \
-        "Register the session before the repository write." \
-        | jq -e --arg provider "${provider}" --arg worktree "${repository}" \
-            '.provider == $provider and .worktreePath == $worktree'
-
-    AGENTGIT_DATA_DIRECTORY="${data_directory}" \
-        AGENTGIT_HANDOFF_DIRECTORY="${handoff_directory}" \
-        "${plugin_root}/bin/AgentGitHookBridge" \
-        guard --provider "${provider}" \
-        <<< "${hook_input}"
     jq -e --arg provider "${provider}" --arg session "${session_id}" \
         'any(.[]; .provider == $provider and .sessionID == $session)' \
         "${data_directory}/associations.json"
+    jq -e --arg provider "${provider}" --arg session "${session_id}" \
+        'any(.[];
+            .provider == $provider
+            and .sessionID == $session
+            and .action == "register"
+            and .outcome == "succeeded")' \
+        "${data_directory}/registration-events.json"
+    test ! -e "${data_directory}/pending-write-intents"
 }
 
-verify_hook_skill_flow \
+verify_skill_flow \
     codex \
     "${CODEX_CACHE}" \
-    exec_command \
     "00000000-0000-4000-8000-000000000001"
-verify_hook_skill_flow \
+verify_skill_flow \
     claude \
     "${CLAUDE_CACHE}" \
-    Bash \
     "00000000-0000-4000-8000-000000000002"
 
 codex plugin list --json \

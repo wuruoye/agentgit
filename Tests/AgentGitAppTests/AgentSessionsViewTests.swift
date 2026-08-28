@@ -23,7 +23,7 @@ final class AgentSessionsViewTests: XCTestCase {
         )
     }
 
-    func testRendersProviderIconsAndCompactTitlesForThreeShortcuts() async throws {
+    func testRendersAtMostThreeProviderShortcuts() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -84,7 +84,9 @@ final class AgentSessionsViewTests: XCTestCase {
             lockedReason: nil,
             prunableReason: nil
         )
-        XCTAssertEqual(controller.associations(for: worktree).count, 4)
+        let storedAssociations = controller.associations(for: worktree)
+        XCTAssertEqual(storedAssociations.count, 3)
+        XCTAssertFalse(storedAssociations.contains { $0.title == titles[0] })
         let size = NSSize(width: 360, height: 52)
         let hostingView = NSHostingView(
             rootView: AgentSessionsButton(worktree: worktree)

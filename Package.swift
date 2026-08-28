@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "AgentGitCore", targets: ["AgentGitCore"]),
         .library(name: "AgentGitIntegrationShared", targets: ["AgentGitIntegrationShared"]),
         .executable(name: "AgentGitApp", targets: ["AgentGitApp"]),
-        .executable(name: "AgentGitHookBridge", targets: ["AgentGitHookBridge"])
+        .executable(name: "AgentGitSkillBridge", targets: ["AgentGitSkillBridge"])
     ],
     targets: [
         .target(name: "AgentGitCore"),
@@ -21,7 +21,7 @@ let package = Package(
             dependencies: ["AgentGitCore", "AgentGitIntegrationShared"]
         ),
         .executableTarget(
-            name: "AgentGitHookBridge",
+            name: "AgentGitSkillBridge",
             dependencies: ["AgentGitIntegrationShared"]
         ),
         .testTarget(

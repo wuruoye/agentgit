@@ -82,6 +82,7 @@ public enum AgentPersistenceStoreError: LocalizedError, CustomStringConvertible,
 }
 
 public final class AgentAssociationStore: @unchecked Sendable {
+    public static let maximumAssociationsPerWorktree = 3
     private static let processLock = NSLock()
 
     private let storeURL: URL
@@ -107,7 +108,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
     public func upsert(_ association: AgentAssociation) throws -> [AgentAssociation] {
         try validate(association)
         return try withLock {
-            var associations = try loadLocked()
+            var associations = Self.limitPerWorktree(try loadLocked())
             let retainedTitle = association.title.isEmpty
                 ? associations.first(where: { $0.id == association.id })?.title ?? ""
                 : association.title
@@ -120,7 +121,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
             )
             associations.removeAll { $0.id == association.id }
             associations.append(storedAssociation)
-            associations.sort(by: Self.compare)
+            associations = Self.limitPerWorktree(associations)
             try saveLocked(associations)
             postChangedNotification()
             return associations
@@ -132,7 +133,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
         sessionID: String
     ) throws -> [AgentAssociation] {
         try withLock {
-            var associations = try loadLocked()
+            var associations = Self.limitPerWorktree(try loadLocked())
             associations.removeAll {
                 $0.provider == provider && $0.sessionID == sessionID
             }
@@ -144,7 +145,12 @@ public final class AgentAssociationStore: @unchecked Sendable {
 
     public func list() throws -> [AgentAssociation] {
         try withLock {
-            try loadLocked()
+            let stored = try loadLocked()
+            let limited = Self.limitPerWorktree(stored)
+            if stored != limited {
+                try saveLocked(limited)
+            }
+            return limited
         }
     }
 
@@ -296,5 +302,19 @@ public final class AgentAssociationStore: @unchecked Sendable {
             return lhs.updatedAt > rhs.updatedAt
         }
         return lhs.id < rhs.id
+    }
+
+    private static func limitPerWorktree(
+        _ associations: [AgentAssociation]
+    ) -> [AgentAssociation] {
+        var retainedCounts: [String: Int] = [:]
+        return associations.sorted(by: compare).filter { association in
+            let count = retainedCounts[association.worktreePath, default: 0]
+            guard count < maximumAssociationsPerWorktree else {
+                return false
+            }
+            retainedCounts[association.worktreePath] = count + 1
+            return true
+        }
     }
 }

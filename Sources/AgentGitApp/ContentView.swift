@@ -1,5 +1,4 @@
 import AgentGitCore
-import AgentGitIntegrationShared
 import AppKit
 import SwiftUI
 
@@ -14,7 +13,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: worktreeSelection) {
+            List(selection: sidebarSelection) {
                 ForEach(filteredProjects) { projectState in
                     Section {
                         if !model.collapsedProjectIDs.contains(projectState.id)
@@ -29,6 +28,8 @@ struct ContentView: View {
                                 model.toggleProjectCollapsed(id: projectState.id)
                             }
                         )
+                            .tag(SidebarSelection.project(projectState.id))
+                            .selectionDisabled()
                             .frame(minHeight: 22)
                             .draggable(projectState.id) {
                                 Label(
@@ -263,13 +264,13 @@ struct ContentView: View {
         .padding(.vertical, 8)
     }
 
-    private var worktreeSelection: Binding<GitWorktreeSnapshot.ID?> {
+    private var sidebarSelection: Binding<SidebarSelection?> {
         Binding(
-            get: { model.selectedWorktreeID },
-            set: { requestedWorktreeID in
+            get: { model.selectedWorktreeID.map(SidebarSelection.worktree) },
+            set: { requestedSelection in
                 guard let worktreeID = acceptedSidebarWorktreeSelection(
                     current: model.selectedWorktreeID,
-                    requested: requestedWorktreeID
+                    requested: requestedSelection
                 ) else {
                     return
                 }
@@ -309,6 +310,7 @@ struct ContentView: View {
                 Text("Reading worktrees…")
                     .foregroundStyle(.secondary)
             }
+            .selectionDisabled()
         }
 
         if let errorMessage = state.errorMessage {
@@ -328,6 +330,7 @@ struct ContentView: View {
                     model.removeProject(id: state.id)
                 }
             )
+            .selectionDisabled()
         }
 
         if let snapshot = state.snapshot {
@@ -356,16 +359,8 @@ struct ContentView: View {
                 )
             }
             ForEach(presentation.visibleWorktrees) { worktree in
-                let agentAssociations = model.agentAssociations.associations(
-                    for: worktree.worktree
-                )
-                WorktreeRow(
-                    snapshot: worktree,
-                    agentAssociations: agentAssociations,
-                    openAgentSession: model.agentAssociations.open,
-                    navigationAvailability: model.agentAssociations.navigationAvailability
-                )
-                    .tag(worktree.id)
+                WorktreeRow(snapshot: worktree)
+                    .tag(SidebarSelection.worktree(worktree.id))
                     .contextMenu {
                         Button("Refresh Worktree") {
                             Task {
@@ -399,16 +394,6 @@ struct ContentView: View {
                                 copyToPasteboard(headOID)
                             }
                         }
-                        if !agentAssociations.isEmpty {
-                            Divider()
-                            Menu("Agent Sessions") {
-                                ForEach(agentAssociations) { association in
-                                    Button(agentAssociationTitle(association)) {
-                                        model.agentAssociations.open(association)
-                                    }
-                                }
-                            }
-                        }
                     }
             }
             if presentation.hiddenWorktreeCount > 0 {
@@ -428,16 +413,27 @@ struct ContentView: View {
                         projectsShowingAllWorktrees.insert(state.id)
                     }
                 }
+                .tag(SidebarSelection.worktreeDisclosure(state.id))
+                .selectionDisabled()
             }
         }
     }
 }
 
+enum SidebarSelection: Hashable {
+    case worktree(GitWorktreeSnapshot.ID)
+    case project(GitProject.ID)
+    case worktreeDisclosure(GitProject.ID)
+}
+
 func acceptedSidebarWorktreeSelection(
     current: GitWorktreeSnapshot.ID?,
-    requested: GitWorktreeSnapshot.ID?
+    requested: SidebarSelection?
 ) -> GitWorktreeSnapshot.ID? {
-    requested ?? current
+    guard case let .worktree(worktreeID) = requested else {
+        return current
+    }
+    return worktreeID
 }
 
 struct SidebarNoResultsView: View {
@@ -650,11 +646,6 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 
 struct WorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
-    let agentAssociations: [AgentAssociation]
-    let openAgentSession: (AgentAssociation) -> Void
-    let navigationAvailability: (
-        AgentAssociation
-    ) -> AgentSessionNavigationAvailability
 
     var body: some View {
         HStack(spacing: 10) {
@@ -673,31 +664,6 @@ struct WorktreeRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(.orange.opacity(0.16), in: Capsule())
-                    }
-
-                    ForEach(agentAssociations.prefix(3)) { association in
-                        AgentAssociationBadge(
-                            association: association,
-                            availability: navigationAvailability(association),
-                            action: { openAgentSession(association) }
-                        )
-                    }
-                    if agentAssociations.count > 3 {
-                        Menu {
-                            ForEach(agentAssociations.dropFirst(3)) { association in
-                                Button(agentAssociationTitle(association)) {
-                                    openAgentSession(association)
-                                }
-                            }
-                        } label: {
-                            Text("+\(agentAssociations.count - 3)")
-                                .font(.caption2.monospacedDigit().weight(.medium))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(.quaternary, in: Capsule())
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
                     }
 
                     Spacer(minLength: 4)
@@ -826,63 +792,4 @@ func branchTrackingDescription(_ branch: GitBranchStatus) -> String? {
     return descriptions.isEmpty
         ? nil
         : descriptions.joined(separator: " · ") + "."
-}
-
-private struct AgentAssociationBadge: View {
-    let association: AgentAssociation
-    let availability: AgentSessionNavigationAvailability
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: iconName)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(tintColor)
-                .frame(width: 16, height: 16)
-                .background(
-                    tintColor.opacity(0.11),
-                    in: RoundedRectangle(cornerRadius: 4)
-                )
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .accessibilityLabel("Open \(association.provider.rawValue) session")
-    }
-
-    private var iconName: String {
-        switch availability {
-        case .resolving:
-            "ellipsis"
-        case .available:
-            association.provider == .codex ? "terminal" : "sparkles"
-        case .unavailable:
-            "exclamationmark.triangle.fill"
-        }
-    }
-
-    private var tintColor: Color {
-        switch availability {
-        case .resolving: .secondary
-        case .available: .accentColor
-        case .unavailable: .orange
-        }
-    }
-
-    private var helpText: String {
-        switch availability {
-        case .resolving:
-            "\(agentAssociationTitle(association))\nChecking session availability…"
-        case .available:
-            agentAssociationTitle(association)
-        case let .unavailable(reason):
-            "\(agentAssociationTitle(association))\n\(reason)"
-        }
-    }
-}
-
-private func agentAssociationTitle(_ association: AgentAssociation) -> String {
-    let provider = association.provider.displayName
-    return association.title.isEmpty
-        ? "\(provider) · \(association.sessionID.prefix(8))"
-        : "\(provider) · \(association.title)"
 }

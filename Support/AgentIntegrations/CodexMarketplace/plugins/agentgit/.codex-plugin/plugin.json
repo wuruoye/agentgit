@@ -1,7 +1,7 @@
 {
   "name": "agentgit",
-  "version": "0.1.0+codex.20260828063214",
-  "description": "Register Codex sessions before they write to a Git worktree.",
+  "version": "0.1.0+codex.20260828074603",
+  "description": "Link Codex sessions to the Git worktrees they modify.",
   "author": {
     "name": "AgentGit"
   },
@@ -9,18 +9,16 @@
     "git",
     "worktree",
     "session",
-    "hooks",
     "skills"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "AgentGit",
-    "shortDescription": "Register Codex before repository writes",
-    "longDescription": "AgentGit blocks the first repository write in each worktree, invokes a registration skill to organize session details, and then lets the native AgentGit app show and reopen that session.",
+    "shortDescription": "Link Codex sessions to Git worktrees",
+    "longDescription": "The AgentGit skill links a Codex session to the worktree it is about to modify, so the native AgentGit app can show and reopen that session.",
     "developerName": "AgentGit",
     "category": "Productivity",
     "capabilities": [
-      "Pre-write Hook",
       "Registration Skill",
       "Session Linking"
     ],

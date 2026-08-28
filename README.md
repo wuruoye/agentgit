@@ -5,7 +5,7 @@
 AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它面向同时使用
 多个 worktree 的开发方式，把代码审阅体验和本地性能放在首位。
 
-Agent 会话关联通过可选的 Skill 与 Hook 插件完成，在 Git 客户端主路径上独立工作。
+Agent 会话关联通过可选的 AgentGit Skill 插件完成，Git 客户端主路径保持独立。
 
 ## 本地运行
 
@@ -73,8 +73,7 @@ Move Up / Move Down 菜单操作。侧栏、History、Files 和 Review 的筛选
 都在原位置提供 Clear Filter。筛选、折叠和列表重建不会清除当前 Review；已经移除的
 worktree ID 也不会覆盖当前有效选择。
 
-M1 不包含 Agent hook、commit、reset 或 worktree
-创建删除。Git 写操作支持 Working / Staged 中的 Stage、Unstage 和 Discard，
+M1 不包含 commit、reset 或 worktree 创建删除。Git 写操作支持 Working / Staged 中的 Stage、Unstage 和 Discard，
 粒度为文件、hunk 或选中行；当前分支另外提供 fast-forward-only Pull 与 Push。
 
 ## 最近活动时间
@@ -233,12 +232,12 @@ Reviewed 标记和 Whole File 切换保持可用。操作完成后保留当前 R
 
 ```text
 AgentGitCore       Git 命令、解析、领域模型、项目持久化
-AgentGitIntegrationShared  Agent 会话、Hook 意图与持久化
-AgentGitHookBridge  Hook 守卫、Skill 登记与本地通知命令
+AgentGitIntegrationShared  Agent 会话、Skill 登记与持久化
+AgentGitSkillBridge  Skill 状态检查、登记与本地通知命令
 AgentGitApp        SwiftUI App 外壳与 AppKit 高性能视图
 AgentGitCoreTests  porcelain / diff parser 与真实临时仓库测试
 AgentGitAppTests   AppKit Review 布局、交互与离屏快照测试
-AgentGitIntegrationSharedTests  Hook、Skill 与关联数据测试
+AgentGitIntegrationSharedTests  Skill 与关联数据测试
 ```
 
 Git 命令异步执行，进程等待不阻塞并发线程池；stdout / stderr 使用持续排空的内存 pipe，
@@ -322,8 +321,8 @@ upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与
 ## Agent 会话集成
 
 签名 App bundle 包含 Codex 与 Claude 两套 AgentGit 集成插件，以及
-`Contents/Helpers/AgentGitHookBridge`。Settings 的 Agents 页面可以独立启用、停用和更新
-每套插件。当前能力包含 `Hooks`、`Registration Skill` 与 `Session Jump`。
+`Contents/Helpers/AgentGitSkillBridge`。Settings 的 Agents 页面可以独立启用、停用和更新
+每套插件。当前能力包含 `Registration Skill` 与 `Session Jump`。
 
 启用插件时，App 把随包资源复制到
 `~/Library/Application Support/AgentGit/AgentIntegrations/`，再调用对应 Agent 的官方
@@ -331,38 +330,35 @@ upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与
 `agentgit@personal`，Claude 插件标识为 `agentgit@agentgit`。Codex 停用操作移除插件，
 Claude 停用操作保留插件并关闭加载；本地会话关联数据在两种情况下都会保留。
 
-两套插件都包含一个 `PreToolUse` Hook、`agentgit-register` Skill、登记脚本和签名后的本地
-Hook bridge：
+两套插件都包含 `agentgit-register` Skill、状态检查与登记脚本，以及签名后的本地
+Skill bridge：
 
 ```text
-<plugin>/hooks/hooks.json
 <plugin>/skills/agentgit-register/SKILL.md
+<plugin>/scripts/status.sh
 <plugin>/scripts/register.sh
-<plugin>/bin/AgentGitHookBridge
+<plugin>/bin/AgentGitSkillBridge
 ```
 
-Hook 只匹配 Bash、Edit、Write、NotebookEdit 与 patch 写入路径，不显示常驻检查提示。
-Hook bridge 从事件输入读取 provider、session ID、当前目录、工具名称与目标路径，并通过
-`.git` 定位 worktree。直接编辑工具视为明确写入；Shell 命令只识别 Git 状态修改、文件写入
-命令、原地格式化和显式内容重定向。`git status`、diff、log、搜索、测试、构建和其它只读
-命令静默放行。当前 session 尚未关联该 worktree 时，Hook 创建一个十五分钟有效的一次性
-token 并阻止本次写入，要求 Agent 调用 `agentgit-register` Skill。已经关联的写入与仓库外
-操作同样静默放行。任意脚本内部未暴露在命令文本中的文件写入不作为 PreToolUse 的推断输入。
+Skill 的 description 覆盖编辑、生成、删除、移动、格式化、Stage、Commit、Merge、Rebase
+等仓库写操作。Agent 在首次修改 worktree 前加载 Skill，并从宿主提供的当前任务元数据取得
+规范 session ID；宿主没有提供稳定身份时静默跳过，禁止根据目录、标题、历史文件或更新时间
+猜测会话。Skill 先调用 `scripts/status.sh`：已经关联时继续原任务，尚未关联时结合当前用户
+请求组织不含敏感内容的会话标题与操作摘要，再调用 `scripts/register.sh`。
 
-Skill 使用 token 读取待登记信息，结合当前用户任务组织不含敏感内容的会话标题与操作摘要，
-然后调用 `scripts/register.sh`。脚本把整理结果写入用户私有的临时 handoff 目录。Agent 随后
-使用原参数重试写操作，Hook 验证 token、session 与 worktree 后写入正式关联库、删除 token
-与 handoff 文件并放行。同一 session 在同一 worktree 只登记一次；切换 worktree 后重新执行
-该流程。Skill 自身的检查与登记命令带有专用标记，Hook 允许这些命令通过，避免递归阻止。
+所有触发范围、身份要求、静默条件、标题摘要规则和失败处理都保存在 `SKILL.md`。
+`AgentGitSkillBridge` 只执行确定性工作：验证 provider、session ID、标题和摘要，通过 `.git`
+定位真实 worktree，检查现有关联并写入关联与审计数据。它不分析 Agent 命令，也不参与每个
+tool call。登记操作幂等；同一 session 切换到另一个 worktree 后，新的登记会移动该关联。
 
-关联数据由 AgentGit 自己保存，同一个 worktree 可以关联多个会话；主 App 通过分布式通知
-即时更新，并在 worktree 标题栏显示最多三个会话按钮。点击按钮直接打开对应会话，悬停
-显示会话详情；其余会话通过 `+N` 按钮集中展示。Hook 请求、登记成功、登记被拒绝和移除结果
+关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。Skill 检查现有登记时更新
+最近使用时间；新增会话超过上限后淘汰最久未使用的关联。主 App 通过分布式
+通知即时更新，只在选中 worktree 的标题栏显示三个会话按钮，侧栏项目列表保持纯 Git 信息。
+点击按钮直接打开对应会话，悬停显示会话详情。登记成功、登记被拒绝和移除结果
 保存在 `~/Library/Application Support/AgentGit/registration-events.json`，最多保留最近
-200 条，文件权限为 `0600`。待登记 token 保存在同一目录下的
-`pending-write-intents/`，文件权限为 `0600`，目录权限为 `0700`。
+200 条，文件权限为 `0600`。旧格式的非登记事件在首次读取时自动丢弃并重写为当前格式。
 
-Hook bridge 可以通过绝对路径 `AGENTGIT_DATA_DIRECTORY` 使用隔离存储；正常 App 配置没有
+Skill bridge 可以通过绝对路径 `AGENTGIT_DATA_DIRECTORY` 使用隔离存储；正常 App 配置没有
 设置该变量，继续使用 Application Support。无效参数或相对数据目录会输出可读 stderr 并以
 普通失败码退出。
 Settings 同时显示本地关联数量。关联或审计 JSON 损坏时提供 `Repair Storage`：原文件以
@@ -373,13 +369,13 @@ Codex 会话使用规范 thread UUID 打开。Claude 的规范 session UUID 与 
 session ID 可能不同；主 App 在后台只读 Claude Desktop 的 JSON 会话索引，按精确
 `cliSessionId` 解析当前 Desktop session ID，不读取 transcript 正文。索引映射已经失效的
 关联显示为 Unavailable，并排到仍可打开的会话之后，用户可从右键菜单移除。
-重复 Hook 通知会保留未变化会话的跳转结果；只有新增会话显示解析中，侧栏 badge 不会在
+重复关联通知会保留未变化会话的跳转结果；只有新增会话显示解析中，侧栏 badge 不会在
 每次关联刷新时清空并重新排序。关联集合与已有结果一致时直接跳过 Claude Desktop 会话
 索引扫描；App 从后台恢复时重新验证一次。
 
 AgentGit 不扫描 transcript，也不启动额外后台服务。插件状态只在 Settings 的 Agents 页面
 打开时读取，每条 CLI 命令的时限为 15 秒。配置检查与写入按 provider 使用最新操作令牌；
-较早结果不会覆盖后续操作。多个 Hook bridge 进程通过独立锁文件串行执行关联数据的读取、
+较早结果不会覆盖后续操作。多个 Skill bridge 进程通过独立锁文件串行执行关联数据的读取、
 合并和原子写入，避免同时登记时丢失其它会话；数据文件与锁文件权限均为 `0600`。
 
 ## M1 验收

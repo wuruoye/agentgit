@@ -1,60 +1,15 @@
 import Darwin
 import Foundation
 
-public enum AgentRegistrationAction: String, Hashable, Sendable {
-    case hookRequested
+public enum AgentRegistrationAction: String, Codable, Hashable, Sendable {
     case register
     case unregister
 }
 
-extension AgentRegistrationAction: Codable {
-    public init(from decoder: Decoder) throws {
-        let value = try decoder.singleValueContainer().decode(String.self)
-        self = switch value {
-        case "serverStarted", Self.hookRequested.rawValue: .hookRequested
-        case Self.register.rawValue: .register
-        case Self.unregister.rawValue: .unregister
-        default:
-            throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
-                debugDescription: "Unknown registration action: \(value)"
-            )
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
-}
-
-public enum AgentRegistrationOutcome: String, Hashable, Sendable {
-    case requested
+public enum AgentRegistrationOutcome: String, Codable, Hashable, Sendable {
     case succeeded
     case rejected
     case failed
-}
-
-extension AgentRegistrationOutcome: Codable {
-    public init(from decoder: Decoder) throws {
-        let value = try decoder.singleValueContainer().decode(String.self)
-        self = switch value {
-        case "ready", Self.requested.rawValue: .requested
-        case Self.succeeded.rawValue: .succeeded
-        case Self.rejected.rawValue: .rejected
-        case Self.failed.rawValue: .failed
-        default:
-            throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
-                debugDescription: "Unknown registration outcome: \(value)"
-            )
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
 }
 
 public struct AgentRegistrationEvent: Codable, Hashable, Identifiable, Sendable {
@@ -117,7 +72,7 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
     @discardableResult
     public func record(_ event: AgentRegistrationEvent) throws -> [AgentRegistrationEvent] {
         try withLock {
-            var events = try loadLocked()
+            var events = try loadLocked().events
             events.removeAll { $0.id == event.id }
             events.append(event)
             events.sort(by: Self.compare)
@@ -137,7 +92,11 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
 
     public func list() throws -> [AgentRegistrationEvent] {
         try withLock {
-            try loadLocked()
+            let result = try loadLocked()
+            if result.discardedCount > 0 {
+                try saveLocked(result.events)
+            }
+            return result.events
         }
     }
 
@@ -173,16 +132,23 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
         return backupURL
     }
 
-    private func loadLocked() throws -> [AgentRegistrationEvent] {
+    private func loadLocked() throws -> RegistrationEventLoadResult {
         guard FileManager.default.fileExists(atPath: storeURL.path) else {
-            return []
+            return RegistrationEventLoadResult(events: [], discardedCount: 0)
         }
         let data = try Data(contentsOf: storeURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         do {
-            return try decoder.decode([AgentRegistrationEvent].self, from: data)
-                .sorted(by: Self.compare)
+            let decoded = try decoder.decode(
+                [LossyDecodable<AgentRegistrationEvent>].self,
+                from: data
+            )
+            let events = decoded.compactMap(\.value).sorted(by: Self.compare)
+            return RegistrationEventLoadResult(
+                events: events,
+                discardedCount: decoded.count - events.count
+            )
         } catch {
             throw AgentPersistenceStoreError.invalidRegistrationEvents
         }
@@ -274,5 +240,18 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
             return lhs.createdAt > rhs.createdAt
         }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+}
+
+private struct RegistrationEventLoadResult {
+    let events: [AgentRegistrationEvent]
+    let discardedCount: Int
+}
+
+private struct LossyDecodable<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
     }
 }

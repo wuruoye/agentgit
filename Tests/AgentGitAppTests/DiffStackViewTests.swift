@@ -110,6 +110,22 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertFalse(labels.contains("No working changes"))
     }
 
+    func testPendingReviewOmitsEmptyGroups() {
+        let working = makeGroup()
+        let staged = DiffStackGroup(
+            id: "staged",
+            title: "Staged",
+            emptyMessage: "No staged changes",
+            isExpanded: false,
+            files: []
+        )
+
+        XCTAssertEqual(
+            nonEmptyDiffStackGroups([working, staged]).map(\.id),
+            [working.id]
+        )
+    }
+
     func testImageDiffUsesEqualBeforeAndAfterPanes() async throws {
         let oldImageData = try XCTUnwrap(
             Data(

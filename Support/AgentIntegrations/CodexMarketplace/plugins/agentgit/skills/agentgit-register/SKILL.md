@@ -1,31 +1,39 @@
 ---
 name: agentgit-register
-description: Complete a registration requested by the AgentGit pre-write hook. Use only when that hook blocks a repository write and provides a registration token.
+description: Link the current Codex session to AgentGit before the first operation that changes files or Git state in a worktree. Use for edits, generated files, deletes, moves, formatting, staging, commits, merges, rebases, and similar repository writes. Stay silent outside Git repositories or when the session is already linked.
 ---
 
-# AgentGit Registration
+# AgentGit Session Link
 
-Use the exact token from the blocking Hook message. Never invent or reuse a token.
+Run this workflow once before the first repository-changing operation in the current worktree.
 
-1. Inspect the pending write intent:
+1. Resolve the current Codex session ID from explicit task or session metadata supplied by the host. Never infer it from the working directory, title, process environment, transcript files, or recent-session ordering. If the host does not expose a stable session ID, stop silently.
+
+2. Run the status script from the worktree that will be modified:
 
    ```bash
-   AGENTGIT_SKILL_CALL=1 "${PLUGIN_ROOT}/bin/AgentGitHookBridge" inspect --token "<token>"
+   "${PLUGIN_ROOT}/scripts/status.sh" "<current-session-id>"
    ```
 
-2. Read the returned provider, worktree, tool, and target. Combine those facts with the current user request to create:
+3. Read the returned `provider`, `sessionID`, `worktreePath`, and `state`.
+
+   - For `registered`, continue the requested repository operation without mentioning AgentGit.
+   - For `registrationRequired`, combine the current user request with the intended repository change to create:
 
    - a concise session title of at most 80 characters;
    - an operation summary of at most 200 characters describing the intended repository change.
 
-   Keep both values free of secrets and shell interpolation characters.
+   Keep both values free of secrets. Pass them as separate quoted arguments without evaluating their contents.
 
-3. Prepare the organized registration handoff:
+4. Register the current session:
 
    ```bash
-   AGENTGIT_SKILL_CALL=1 "${PLUGIN_ROOT}/scripts/register.sh" "<token>" "<session title>" "<operation summary>"
+   "${PLUGIN_ROOT}/scripts/register.sh" \
+     "<current-session-id>" \
+     "<session title>" \
+     "<operation summary>"
    ```
 
-4. Confirm that the script returned the same provider, session, and worktree. Retry the blocked tool call with its original input so the Hook can finalize the association and allow the write.
+5. Confirm that the result contains the same provider, session, and worktree with `state` equal to `registered`. Continue the requested repository operation.
 
-Stop and surface the script error when inspection or registration fails. The Hook will issue a fresh token when the user retries the repository write.
+Surface a registration script error once, then continue only when the user explicitly chooses to proceed without the AgentGit session link.

@@ -173,8 +173,8 @@ struct AgentGitSettingsView: View {
                     }
                 }
 
-                LabeledContent("Hook Runtime") {
-                    Text(hookBridgePath)
+                LabeledContent("Skill Runtime") {
+                    Text(skillBridgePath)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
@@ -182,8 +182,8 @@ struct AgentGitSettingsView: View {
 
                 Text(
                     "Each integration is installed through the agent's official plugin CLI and can "
-                        + "be enabled independently. A pre-write Hook requests the registration "
-                        + "Skill, which organizes session details and calls the local Hook bridge."
+                        + "be enabled independently. The registration Skill checks the current "
+                        + "worktree, organizes session details, and calls the local Skill runtime."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -292,9 +292,9 @@ struct AgentGitSettingsView: View {
         plugin.capabilities.map(\.rawValue).joined(separator: " · ")
     }
 
-    private var hookBridgePath: String {
+    private var skillBridgePath: String {
         Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/AgentGitHookBridge")
+            .appendingPathComponent("Contents/Helpers/AgentGitSkillBridge")
             .path
     }
 
@@ -302,8 +302,6 @@ struct AgentGitSettingsView: View {
         _ event: AgentRegistrationEvent
     ) -> String {
         switch (event.action, event.outcome) {
-        case (.hookRequested, .requested):
-            "Registration requested by Hook"
         case (.register, .succeeded):
             "Session registered"
         case (.register, .rejected):
@@ -316,8 +314,6 @@ struct AgentGitSettingsView: View {
             "Removal rejected"
         case (.unregister, .failed):
             "Removal failed"
-        default:
-            "Agent integration activity recorded"
         }
     }
 
@@ -325,7 +321,7 @@ struct AgentGitSettingsView: View {
         _ event: AgentRegistrationEvent
     ) -> Color {
         switch event.outcome {
-        case .requested, .succeeded: .secondary
+        case .succeeded: .secondary
         case .rejected: .orange
         case .failed: .red
         }

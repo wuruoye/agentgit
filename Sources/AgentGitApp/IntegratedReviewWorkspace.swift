@@ -1281,9 +1281,9 @@ struct IntegratedReviewWorkspace: View {
     // MARK: - Stack composition
 
     private var stackGroups: [DiffStackGroup] {
-        switch activeContext {
+        let groups = switch activeContext {
         case .pending:
-            return [
+            [
                 stackGroup(
                     id: "working",
                     title: "Working",
@@ -1298,7 +1298,7 @@ struct IntegratedReviewWorkspace: View {
                 )
             ]
         case .commit, .range:
-            return [
+            [
                 stackGroup(
                     id: "context",
                     title: "Files",
@@ -1307,6 +1307,7 @@ struct IntegratedReviewWorkspace: View {
                 )
             ]
         }
+        return nonEmptyDiffStackGroups(groups)
     }
 
     private func emptyMessage(_ empty: String, _ filteredAway: String) -> String {
@@ -3789,6 +3790,12 @@ struct IntegratedReviewWorkspace: View {
 
     /// git 的空树对象，用于把根提交也纳入 range 的 base。
     private static let emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+}
+
+func nonEmptyDiffStackGroups(
+    _ groups: [DiffStackGroup]
+) -> [DiffStackGroup] {
+    groups.filter { !$0.files.isEmpty }
 }
 
 // MARK: - Identity

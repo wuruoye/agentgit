@@ -105,6 +105,7 @@ final class AgentPluginConfigurator {
         statusByProvider[provider] = .configuring
         do {
             let plugin = AgentIntegrationPlugin.plugin(for: provider)
+            let bundledVersion = try marketplaceInstaller.bundledVersion(plugin)
             let executableURL = try Self.agentExecutableURL(provider)
             let marketplaceURL = try marketplaceInstaller.materialize(plugin)
             let availableBefore = try await Self.pluginList(
@@ -141,6 +142,7 @@ final class AgentPluginConfigurator {
                     current,
                     provider: provider,
                     plugin: plugin,
+                    bundledVersion: bundledVersion,
                     executableURL: executableURL
                 )
             } else {
@@ -159,7 +161,7 @@ final class AgentPluginConfigurator {
             guard installed.contains(where: {
                 $0.pluginID == plugin.pluginID
                     && $0.enabled
-                    && $0.version == plugin.version
+                    && $0.version == bundledVersion
             }) else {
                 throw AgentPluginConfigurationError.verificationFailed
             }
@@ -228,6 +230,7 @@ final class AgentPluginConfigurator {
         do {
             let executableURL = try Self.agentExecutableURL(provider)
             let plugin = AgentIntegrationPlugin.plugin(for: provider)
+            let bundledVersion = try marketplaceInstaller.bundledVersion(plugin)
             let installed = try await Self.pluginList(
                 executableURL: executableURL,
                 includesAvailable: false
@@ -235,7 +238,7 @@ final class AgentPluginConfigurator {
             if let detected = installed.first(where: {
                 $0.pluginID == plugin.pluginID
             }) {
-                if detected.version != plugin.version {
+                if detected.version != bundledVersion {
                     updateStatus(.needsUpdate, for: operation)
                 } else {
                     updateStatus(
@@ -375,9 +378,10 @@ final class AgentPluginConfigurator {
         _ installed: AgentInstalledPlugin,
         provider: AgentProvider,
         plugin: AgentIntegrationPlugin,
+        bundledVersion: String,
         executableURL: URL
     ) async throws {
-        if installed.version != plugin.version {
+        if installed.version != bundledVersion {
             if let arguments = pluginUpdateArguments(
                 provider: provider,
                 plugin: plugin

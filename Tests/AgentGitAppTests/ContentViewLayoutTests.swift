@@ -138,8 +138,16 @@ final class ContentViewLayoutTests: XCTestCase {
         )
     }
 
-    func testSidebarTransientEmptySelectionPreservesCurrentReview() {
+    func testSidebarOnlyWorktreeSelectionsChangeCurrentReview() {
         let current = "/worktrees/current"
+        XCTAssertNotEqual(
+            SidebarSelection.worktree(current),
+            SidebarSelection.project(current)
+        )
+        XCTAssertNotEqual(
+            SidebarSelection.worktree(current),
+            SidebarSelection.worktreeDisclosure(current)
+        )
         XCTAssertEqual(
             acceptedSidebarWorktreeSelection(
                 current: current,
@@ -150,9 +158,23 @@ final class ContentViewLayoutTests: XCTestCase {
         XCTAssertEqual(
             acceptedSidebarWorktreeSelection(
                 current: current,
-                requested: "/worktrees/next"
+                requested: .worktree("/worktrees/next")
             ),
             "/worktrees/next"
+        )
+        XCTAssertEqual(
+            acceptedSidebarWorktreeSelection(
+                current: current,
+                requested: .project(current)
+            ),
+            current
+        )
+        XCTAssertEqual(
+            acceptedSidebarWorktreeSelection(
+                current: current,
+                requested: .worktreeDisclosure(current)
+            ),
+            current
         )
         XCTAssertNil(
             acceptedSidebarWorktreeSelection(
@@ -589,12 +611,7 @@ final class ContentViewLayoutTests: XCTestCase {
             eventWatchURLs: current.eventWatchURLs
         )
         let hostingView = NSHostingView(
-            rootView: WorktreeRow(
-                snapshot: warning,
-                agentAssociations: [],
-                openAgentSession: { _ in },
-                navigationAvailability: { _ in .resolving }
-            )
+            rootView: WorktreeRow(snapshot: warning)
             .padding(.horizontal, 8)
         )
         hostingView.frame = NSRect(x: 0, y: 0, width: 280, height: 52)
