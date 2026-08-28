@@ -24,6 +24,19 @@ open .build/debug/AgentGit.app
 SHA-256 校验文件，产物位于 `.build/release/`。本地开发证书产物用于受信任设备安装；
 对外分发仍需 Developer ID Application 证书与 Apple notarization。
 
+公开分发前，先把 App Store Connect 凭据保存到 Keychain，再使用 Developer ID Application
+身份执行公证打包：
+
+```bash
+xcrun notarytool store-credentials agentgit-notary
+AGENTGIT_SIGNING_IDENTITY='Developer ID Application: Example (TEAMID)' \
+AGENTGIT_NOTARY_PROFILE='agentgit-notary' \
+scripts/package-app.sh --notarize
+```
+
+公证模式会等待 Apple 返回终态，把 ticket staple 到 `.app`，重新生成最终 zip 和 SHA-256，
+再验证解压后的签名、staple ticket 与 Gatekeeper。凭据只从 Keychain profile 读取。
+
 本地默认使用开发证书签名；需要改用其它证书时设置
 `AGENTGIT_SIGNING_IDENTITY`。
 

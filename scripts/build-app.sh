@@ -47,9 +47,12 @@ SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:-Apple Development: Example (TEAMI
 sign_target() {
     local target="$1"
     if [[ "${CONFIGURATION}" == "release" ]]; then
+        local -a signing_options=(--force --options runtime)
+        if [[ "${SIGNING_IDENTITY}" == "Developer ID Application:"* ]]; then
+            signing_options+=(--timestamp)
+        fi
         /usr/bin/codesign \
-            --force \
-            --options runtime \
+            "${signing_options[@]}" \
             --sign "${SIGNING_IDENTITY}" \
             "${target}"
     else
