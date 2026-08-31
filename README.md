@@ -15,6 +15,17 @@ scripts/build-app.sh debug
 open .build/debug/AgentGit.app
 ```
 
+日常使用时执行：
+
+```bash
+scripts/install-local.sh
+```
+
+脚本会构建签名 Release、结束旧的 AgentGit Debug / Release 进程、原子更新
+`~/Applications/AgentGit.app`，验证安装后的签名，再通过 `open -g` 从后台启动。
+只安装、不启动时使用 `scripts/install-local.sh --no-launch`；需要其它安装目录时设置
+`AGENTGIT_INSTALL_DIR`。
+
 发布配置使用 `scripts/build-app.sh release`，产物位于
 `.build/release/AgentGit.app`。这两个构建都会产出完整的 macOS App bundle，
 包含版本、开发者工具分类、多尺寸 `.icns` 图标和代码签名。图标母版位于
