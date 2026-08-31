@@ -47,8 +47,9 @@
 
 - [x] Codex 与 Claude 集成采用独立的纯 Skill；插件版本更新、真实重装、LRU、签名与缓存清理
   完成，Git 客户端主路径不依赖 Agent 集成。
-- [ ] 使用可运行的 Claude Desktop 真实会话完成 worktree 登记、三项 LRU 替换、标题展示与会话
-  跳转闭环。
+- [x] 使用签名 Release 内的 Claude Skill 登记真实 Desktop 会话；回执中的 provider、session、
+  worktree 与标题一致，关联文件保持 `0600` 权限，并能解析精确 Desktop 会话映射。
+- [ ] 在已解锁的真实窗口复审 Claude 会话按钮标题、三项 LRU 替换和点击跳转闭环。
 - [x] 发布脚本支持 Developer ID timestamp、Keychain notarytool profile、终态等待、staple、最终
   zip 重建、SHA-256 和 Gatekeeper 验证。
 - [ ] 使用有效 Developer ID Application 证书和 App Store Connect 凭据完成一次真实 Apple
