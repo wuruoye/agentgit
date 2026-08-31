@@ -32,8 +32,11 @@
 - [x] 复审 Settings、错误条、空态、加载态和恢复操作的视觉层级与文案。
 - [x] 最小窗口支持 `980×600`；侧栏、导航与 Review 同时保持可见，文件操作不越界；Review
   分栏支持鼠标拖动和 VoiceOver 增减调节，并通过深色与高对比度渲染检查。
-- [ ] 复审主路径完整键盘操作与 VoiceOver 阅读顺序，补齐 Stage、Unstage、Discard 和 Review
-  导航的焦点反馈。
+- [x] 使用真实后台窗口复审 VoiceOver 阅读顺序；Pending Changes 文件依次暴露 File Actions、
+  Review、Stage、Unstage 或 Discard，确认操作与 Trash 恢复说明可读，Diff 表格、分隔栏和筛选
+  控件均提供稳定名称、值与帮助信息。
+- [ ] 在不抢占其它前台应用的前提下完成真实前台按键验收，覆盖 Stage、Unstage、Discard、
+  Review 文件与 hunk 导航的焦点反馈。
 - [x] 后台空闲 CPU 接近零；大型仓库状态刷新使用 Git 性能缓存和变更路径范围内的 diff
   统计，长历史和大 diff 保持可取消、可增量、无主线程卡顿。
 
