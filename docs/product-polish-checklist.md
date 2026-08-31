@@ -54,5 +54,17 @@
 - [x] 在已解锁的真实窗口复审 Claude 会话按钮标题和点击跳转闭环。
 - [x] 发布脚本支持 Developer ID timestamp、Keychain notarytool profile、终态等待、staple、最终
   zip 重建、SHA-256 和 Gatekeeper 验证。
+
+## 本机安装
+
+- [x] 使用 Apple Development 签名 Release 安装到 `~/Applications/AgentGit.app`，重复安装、
+  `--no-launch`、签名验证和 `open -g` 后台启动均通过真实执行复审。
+- [x] 本地安装后只保留一个 AgentGit 进程；LaunchServices 只登记用户 Applications 中的安装版，
+  Finder、Spotlight、`open -a AgentGit` 与 Computer Use 按名称解析均命中同一 App。
+
+## 公开分发（后续）
+
+以下项目不纳入当前本机自用完成标准：
+
 - [ ] 使用有效 Developer ID Application 证书和 App Store Connect 凭据完成一次真实 Apple
   notarization，并验证其它 Mac 上的首次启动。
