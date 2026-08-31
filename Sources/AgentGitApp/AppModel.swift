@@ -209,6 +209,9 @@ final class AppModel {
         let storedSelectedWorktreeID = defaults.string(
             forKey: Self.selectedWorktreeIDKey
         )
+        let storedSelectedProjectID = defaults.string(
+            forKey: Self.selectedWorktreeProjectIDKey
+        )
         let cachedWorktreeSelection = projects.lazy.compactMap { state in
             state.snapshot?.worktrees.first(where: {
                 $0.id == storedSelectedWorktreeID
@@ -219,13 +222,19 @@ final class AppModel {
                 (projectID: state.id, worktree: $0)
             }
         }.first
+        let awaitsIncompleteSelectedProject = storedSelectedWorktreeID != nil
+            && storedSelectedProjectID.map { projectID in
+                projects.contains(where: { $0.id == projectID })
+                    && !completeProjectSnapshotIDs.contains(projectID)
+            } == true
         let initialCachedSelection = cachedWorktreeSelection
-            ?? fallbackCachedWorktreeSelection
+            ?? (awaitsIncompleteSelectedProject ? nil : fallbackCachedWorktreeSelection)
         self.selectedWorktreeProjectID = initialCachedSelection?.projectID
-            ?? defaults.string(forKey: Self.selectedWorktreeProjectIDKey)
+            ?? storedSelectedProjectID
         self.selectedWorktreeID = initialCachedSelection?.worktree.id
             ?? storedSelectedWorktreeID
         if cachedWorktreeSelection == nil,
+           !awaitsIncompleteSelectedProject,
            let initialCachedSelection {
             defaults.set(
                 initialCachedSelection.worktree.id,
@@ -541,9 +550,7 @@ final class AppModel {
             )
             await completeProjectRefresh(request)
         }
-        if selectedWorktree == nil {
-            selectedWorktreeID = firstAvailableWorktreeID()
-        }
+        fallbackToAvailableWorktreeIfSelectionIsResolved()
         return changedProjectIDs
     }
 
@@ -729,9 +736,7 @@ final class AppModel {
             }
             startIndex = endIndex
         }
-        if selectedWorktree == nil {
-            selectedWorktreeID = firstAvailableWorktreeID()
-        }
+        fallbackToAvailableWorktreeIfSelectionIsResolved()
         persistSelectedWorktreeSelection()
         updateRepositoryMonitor()
     }
@@ -772,9 +777,7 @@ final class AppModel {
             }
             startIndex = endIndex
         }
-        if selectedWorktree == nil {
-            selectedWorktreeID = firstAvailableWorktreeID()
-        }
+        fallbackToAvailableWorktreeIfSelectionIsResolved()
         persistSelectedWorktreeSelection()
         let missingProjectIDs = Set(missingProjects.map(\.id))
         if !missingProjectIDs.isEmpty,
@@ -834,9 +837,7 @@ final class AppModel {
 
         let request = startProjectRefresh(project)
         await completeProjectRefresh(request)
-        if selectedWorktree == nil {
-            selectedWorktreeID = firstAvailableWorktreeID()
-        }
+        fallbackToAvailableWorktreeIfSelectionIsResolved()
         updateRepositoryMonitor()
     }
 
@@ -1887,6 +1888,24 @@ final class AppModel {
 
     private func firstAvailableWorktreeID() -> GitWorktreeSnapshot.ID? {
         projects.lazy.compactMap(\.snapshot).flatMap(\.worktrees).first?.id
+    }
+
+    private var awaitsSelectedWorktreeRecovery: Bool {
+        guard selectedWorktree == nil,
+              selectedWorktreeID != nil,
+              let selectedWorktreeProjectID,
+              projects.contains(where: { $0.id == selectedWorktreeProjectID }) else {
+            return false
+        }
+        return !completeProjectSnapshotIDs.contains(selectedWorktreeProjectID)
+    }
+
+    private func fallbackToAvailableWorktreeIfSelectionIsResolved() {
+        guard selectedWorktree == nil,
+              !awaitsSelectedWorktreeRecovery else {
+            return
+        }
+        selectedWorktreeID = firstAvailableWorktreeID()
     }
 
     private func persistProjects() {

@@ -377,6 +377,93 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(startupContent.pendingDiffsAreComplete)
     }
 
+    func testIncompleteSnapshotKeepsStoredSelectionUntilMissingProjectLoads() async throws {
+        let container = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        ).appendingPathComponent(
+            ".build/test-repositories/incomplete-selection-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let cachedRepository = container.appendingPathComponent(
+            "cached",
+            isDirectory: true
+        )
+        let selectedRepository = container.appendingPathComponent(
+            "selected",
+            isDirectory: true
+        )
+        let linkedWorktree = container.appendingPathComponent(
+            "selected-feature",
+            isDirectory: true
+        )
+        let snapshotCacheURL = container.appendingPathComponent(
+            "project-snapshots.json"
+        )
+        let runner = GitCommandRunner()
+        try await initializeRepository(at: cachedRepository, using: runner)
+        try await initializeRepository(at: selectedRepository, using: runner)
+        _ = try await runner.run(
+            arguments: [
+                "worktree",
+                "add",
+                "-b",
+                "selected-feature",
+                linkedWorktree.path,
+            ],
+            workingDirectory: selectedRepository
+        )
+        defer { try? FileManager.default.removeItem(at: container) }
+
+        let service = GitRepositoryService()
+        let cachedProject = try await service.loadProject(at: cachedRepository)
+        let selectedProjectID = selectedRepository.standardizedFileURL.path
+        let linkedWorktreeID = linkedWorktree.standardizedFileURL.path
+        let snapshotStore = ProjectSnapshotStore(fileURL: snapshotCacheURL)
+        try await snapshotStore.save(
+            projectIDs: [cachedProject.id, selectedProjectID],
+            snapshots: [cachedProject],
+            eventID: FSEventsGetCurrentEventId(),
+            completeProjectIDs: [cachedProject.id]
+        )
+
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            [cachedRepository.path, selectedRepository.path],
+            forKey: "agentgit.project-paths"
+        )
+        defaults.set(1, forKey: "agentgit.project-identity-version")
+        defaults.set(linkedWorktreeID, forKey: "agentgit.selected-worktree-id")
+        defaults.set(
+            selectedProjectID,
+            forKey: "agentgit.selected-worktree-project-id"
+        )
+
+        let model = AppModel(
+            defaults: defaults,
+            snapshotStore: ProjectSnapshotStore(fileURL: snapshotCacheURL)
+        )
+        defer { model.setApplicationActive(false) }
+
+        XCTAssertEqual(model.selectedWorktreeID, linkedWorktreeID)
+        XCTAssertNil(model.selectedWorktree)
+        XCTAssertEqual(
+            defaults.string(forKey: "agentgit.selected-worktree-id"),
+            linkedWorktreeID
+        )
+
+        await model.loadProjectsIfNeeded()
+
+        XCTAssertEqual(model.selectedWorktreeID, linkedWorktreeID)
+        XCTAssertEqual(model.selectedWorktree?.id, linkedWorktreeID)
+        XCTAssertEqual(
+            defaults.string(forKey: "agentgit.selected-worktree-id"),
+            linkedWorktreeID
+        )
+    }
+
     func testPendingRefreshForOneCachedWorktreeKeepsSiblingCacheAvailable() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,

@@ -11,7 +11,8 @@
 - [x] 新 Review 默认收起全部文件内容；点击文件后展开对应 diff；新增文件默认收起，已经存在
   的用户展开状态在刷新后保持。
 - [x] 前后台切换与后台启动保持当前 worktree、History 搜索 context、ReviewState 和缓存内容；
-  搜索恢复期间继续展示当前 Review，不回退到 Pending Changes。
+  搜索恢复期间继续展示当前 Review，不回退到 Pending Changes；当前项目快照缺失时保留待恢复的
+  worktree，项目真实加载完成后再解析选择。
 - [x] 使用真实大仓库复审长文件名、深目录、重复文件名、Working/Staged 同路径、Commit 与
   Commit Range；40,000 个文件的树构建保持低于一秒。
 - [x] 复审 unified / split；split 左右栏分别裁剪绘制，右栏不会覆盖旧代码；每个 hunk 独立
@@ -35,8 +36,10 @@
 - [x] 使用真实后台窗口复审 VoiceOver 阅读顺序；Pending Changes 文件依次暴露 File Actions、
   Review、Stage、Unstage 或 Discard，确认操作与 Trash 恢复说明可读，Diff 表格、分隔栏和筛选
   控件均提供稳定名称、值与帮助信息。
-- [ ] 在不抢占其它前台应用的前提下完成真实前台按键验收，覆盖 Stage、Unstage、Discard、
-  Review 文件与 hunk 导航的焦点反馈。
+- [x] 使用后台定向键盘复审提交选择、筛选焦点、Commits/Files 切换、前后导航、Review 文件
+  导航，以及多 hunk 的 `Tab` 与 `Shift-Tab` 正反向滚动；系统前台应用保持不变。
+- [ ] 使用真实前台 Files 导航 FocusState 复审 `Space` Stage/Unstage 与 `⇧⌘Delete` Discard
+  二次确认的焦点反馈。
 - [x] 后台空闲 CPU 接近零；大型仓库状态刷新使用 Git 性能缓存和变更路径范围内的 diff
   统计，长历史和大 diff 保持可取消、可增量、无主线程卡顿。
 
