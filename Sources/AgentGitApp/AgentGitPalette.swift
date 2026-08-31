@@ -6,12 +6,20 @@ enum AgentGitPalette {
     static let sidebarGroupHeader = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
         background: NSColor.windowBackgroundColor,
-        fraction: 0.34
+        fraction: 0.14
     )
-    static let sidebarSelection = NSColor.unemphasizedSelectedContentBackgroundColor
+    static let sidebarSelection = blended(
+        foreground: NSColor.controlAccentColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.11
+    )
     static let sidebarSelectionBorder = NSColor.controlAccentColor
     static let sidebarMetadata = NSColor.secondaryLabelColor
-    static let sidebarDirtyIndicator = NSColor.systemOrange
+    static let sidebarDirtyBadge = blended(
+        foreground: NSColor.systemOrange,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.13
+    )
     static let sidebarAdditionText = readableStatusColor(NSColor.systemGreen)
     static let sidebarDeletionText = readableStatusColor(NSColor.systemRed)
 
@@ -21,30 +29,34 @@ enum AgentGitPalette {
         fraction: 0.22
     )
     static let fileHeader = blended(
-        foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.42
-    )
-    static let fileHeaderFocused = NSColor.unemphasizedSelectedContentBackgroundColor
-    static let fileContext = blended(
         foreground: NSColor.controlAccentColor,
         background: NSColor.textBackgroundColor,
-        fraction: 0.055
+        fraction: 0.13
+    )
+    static let fileHeaderFocused = blended(
+        foreground: NSColor.controlAccentColor,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.19
+    )
+    static let fileContext = blended(
+        foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.12
     )
     static let hunkHeader = blended(
         foreground: NSColor.controlAccentColor,
         background: NSColor.textBackgroundColor,
-        fraction: 0.085
+        fraction: 0.07
     )
     static let codeGutter = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
         background: NSColor.textBackgroundColor,
-        fraction: 0.18
+        fraction: 0.13
     )
     static let codeFiller = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
         background: NSColor.textBackgroundColor,
-        fraction: 0.28
+        fraction: 0.2
     )
     static let separator = blended(
         foreground: NSColor.separatorColor,
@@ -55,12 +67,12 @@ enum AgentGitPalette {
     static let additionBackground = blended(
         foreground: NSColor.systemGreen,
         background: NSColor.textBackgroundColor,
-        fraction: 0.12
+        fraction: 0.095
     )
     static let deletionBackground = blended(
         foreground: NSColor.systemRed,
         background: NSColor.textBackgroundColor,
-        fraction: 0.11
+        fraction: 0.09
     )
     static let metadataBackground = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
@@ -70,12 +82,12 @@ enum AgentGitPalette {
     static let additionInline = blended(
         foreground: NSColor.systemGreen,
         background: NSColor.textBackgroundColor,
-        fraction: 0.28
+        fraction: 0.22
     )
     static let deletionInline = blended(
         foreground: NSColor.systemRed,
         background: NSColor.textBackgroundColor,
-        fraction: 0.26
+        fraction: 0.21
     )
     static let additionText = readableStatusColor(NSColor.systemGreen)
     static let deletionText = readableStatusColor(NSColor.systemRed)

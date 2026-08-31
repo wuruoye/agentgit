@@ -644,9 +644,6 @@ struct ProjectHeader: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 9)
-                Image(systemName: "folder.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
                 Text(projectState.project.displayName)
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.primary)
@@ -708,10 +705,6 @@ struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                .fill(statusIndicatorColor)
-                .frame(width: 3, height: 27)
-
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     if snapshot.errorMessage != nil {
@@ -728,6 +721,27 @@ struct WorktreeRow: View {
                         .foregroundStyle(primaryForeground)
                         .lineLimit(1)
                         .truncationMode(.middle)
+
+                    if snapshot.status.changedFileCount > 0 {
+                        Text("\(snapshot.status.changedFileCount)")
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(dirtyCountForeground)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(
+                                        Color(nsColor: AgentGitPalette.sidebarDirtyBadge)
+                                    )
+                            )
+                            .accessibilityLabel(
+                                countedLabel(
+                                    snapshot.status.changedFileCount,
+                                    singular: "changed file",
+                                    plural: "changed files"
+                                )
+                            )
+                    }
 
                     Spacer(minLength: 4)
 
@@ -746,17 +760,6 @@ struct WorktreeRow: View {
                     Text(snapshot.worktree.rootURL.lastPathComponent)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if snapshot.status.changedFileCount > 0 {
-                        metadataSeparator
-                        Text(
-                            countedLabel(
-                                snapshot.status.changedFileCount,
-                                singular: "file",
-                                plural: "files"
-                            )
-                        )
-                        .monospacedDigit()
-                    }
                     if let branch = snapshot.status.branch, !branch.isSynced {
                         let description = branchTrackingDescription(branch) ?? ""
                         metadataSeparator
@@ -785,8 +788,25 @@ struct WorktreeRow: View {
 
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 6)
         .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(
+                    isSelected
+                        ? Color(nsColor: AgentGitPalette.sidebarSelection)
+                        : Color.clear
+                )
+        )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
+                    .frame(width: 2, height: 28)
+                    .padding(.leading, 1)
+            }
+        }
         .help(worktreeRowHelpText(snapshot))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(worktreeAccessibilityLabel)
@@ -799,11 +819,17 @@ struct WorktreeRow: View {
     }
 
     private var primaryForeground: Color {
-        .primary
+        Color(nsColor: .labelColor)
     }
 
     private var secondaryForeground: Color {
-        .secondary
+        Color(nsColor: AgentGitPalette.sidebarMetadata)
+    }
+
+    private var dirtyCountForeground: Color {
+        isSelected
+            ? Color(nsColor: .labelColor)
+            : Color(nsColor: AgentGitPalette.statusModified)
     }
 
     private var additionForeground: Color {
@@ -816,20 +842,6 @@ struct WorktreeRow: View {
         isSelected
             ? .primary.opacity(0.82)
             : Color(nsColor: AgentGitPalette.sidebarDeletionText)
-    }
-
-    private var statusIndicatorColor: Color {
-        if snapshot.errorMessage != nil {
-            return snapshot.hasUsableState ? .orange : .red
-        }
-        if snapshot.status.changedFileCount > 0 || !snapshot.diffStat.isEmpty {
-            return isSelected
-                ? .primary.opacity(0.72)
-                : Color(nsColor: AgentGitPalette.sidebarDirtyIndicator)
-        }
-        return isSelected
-            ? .primary.opacity(0.28)
-            : Color(nsColor: AgentGitPalette.separator).opacity(0.55)
     }
 
     private var issueIconName: String {
