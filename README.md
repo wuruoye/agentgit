@@ -22,7 +22,8 @@ scripts/install-local.sh
 ```
 
 脚本会构建签名 Release、结束旧的 AgentGit Debug / Release 进程、原子更新
-`~/Applications/AgentGit.app`，验证安装后的签名，再通过 `open -g` 从后台启动。
+`~/Applications/AgentGit.app`，验证安装后的签名，清理构建副本的 LaunchServices 注册，
+再通过 `open -g` 从后台启动。
 只安装、不启动时使用 `scripts/install-local.sh --no-launch`；需要其它安装目录时设置
 `AGENTGIT_INSTALL_DIR`。
 

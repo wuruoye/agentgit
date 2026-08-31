@@ -5,8 +5,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_APP="${PROJECT_DIR}/.build/release/AgentGit.app"
+DEBUG_APP="${PROJECT_DIR}/.build/debug/AgentGit.app"
 INSTALL_DIR="${AGENTGIT_INSTALL_DIR:-${HOME}/Applications}"
 INSTALLED_APP="${INSTALL_DIR}/AgentGit.app"
+LAUNCH_SERVICES_REGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 LAUNCH_APP=true
 
 case "${1:-}" in
@@ -68,6 +70,15 @@ if ! /usr/bin/codesign --verify --deep --strict "${INSTALLED_APP}"; then
         /bin/mv "${PREVIOUS_APP}" "${INSTALLED_APP}"
     fi
     exit 1
+fi
+
+if [[ -x "${LAUNCH_SERVICES_REGISTER}" ]]; then
+    for build_app in "${DEBUG_APP}" "${SOURCE_APP}"; do
+        if [[ -e "${build_app}" ]]; then
+            "${LAUNCH_SERVICES_REGISTER}" -u "${build_app}" >/dev/null 2>&1 || true
+        fi
+    done
+    "${LAUNCH_SERVICES_REGISTER}" -f "${INSTALLED_APP}"
 fi
 
 if [[ "${LAUNCH_APP}" == true ]]; then
