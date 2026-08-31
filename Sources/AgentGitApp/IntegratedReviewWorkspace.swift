@@ -413,6 +413,12 @@ struct IntegratedReviewWorkspace: View {
                 requestFocusedFileDiscard: requestFocusedFileDiscard
             )
         )
+        .onChange(of: pane) { _, pane in
+            guard pane == .files else {
+                return
+            }
+            isFilesNavigatorFocused = true
+        }
     }
 
     private var workspaceSplitView: some View {
@@ -956,7 +962,15 @@ struct IntegratedReviewWorkspace: View {
             }
         }
         .listStyle(.sidebar)
+        .focusable()
         .focused($isFilesNavigatorFocused)
+        .onKeyPress(.space) {
+            guard navigatorDefaultActionTitle != nil else {
+                return .ignored
+            }
+            performNavigatorDefaultAction()
+            return .handled
+        }
     }
 
     @ViewBuilder
@@ -1026,6 +1040,9 @@ struct IntegratedReviewWorkspace: View {
             get: { navigatorSelection },
             set: { requestedSelection in
                 navigatorSelection = requestedSelection
+                if requestedSelection != nil {
+                    isFilesNavigatorFocused = true
+                }
                 switch requestedSelection {
                 case let .file(fileID):
                     focusFileFromNavigator(fileID)
@@ -1745,7 +1762,9 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var focusedFileDiscardCommand: PendingFilePrimaryCommand? {
-        guard allowsPendingMutations else {
+        guard isFilesNavigatorFocused,
+              pane == .files,
+              allowsPendingMutations else {
             return nil
         }
         return pendingFileDiscardCommand(

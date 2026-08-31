@@ -38,7 +38,7 @@
   控件均提供稳定名称、值与帮助信息。
 - [x] 使用后台定向键盘复审提交选择、筛选焦点、Commits/Files 切换、前后导航、Review 文件
   导航，以及多 hunk 的 `Tab` 与 `Shift-Tab` 正反向滚动；系统前台应用保持不变。
-- [ ] 使用真实前台 Files 导航 FocusState 复审 `Space` Stage/Unstage 与 `⇧⌘Delete` Discard
+- [x] 使用真实前台 Files 导航 FocusState 复审 `Space` Stage/Unstage 与 `⇧⌘Delete` Discard
   二次确认的焦点反馈。
 - [x] 后台空闲 CPU 接近零；大型仓库状态刷新使用 Git 性能缓存和变更路径范围内的 diff
   统计，长历史和大 diff 保持可取消、可增量、无主线程卡顿。
@@ -51,7 +51,7 @@
   worktree 与标题一致，关联文件保持 `0600` 权限，并能解析精确 Desktop 会话映射。
 - [x] 使用四个真实 Claude Desktop session ID 复审跨进程 LRU；同一秒内连续登记仍按小数秒
   保留最近三项，旧版无小数 ISO-8601 存储保持兼容。
-- [ ] 在已解锁的真实窗口复审 Claude 会话按钮标题和点击跳转闭环。
+- [x] 在已解锁的真实窗口复审 Claude 会话按钮标题和点击跳转闭环。
 - [x] 发布脚本支持 Developer ID timestamp、Keychain notarytool profile、终态等待、staple、最终
   zip 重建、SHA-256 和 Gatekeeper 验证。
 - [ ] 使用有效 Developer ID Application 证书和 App Store Connect 凭据完成一次真实 Apple
