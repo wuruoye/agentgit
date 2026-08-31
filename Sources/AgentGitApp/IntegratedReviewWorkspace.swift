@@ -455,7 +455,7 @@ struct IntegratedReviewWorkspace: View {
             .frame(width: 7)
             .overlay {
                 Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
+                    .fill(Color(nsColor: AgentGitPalette.separator))
                     .frame(width: 1)
             }
             .contentShape(Rectangle())
@@ -5416,14 +5416,14 @@ private struct ReviewPaneTabBar: View {
                 .frame(maxWidth: .infinity)
                 .background(
                     selection == pane
-                        ? Color(nsColor: .windowBackgroundColor)
+                        ? Color(nsColor: AgentGitPalette.selectedChrome)
                         : Color.clear
                 )
                 .accessibilityAddTraits(selection == pane ? .isSelected : [])
             }
         }
         .frame(height: 34)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: AgentGitPalette.chrome))
     }
 }
 
@@ -5504,11 +5504,11 @@ private struct ReviewDocumentTabBar: View {
             Spacer(minLength: 0)
         }
         .frame(height: 34)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: AgentGitPalette.chrome))
     }
 
     private func tabBackground(isSelected: Bool) -> Color {
-        isSelected ? Color(nsColor: .windowBackgroundColor) : Color.clear
+        isSelected ? Color(nsColor: AgentGitPalette.selectedChrome) : Color.clear
     }
 
 }
@@ -5549,7 +5549,7 @@ private struct IntegratedFilterField: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
         .background(
-            Color(nsColor: .textBackgroundColor).opacity(0.6),
+            Color(nsColor: AgentGitPalette.inputBackground),
             in: RoundedRectangle(cornerRadius: 6)
         )
     }

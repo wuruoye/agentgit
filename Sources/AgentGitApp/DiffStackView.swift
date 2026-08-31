@@ -2697,7 +2697,7 @@ private final class DiffFileCellView: NSTableCellView {
         wholeFileButton.isHidden = true
         wholeFileButton.isEnabled = !file.isLoadingWholeFile
         wholeFileButton.contentTintColor = file.showsWholeFile
-            ? .controlAccentColor
+            ? AgentGitPalette.activeControl
             : .tertiaryLabelColor
         wholeFileButton.toolTip = wholeFileTitle
         wholeFileButton.setAccessibilityLabel(wholeFileTitle)
@@ -3034,9 +3034,9 @@ private final class DiffImageCellView: NSTableCellView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.textBackgroundColor.setFill()
+        AgentGitPalette.canvas.setFill()
         dirtyRect.fill()
-        NSColor.separatorColor.setFill()
+        AgentGitPalette.separator.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -3072,7 +3072,7 @@ private final class DiffImageCellView: NSTableCellView {
 
 private final class DiffImageSeparatorView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.separatorColor.setFill()
+        AgentGitPalette.separator.setFill()
         dirtyRect.fill()
     }
 }
@@ -3163,9 +3163,9 @@ private final class DiffImagePaneView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlBackgroundColor.setFill()
+        AgentGitPalette.imagePanel.setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
-        NSColor.separatorColor.withAlphaComponent(0.7).setStroke()
+        AgentGitPalette.separator.withAlphaComponent(0.7).setStroke()
         let border = NSBezierPath(
             roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
             xRadius: 6,
@@ -3173,7 +3173,7 @@ private final class DiffImagePaneView: NSView {
         )
         border.lineWidth = 1
         border.stroke()
-        NSColor.separatorColor.withAlphaComponent(0.7).setFill()
+        AgentGitPalette.separator.withAlphaComponent(0.7).setFill()
         NSRect(x: 1, y: 37, width: max(0, bounds.width - 2), height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -3365,11 +3365,10 @@ private final class DiffImageCanvasView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.textBackgroundColor.setFill()
+        AgentGitPalette.canvas.setFill()
         dirtyRect.fill()
         let squareSize: CGFloat = 10
-        let alternateColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.08)
-        alternateColor.setFill()
+        AgentGitPalette.imageChecker.setFill()
         var y: CGFloat = 0
         var row = 0
         while y < bounds.height {
@@ -3856,7 +3855,7 @@ private final class DiffHunkCellView: NSTableCellView {
         )
         wholeFileButton.isEnabled = !hunk.isLoadingWholeFile
         wholeFileButton.contentTintColor = hunk.showsWholeFile
-            ? .controlAccentColor
+            ? AgentGitPalette.activeControl
             : .secondaryLabelColor
         wholeFileButton.toolTip = wholeFileTitle
         wholeFileButton.setAccessibilityLabel(wholeFileTitle)

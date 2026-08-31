@@ -2,6 +2,20 @@ import AppKit
 
 enum AgentGitPalette {
     static let canvas = NSColor.textBackgroundColor
+    static let chrome = NSColor.controlBackgroundColor
+    static let selectedChrome = NSColor.windowBackgroundColor
+    static let inputBackground = blended(
+        foreground: NSColor.textBackgroundColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.62
+    )
+    static let imagePanel = NSColor.controlBackgroundColor
+    static let imageChecker = blended(
+        foreground: NSColor.quaternaryLabelColor,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.08
+    )
+    static let activeControl = NSColor.labelColor
     static let sidebarBackground = NSColor.windowBackgroundColor
     static let sidebarGroupHeader = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,

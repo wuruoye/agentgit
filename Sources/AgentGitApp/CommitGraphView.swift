@@ -245,7 +245,10 @@ struct CommitGraphView: View {
                 height: radius * 2
             )
             if row.isMerge {
-                context.fill(Path(ellipseIn: nodeRect), with: .color(Color(nsColor: .textBackgroundColor)))
+                context.fill(
+                    Path(ellipseIn: nodeRect),
+                    with: .color(Color(nsColor: AgentGitPalette.canvas))
+                )
                 context.stroke(
                     Path(ellipseIn: nodeRect),
                     with: .color(Self.color(row.nodeColorIndex)),
