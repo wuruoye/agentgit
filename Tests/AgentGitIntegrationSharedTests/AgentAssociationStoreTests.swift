@@ -139,6 +139,36 @@ final class AgentAssociationStoreTests: XCTestCase {
         XCTAssertFalse(associations.contains { $0.sessionID == "session-2" })
     }
 
+    func testCrossProcessLRUKeepsFractionalTimestampOrder() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-fractional-lru-\(UUID().uuidString)")
+        let storeURL = container.appendingPathComponent("associations.json")
+        defer { try? FileManager.default.removeItem(at: container) }
+        let associations = [
+            ("a-oldest", 100.1),
+            ("z-second", 100.2),
+            ("y-third", 100.3),
+            ("x-newest", 100.4),
+        ]
+
+        for (sessionID, timestamp) in associations {
+            _ = try AgentAssociationStore(storeURL: storeURL).upsert(
+                AgentAssociation(
+                    provider: .claude,
+                    sessionID: sessionID,
+                    worktreePath: "/worktrees/fractional-lru",
+                    title: sessionID,
+                    updatedAt: Date(timeIntervalSince1970: timestamp)
+                )
+            )
+        }
+
+        XCTAssertEqual(
+            try AgentAssociationStore(storeURL: storeURL).list().map(\.sessionID),
+            ["x-newest", "y-third", "z-second"]
+        )
+    }
+
     func testListMigratesExistingStoreToThreeSessionsPerWorktree() throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-limit-migration-\(UUID().uuidString)")
@@ -207,6 +237,40 @@ final class AgentAssociationStoreTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
+    func testRegistrationAuditKeepsFractionalTimestampOrderAcrossStoreInstances() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-fractional-audit-\(UUID().uuidString)")
+        let storeURL = container.appendingPathComponent("registration-events.json")
+        defer { try? FileManager.default.removeItem(at: container) }
+        let events = [
+            ("00000000-0000-4000-8000-000000000001", "oldest", 100.1),
+            ("ffffffff-ffff-4fff-8fff-fffffffffff2", "second", 100.2),
+            ("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3", "third", 100.3),
+            ("dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "newest", 100.4),
+        ]
+
+        for (id, sessionID, timestamp) in events {
+            _ = try AgentRegistrationAuditStore(storeURL: storeURL).record(
+                AgentRegistrationEvent(
+                    id: try XCTUnwrap(UUID(uuidString: id)),
+                    provider: .claude,
+                    action: .register,
+                    outcome: .succeeded,
+                    sessionID: sessionID,
+                    worktreePath: "/worktrees/fractional-audit",
+                    message: sessionID,
+                    createdAt: Date(timeIntervalSince1970: timestamp)
+                )
+            )
+        }
+
+        XCTAssertEqual(
+            try AgentRegistrationAuditStore(storeURL: storeURL).list()
+                .compactMap(\.sessionID),
+            ["newest", "third", "second", "oldest"]
+        )
+    }
+
     func testRegistrationAuditDropsUnsupportedLegacyEventsOnRead() throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-audit-migration-\(UUID().uuidString)")
@@ -251,8 +315,7 @@ final class AgentAssociationStoreTests: XCTestCase {
         let events = try store.list()
 
         XCTAssertEqual(events, [validEvent])
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = makeAgentPersistenceJSONDecoder()
         let migrated = try decoder.decode(
             [AgentRegistrationEvent].self,
             from: Data(contentsOf: storeURL)

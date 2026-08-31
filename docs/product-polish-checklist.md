@@ -49,7 +49,9 @@
   完成，Git 客户端主路径不依赖 Agent 集成。
 - [x] 使用签名 Release 内的 Claude Skill 登记真实 Desktop 会话；回执中的 provider、session、
   worktree 与标题一致，关联文件保持 `0600` 权限，并能解析精确 Desktop 会话映射。
-- [ ] 在已解锁的真实窗口复审 Claude 会话按钮标题、三项 LRU 替换和点击跳转闭环。
+- [x] 使用四个真实 Claude Desktop session ID 复审跨进程 LRU；同一秒内连续登记仍按小数秒
+  保留最近三项，旧版无小数 ISO-8601 存储保持兼容。
+- [ ] 在已解锁的真实窗口复审 Claude 会话按钮标题和点击跳转闭环。
 - [x] 发布脚本支持 Developer ID timestamp、Keychain notarytool profile、终态等待、staple、最终
   zip 重建、SHA-256 和 Gatekeeper 验证。
 - [ ] 使用有效 Developer ID Application 证书和 App Store Connect 凭据完成一次真实 Apple

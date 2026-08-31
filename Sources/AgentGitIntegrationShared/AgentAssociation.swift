@@ -46,6 +46,39 @@ public enum AgentIntegrationContract {
     )
 }
 
+func makeAgentPersistenceJSONEncoder() -> JSONEncoder {
+    let format = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .custom { date, encoder in
+        var container = encoder.singleValueContainer()
+        try container.encode(date.formatted(format))
+    }
+    return encoder
+}
+
+func makeAgentPersistenceJSONDecoder() -> JSONDecoder {
+    let fractionalFormat = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: true
+    )
+    let legacyFormat = Date.ISO8601FormatStyle()
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .custom { decoder in
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        if let date = try? Date(value, strategy: fractionalFormat) {
+            return date
+        }
+        if let date = try? Date(value, strategy: legacyFormat) {
+            return date
+        }
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Expected an ISO-8601 date."
+        )
+    }
+    return decoder
+}
+
 public enum AgentAssociationStoreError: LocalizedError, Equatable, Sendable {
     case invalidSessionID
     case invalidWorktreePath
@@ -200,8 +233,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
             return []
         }
         let data = try Data(contentsOf: storeURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = makeAgentPersistenceJSONDecoder()
         do {
             return try decoder.decode([AgentAssociation].self, from: data)
                 .sorted(by: Self.compare)
@@ -220,8 +252,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
             [.posixPermissions: 0o700],
             ofItemAtPath: directoryURL.path
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        let encoder = makeAgentPersistenceJSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(associations).write(to: storeURL, options: .atomic)
         try FileManager.default.setAttributes(

@@ -137,8 +137,7 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
             return RegistrationEventLoadResult(events: [], discardedCount: 0)
         }
         let data = try Data(contentsOf: storeURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = makeAgentPersistenceJSONDecoder()
         do {
             let decoded = try decoder.decode(
                 [LossyDecodable<AgentRegistrationEvent>].self,
@@ -164,8 +163,7 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
             [.posixPermissions: 0o700],
             ofItemAtPath: directoryURL.path
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        let encoder = makeAgentPersistenceJSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(events).write(to: storeURL, options: .atomic)
         try FileManager.default.setAttributes(
