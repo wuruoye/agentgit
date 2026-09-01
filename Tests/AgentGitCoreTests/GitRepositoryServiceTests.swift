@@ -3,6 +3,30 @@ import XCTest
 @testable import AgentGitCore
 
 final class GitRepositoryServiceTests: XCTestCase {
+    func testLoadsCommitTreeAndAuthorEmailForSummary() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-commit-metadata-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        defer { try? FileManager.default.removeItem(at: container) }
+        try await makeRepository(at: repository)
+
+        let runner = GitCommandRunner()
+        let service = GitRepositoryService(runner: runner)
+        let project = try await service.loadProject(at: repository)
+        let worktree = try XCTUnwrap(project.worktrees.first?.worktree)
+        let history = try await service.loadHistory(worktree: worktree)
+        let commit = try XCTUnwrap(history.first)
+        XCTAssertEqual(commit.changedFileCount, 1)
+        let metadata = try await service.loadCommitMetadata(
+            worktree: worktree,
+            commit: commit
+        )
+        let expectedTree = try await revision("HEAD^{tree}", in: repository, using: runner)
+
+        XCTAssertEqual(metadata.treeOID, expectedTree)
+        XCTAssertEqual(metadata.authorEmail, "agentgit-tests@example.invalid")
+    }
+
     func testMixedEncodingDiffKeepsOtherFilesReviewableInEveryContext() async throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-mixed-encoding-\(UUID().uuidString)")
@@ -932,6 +956,56 @@ final class GitRepositoryServiceTests: XCTestCase {
         XCTAssertTrue(second.hasMore)
         XCTAssertFalse(third.hasMore)
         XCTAssertEqual(Set(combined.map(\.id)).count, combined.count)
+    }
+
+    func testLoadsHistoryForOnlyTheRequestedFileLines() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-line-history-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        defer { try? FileManager.default.removeItem(at: container) }
+        try await makeRepository(
+            at: repository,
+            initialContents: "first\ntarget v1\nthird\n"
+        )
+        let runner = GitCommandRunner()
+        try Data("first\ntarget v2\nthird\n".utf8).write(
+            to: repository.appendingPathComponent("README.md")
+        )
+        _ = try await runner.run(
+            arguments: ["add", "README.md"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["commit", "-m", "Update target line"],
+            workingDirectory: repository
+        )
+        try Data("first\ntarget v2\nthird\nunrelated\n".utf8).write(
+            to: repository.appendingPathComponent("README.md")
+        )
+        _ = try await runner.run(
+            arguments: ["add", "README.md"],
+            workingDirectory: repository
+        )
+        _ = try await runner.run(
+            arguments: ["commit", "-m", "Append unrelated line"],
+            workingDirectory: repository
+        )
+
+        let service = GitRepositoryService(runner: runner)
+        let project = try await service.loadProject(at: repository)
+        let worktree = try XCTUnwrap(project.worktrees.first?.worktree)
+        let history = try await service.loadLineHistory(
+            worktree: worktree,
+            revision: worktree.headOID,
+            path: "README.md",
+            startLine: 2,
+            endLine: 2
+        )
+
+        XCTAssertEqual(
+            history.map(\.subject),
+            ["Update target line", "Initial commit"]
+        )
     }
 
     func testSearchesCompleteHistoryByMessageAndAuthorWithPagination() async throws {

@@ -64,6 +64,33 @@ final class GitLogParserTests: XCTestCase {
         XCTAssertTrue(commits.first?.parentOIDs.isEmpty == true)
     }
 
+    func testParsesShortStatFileCountsWithoutEnumeratingPaths() throws {
+        let first = [
+            "a".repeated(40),
+            "aaaaaaa",
+            "author",
+            "2026-08-25T08:51:44Z",
+            "",
+            "",
+            "First"
+        ].joined(separator: "\u{1f}")
+        let second = [
+            "b".repeated(40),
+            "bbbbbbb",
+            "author",
+            "2026-08-25T08:50:00Z",
+            "",
+            "",
+            "Second"
+        ].joined(separator: "\u{1f}")
+        let output = "\0\(first)\0\n 1 file changed, 4 insertions(+)\n"
+            + "\0\(second)\0\n 12 files changed, 8 insertions(+), 2 deletions(-)\n"
+
+        let commits = try GitLogParser.parse(Data(output.utf8))
+
+        XCTAssertEqual(commits.map(\.changedFileCount), [1, 12])
+    }
+
     func testRejectsMalformedRecord() {
         XCTAssertThrowsError(try GitLogParser.parse(Data("oid\u{1f}short".utf8)))
     }

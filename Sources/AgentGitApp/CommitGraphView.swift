@@ -237,38 +237,46 @@ struct CommitGraphView: View {
             }
 
             let node = point(lane: row.nodeLane, position: .node, size: size)
-            let radius: CGFloat = row.isMerge || row.hasReferences ? 4 : 3
+            let radius: CGFloat = row.isMerge || row.hasReferences ? 4 : 3.5
             let nodeRect = CGRect(
                 x: node.x - radius,
                 y: node.y - radius,
                 width: radius * 2,
                 height: radius * 2
             )
+            let nodePath = Path(
+                roundedRect: nodeRect,
+                cornerRadius: row.isMerge ? 1.5 : 2
+            )
             if row.isMerge {
                 context.fill(
-                    Path(ellipseIn: nodeRect),
+                    nodePath,
                     with: .color(Color(nsColor: AgentGitPalette.canvas))
                 )
                 context.stroke(
-                    Path(ellipseIn: nodeRect),
+                    nodePath,
                     with: .color(Self.color(row.nodeColorIndex)),
-                    lineWidth: 2
+                    lineWidth: 1.4
                 )
             } else {
                 context.fill(
-                    Path(ellipseIn: nodeRect),
+                    nodePath,
                     with: .color(Self.color(row.nodeColorIndex))
                 )
                 if row.hasReferences {
+                    let referencePath = Path(
+                        roundedRect: nodeRect.insetBy(dx: -2, dy: -2),
+                        cornerRadius: 2.5
+                    )
                     context.stroke(
-                        Path(ellipseIn: nodeRect.insetBy(dx: -2, dy: -2)),
+                        referencePath,
                         with: .color(Self.color(row.nodeColorIndex).opacity(0.45)),
                         lineWidth: 1
                     )
                 }
             }
         }
-        .frame(width: width, height: 36)
+        .frame(width: width, height: 51)
         .accessibilityHidden(true)
     }
 
@@ -297,10 +305,12 @@ struct CommitGraphView: View {
     }
 
     private static let palette: [Color] = [
-        Color(nsColor: AgentGitPalette.statusRenamed),
-        Color(nsColor: AgentGitPalette.statusConflicted),
-        Color(nsColor: AgentGitPalette.statusModified),
-        Color(nsColor: AgentGitPalette.statusAdded)
+        Color(nsColor: AgentGitPalette.commitEdge0),
+        Color(nsColor: AgentGitPalette.commitEdge1),
+        Color(nsColor: AgentGitPalette.commitEdge2),
+        Color(nsColor: AgentGitPalette.commitEdge3),
+        Color(nsColor: AgentGitPalette.commitEdge4),
+        Color(nsColor: AgentGitPalette.commitEdge5)
     ]
 }
 
@@ -319,7 +329,7 @@ private struct CommitLaneColorAllocator: Equatable, Sendable {
     private var nextColorIndex = 0
 
     mutating func take(avoiding usedColorIndexes: Set<Int>) -> Int {
-        let colorCount = 8
+        let colorCount = 6
         for offset in 0..<colorCount {
             let candidate = (nextColorIndex + offset) % colorCount
             if !usedColorIndexes.contains(candidate) {

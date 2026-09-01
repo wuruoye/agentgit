@@ -2,11 +2,23 @@ import AgentGitCore
 import AppKit
 import SwiftUI
 
+enum SidebarLayoutMetrics {
+    static let visibleWidth: CGFloat = 360
+    static let headerHeight: CGFloat = 46
+    static let headerIdentifier = NSUserInterfaceItemIdentifier(
+        "AgentGitSidebarHeader"
+    )
+    // NavigationSplitView adds an 8pt sidebar container inset on macOS.
+    static let navigationContentWidth = visibleWidth - 8
+    static let navigationTopInset: CGFloat = 8
+}
+
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var projectsShowingAllWorktrees: Set<GitProject.ID> = []
     @State private var sidebarFilterText = ""
     @State private var projectDropTargetID: GitProject.ID?
+    @State private var windowTitlebarInset: CGFloat = 32
 
     init(initialSidebarFilterText: String = "") {
         _sidebarFilterText = State(initialValue: initialSidebarFilterText)
@@ -14,108 +26,105 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: sidebarSelection) {
-                ForEach(filteredProjects) { projectState in
-                    Group {
-                        ProjectHeader(
-                            projectState: projectState,
-                            isCollapsed: model.collapsedProjectIDs.contains(projectState.id),
-                            toggle: {
-                                model.toggleProjectCollapsed(id: projectState.id)
-                            }
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(
+                        height: max(
+                            0,
+                            SidebarLayoutMetrics.headerHeight
+                                - windowTitlebarInset
+                                - SidebarLayoutMetrics.navigationTopInset
                         )
-                        .tag(SidebarSelection.project(projectState.id))
-                        .selectionDisabled()
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(
-                                    projectDropTargetID == projectState.id
-                                        ? Color(nsColor: AgentGitPalette.sidebarSelection)
-                                        : Color(nsColor: AgentGitPalette.sidebarGroupHeader)
-                                )
-                        )
-                        .listRowInsets(
-                            EdgeInsets(top: 6, leading: 6, bottom: 2, trailing: 6)
-                        )
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .draggable(projectState.id) {
-                            Label(
-                                projectState.project.displayName,
-                                systemImage: "folder"
-                            )
-                        }
-                        .dropDestination(
-                            for: String.self,
-                            action: { projectIDs, location in
-                                projectDropTargetID = nil
-                                guard let projectID = projectIDs.first,
-                                      model.projects.contains(where: {
-                                          $0.id == projectID
-                                      }) else {
-                                    return false
-                                }
-                                model.moveProject(
-                                    id: projectID,
-                                    relativeTo: projectState.id,
-                                    placeAfterTarget: location.y >= 15
-                                )
-                                return true
-                            },
-                            isTargeted: { isTargeted in
-                                if isTargeted {
-                                    projectDropTargetID = projectState.id
-                                } else if projectDropTargetID == projectState.id {
-                                    projectDropTargetID = nil
-                                }
-                            }
-                        )
-                        .contextMenu {
-                            projectContextMenu(projectState)
-                        }
+                    )
+                SidebarSearchField(text: $sidebarFilterText)
 
-                        if !model.collapsedProjectIDs.contains(projectState.id)
-                            || !sidebarFilterQuery.isEmpty {
-                            projectContents(projectState)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filteredProjects.enumerated()), id: \.element.id) {
+                            projectIndex, projectState in
+                            VStack(spacing: 0) {
+                                ProjectHeader(
+                                    projectState: projectState,
+                                    isCollapsed: model.collapsedProjectIDs.contains(projectState.id),
+                                    showsDivider: projectIndex > 0,
+                                    toggle: {
+                                        model.toggleProjectCollapsed(id: projectState.id)
+                                    }
+                                )
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(
+                                            projectDropTargetID == projectState.id
+                                                ? Color(nsColor: AgentGitPalette.sidebarSelection)
+                                                : Color.clear
+                                        )
+                                )
+                                .padding(.horizontal, 7)
+                                .draggable(projectState.id) {
+                                    Label(
+                                        projectState.project.displayName,
+                                        systemImage: "folder"
+                                    )
+                                }
+                                .dropDestination(
+                                    for: String.self,
+                                    action: { projectIDs, location in
+                                        projectDropTargetID = nil
+                                        guard let projectID = projectIDs.first,
+                                              model.projects.contains(where: {
+                                                  $0.id == projectID
+                                              }) else {
+                                            return false
+                                        }
+                                        model.moveProject(
+                                            id: projectID,
+                                            relativeTo: projectState.id,
+                                            placeAfterTarget: location.y >= 15
+                                        )
+                                        return true
+                                    },
+                                    isTargeted: { isTargeted in
+                                        if isTargeted {
+                                            projectDropTargetID = projectState.id
+                                        } else if projectDropTargetID == projectState.id {
+                                            projectDropTargetID = nil
+                                        }
+                                    }
+                                )
+                                .contextMenu {
+                                    projectContextMenu(projectState)
+                                }
+
+                                if !model.collapsedProjectIDs.contains(projectState.id)
+                                    || !sidebarFilterQuery.isEmpty {
+                                    VStack(spacing: 0) {
+                                        projectContents(projectState)
+                                    }
+                                    .padding(.vertical, 1)
+                                }
+                            }
+                            .padding(.bottom, 4)
+                        }
+                    }
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                }
+                .overlay {
+                    if !sidebarFilterQuery.isEmpty, filteredProjects.isEmpty {
+                        SidebarNoResultsView(query: sidebarFilterQuery) {
+                            sidebarFilterText = ""
                         }
                     }
                 }
             }
-            .overlay {
-                if !sidebarFilterQuery.isEmpty, filteredProjects.isEmpty {
-                    SidebarNoResultsView(query: sidebarFilterQuery) {
-                        sidebarFilterText = ""
-                    }
-                }
-            }
-            .navigationTitle("Worktrees")
-            .searchable(
-                text: $sidebarFilterText,
-                placement: .sidebar,
-                prompt: "Filter projects and worktrees"
+            .navigationSplitViewColumnWidth(
+                min: SidebarLayoutMetrics.navigationContentWidth,
+                ideal: SidebarLayoutMetrics.navigationContentWidth,
+                max: SidebarLayoutMetrics.navigationContentWidth
             )
-            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 260)
-            .scrollContentBackground(.hidden)
             .background(Color(nsColor: AgentGitPalette.sidebarBackground))
             .tint(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
-            .toolbar {
-                ToolbarItemGroup {
-                    Button {
-                        Task {
-                            await model.refreshSelectedWorktree()
-                        }
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(model.selectedWorktree == nil)
-                    .help("Refresh Current Worktree (⌘R)")
-
-                    Button(action: model.chooseProject) {
-                        Label("Add Project", systemImage: "plus")
-                    }
-                    .help("Add Project (⌘O)")
-                }
-            }
+            .toolbar(removing: .sidebarToggle)
         } detail: {
             if let snapshot = model.selectedWorktree {
                 WorktreeReviewView(snapshot: snapshot)
@@ -146,6 +155,18 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .background(
+            WindowTitleVisibilityConfigurator(
+                titlebarInset: $windowTitlebarInset,
+                refreshDisabled: model.selectedWorktree == nil,
+                refresh: {
+                    Task {
+                        await model.refreshSelectedWorktree()
+                    }
+                },
+                addProject: model.chooseProject
+            )
+        )
         .task {
             model.setApplicationActive(NSApp.isActive)
             await model.loadProjectsIfNeeded()
@@ -241,25 +262,6 @@ struct ContentView: View {
         .padding(.vertical, 8)
     }
 
-    private var sidebarSelection: Binding<SidebarSelection?> {
-        Binding(
-            get: { model.selectedWorktreeID.map(SidebarSelection.worktree) },
-            set: { requestedSelection in
-                guard let worktreeID = acceptedSidebarWorktreeSelection(
-                    current: model.selectedWorktreeID,
-                    requested: requestedSelection
-                ) else {
-                    return
-                }
-                if model.selectWorktree(id: worktreeID) {
-                    Task {
-                        await model.refreshSelectedWorktree()
-                    }
-                }
-            }
-        )
-    }
-
     private var sidebarFilterQuery: String {
         sidebarFilterText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -344,7 +346,9 @@ struct ContentView: View {
                 Text("Reading worktrees…")
                     .foregroundStyle(.secondary)
             }
-            .selectionDisabled()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 28)
+            .frame(minHeight: 32)
         }
 
         if let errorMessage = state.errorMessage {
@@ -364,7 +368,7 @@ struct ContentView: View {
                     model.removeProject(id: state.id)
                 }
             )
-            .selectionDisabled()
+            .padding(.horizontal, 28)
         }
 
         if let snapshot = state.snapshot {
@@ -393,16 +397,20 @@ struct ContentView: View {
                 )
             }
             ForEach(presentation.visibleWorktrees) { worktree in
-                WorktreeRow(
-                    snapshot: worktree,
-                    isSelected: model.selectedWorktreeID == worktree.id
-                )
-                    .tag(SidebarSelection.worktree(worktree.id))
-                    .listRowInsets(
-                        EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
+                Button {
+                    if model.selectWorktree(id: worktree.id) {
+                        Task {
+                            await model.refreshSelectedWorktree()
+                        }
+                    }
+                } label: {
+                    WorktreeRow(
+                        snapshot: worktree,
+                        isSelected: model.selectedWorktreeID == worktree.id
                     )
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 7)
                     .contextMenu {
                         Button("Refresh Worktree") {
                             Task {
@@ -441,8 +449,8 @@ struct ContentView: View {
             if presentation.hiddenWorktreeCount > 0 {
                 ProjectWorktreeDisclosureRow(
                     title: projectsShowingAllWorktrees.contains(state.id)
-                        ? "Show Recent Worktrees"
-                        : countedLabel(
+                        ? "Show Recent Only"
+                        : "Show " + countedLabel(
                             presentation.hiddenWorktreeCount,
                             singular: "More Worktree",
                             plural: "More Worktrees"
@@ -455,32 +463,244 @@ struct ContentView: View {
                         projectsShowingAllWorktrees.insert(state.id)
                     }
                 }
-                .tag(SidebarSelection.worktreeDisclosure(state.id))
-                .selectionDisabled()
-                .listRowInsets(
-                    EdgeInsets(top: 0, leading: 8, bottom: 2, trailing: 8)
-                )
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
+                .padding(.horizontal, 7)
             }
         }
     }
 }
 
-enum SidebarSelection: Hashable {
-    case worktree(GitWorktreeSnapshot.ID)
-    case project(GitProject.ID)
-    case worktreeDisclosure(GitProject.ID)
+struct WindowTitleVisibilityConfigurator: NSViewRepresentable {
+    @Binding var titlebarInset: CGFloat
+    let refreshDisabled: Bool
+    let refresh: () -> Void
+    let addProject: () -> Void
+
+    init(
+        titlebarInset: Binding<CGFloat> = .constant(0),
+        refreshDisabled: Bool = false,
+        refresh: @escaping () -> Void = {},
+        addProject: @escaping () -> Void = {}
+    ) {
+        _titlebarInset = titlebarInset
+        self.refreshDisabled = refreshDisabled
+        self.refresh = refresh
+        self.addProject = addProject
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            configure(from: view, coordinator: context.coordinator)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            configure(from: nsView, coordinator: context.coordinator)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeHeader()
+    }
+
+    private func configure(from view: NSView, coordinator: Coordinator) {
+        guard let window = view.window else {
+            return
+        }
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
+        let measuredInset = window.styleMask.contains(.fullScreen)
+            ? 0
+            : max(0, window.frame.height - window.contentLayoutRect.height)
+        if abs(titlebarInset - measuredInset) > 0.5 {
+            titlebarInset = measuredInset
+        }
+        coordinator.installHeader(
+            in: window,
+            refreshDisabled: refreshDisabled,
+            refresh: refresh,
+            addProject: addProject
+        )
+    }
+
+    @MainActor
+    final class Coordinator {
+        private var headerView: NSHostingView<AnyView>?
+        private weak var containerView: NSView?
+        private var constraints: [NSLayoutConstraint] = []
+
+        func installHeader(
+            in window: NSWindow,
+            refreshDisabled: Bool,
+            refresh: @escaping () -> Void,
+            addProject: @escaping () -> Void
+        ) {
+            guard let nextContentView = window.contentView else {
+                return
+            }
+            let nextContainerView = nextContentView.superview ?? nextContentView
+            let rootView = AnyView(
+                SidebarHeader(
+                    refreshDisabled: refreshDisabled,
+                    refresh: refresh,
+                    addProject: addProject
+                )
+                .ignoresSafeArea(.container, edges: .top)
+            )
+            if containerView !== nextContainerView || headerView == nil {
+                removeHeader()
+                let hostingView = NSHostingView(rootView: rootView)
+                hostingView.identifier = SidebarLayoutMetrics.headerIdentifier
+                hostingView.translatesAutoresizingMaskIntoConstraints = false
+                nextContainerView.addSubview(
+                    hostingView,
+                    positioned: .above,
+                    relativeTo: nextContentView.superview === nextContainerView
+                        ? nextContentView
+                        : nil
+                )
+                constraints = [
+                    hostingView.leadingAnchor.constraint(
+                        equalTo: nextContainerView.leadingAnchor
+                    ),
+                    hostingView.topAnchor.constraint(
+                        equalTo: nextContainerView.topAnchor
+                    ),
+                    hostingView.widthAnchor.constraint(
+                        equalToConstant: SidebarLayoutMetrics.visibleWidth
+                    ),
+                    hostingView.heightAnchor.constraint(
+                        equalToConstant: SidebarLayoutMetrics.headerHeight
+                    )
+                ]
+                NSLayoutConstraint.activate(constraints)
+                headerView = hostingView
+                containerView = nextContainerView
+            } else {
+                headerView?.rootView = rootView
+            }
+        }
+
+        func removeHeader() {
+            NSLayoutConstraint.deactivate(constraints)
+            constraints.removeAll()
+            headerView?.removeFromSuperview()
+            headerView = nil
+            containerView = nil
+        }
+    }
 }
 
-func acceptedSidebarWorktreeSelection(
-    current: GitWorktreeSnapshot.ID?,
-    requested: SidebarSelection?
-) -> GitWorktreeSnapshot.ID? {
-    guard case let .worktree(worktreeID) = requested else {
-        return current
+struct SidebarHeader: View {
+    let refreshDisabled: Bool
+    let refresh: () -> Void
+    let addProject: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Projects")
+                .font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 12)
+            SidebarHeaderActionButton(
+                systemName: "arrow.clockwise",
+                help: "Refresh Current Worktree (⌘R)",
+                disabled: refreshDisabled,
+                action: refresh
+            )
+            SidebarHeaderActionButton(
+                systemName: "plus",
+                help: "Add Project (⌘O)",
+                action: addProject
+            )
+        }
+        .padding(.leading, 78)
+        .padding(.trailing, 11)
+        .frame(height: 46)
+        .background(Color(nsColor: AgentGitPalette.sidebarChrome))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(nsColor: AgentGitPalette.sidebarDivider))
+                .frame(height: 1)
+        }
     }
-    return worktreeID
+}
+
+private struct SidebarHeaderActionButton: View {
+    let systemName: String
+    let help: String
+    var disabled = false
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .regular))
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(
+                            isHovered && !disabled
+                                ? Color(nsColor: AgentGitPalette.sidebarHover)
+                                : Color.clear
+                        )
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+        .onHover { isHovered = $0 }
+    }
+}
+
+struct SidebarSearchField: View {
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(.secondary)
+            TextField("Filter projects and worktrees", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear Filter")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(nsColor: AgentGitPalette.sidebarInputBackground))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color(nsColor: AgentGitPalette.sidebarDivider), lineWidth: 1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.top, 8)
+        .padding(.bottom, 7)
+        .accessibilityElement(children: .contain)
+    }
 }
 
 struct SidebarNoResultsView: View {
@@ -614,39 +834,52 @@ private struct ProjectWorktreeDisclosureRow: View {
     let title: String
     let isExpanded: Bool
     let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            Label(
-                title,
-                systemImage: isExpanded ? "chevron.up" : "chevron.right"
-            )
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.tertiary)
+            HStack(spacing: 5) {
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Text(title)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 5)
+            .padding(.leading, 37)
+            .frame(height: 25)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(
+                        isHovered
+                            ? Color(nsColor: AgentGitPalette.sidebarHover)
+                            : Color.clear
+                    )
+            )
         }
         .buttonStyle(.plain)
-        .padding(.leading, 10)
+        .onHover { isHovered = $0 }
     }
 }
 
 struct ProjectHeader: View {
     let projectState: ProjectState
     let isCollapsed: Bool
+    let showsDivider: Bool
     let toggle: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
-                    .frame(width: 9)
+                    .frame(width: 12)
                 Text(projectState.project.displayName)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.74))
                     .lineLimit(1)
                 if projectState.errorMessage != nil {
                     Image(
@@ -671,16 +904,33 @@ struct ProjectHeader: View {
                 Spacer(minLength: 4)
                 if let count = projectState.snapshot?.worktrees.count {
                     Text("\(count)")
-                        .font(.caption2.monospacedDigit())
+                        .font(.system(size: 10.5).monospacedDigit())
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
                 }
             }
             .contentShape(Rectangle())
-            .padding(.horizontal, 8)
-            .frame(height: 28)
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(
+                        isHovered
+                            ? Color(nsColor: AgentGitPalette.sidebarHover)
+                            : Color.clear
+                    )
+            )
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .padding(.top, showsDivider ? 5 : 0)
+        .overlay(alignment: .top) {
+            if showsDivider {
+                Rectangle()
+                    .fill(Color(nsColor: AgentGitPalette.sidebarDivider))
+                    .frame(height: 1)
+            }
+        }
         .help(projectHeaderHelpText(projectState))
         .accessibilityLabel(
             "\(isCollapsed ? "Expand" : "Collapse") \(projectState.project.displayName)"
@@ -702,111 +952,62 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 struct WorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
     var isSelected = false
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 7) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    if snapshot.errorMessage != nil {
-                        Image(systemName: issueIconName)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(issueIconColor)
-                    } else if snapshot.worktree.isDetached {
-                        Image(systemName: "link")
-                            .font(.caption2)
-                            .foregroundStyle(secondaryForeground)
-                    }
-                    Text(snapshot.worktree.displayName)
-                        .font(.callout.weight(isSelected ? .semibold : .medium))
-                        .foregroundStyle(primaryForeground)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            worktreeStateIndicator
+                .frame(width: 10, alignment: .center)
 
-                    if snapshot.status.changedFileCount > 0 {
-                        Text("\(snapshot.status.changedFileCount)")
-                            .font(.caption2.monospacedDigit().weight(.semibold))
-                            .foregroundStyle(dirtyCountForeground)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(
-                                        Color(nsColor: AgentGitPalette.sidebarDirtyBadge)
-                                    )
-                            )
-                            .accessibilityLabel(
-                                countedLabel(
-                                    snapshot.status.changedFileCount,
-                                    singular: "changed file",
-                                    plural: "changed files"
-                                )
-                            )
-                    }
-
-                    Spacer(minLength: 4)
-
-                    if !snapshot.diffStat.isEmpty {
-                        HStack(spacing: 4) {
-                            Text("+\(snapshot.diffStat.addedLineCount)")
-                                .foregroundStyle(additionForeground)
-                            Text("−\(snapshot.diffStat.deletedLineCount)")
-                                .foregroundStyle(deletionForeground)
-                        }
-                        .font(.caption2.monospacedDigit().weight(.medium))
-                    }
-                }
-
-                HStack(spacing: 4) {
-                    Text(snapshot.worktree.rootURL.lastPathComponent)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if let branch = snapshot.status.branch, !branch.isSynced {
-                        let description = branchTrackingDescription(branch) ?? ""
-                        metadataSeparator
-                        HStack(spacing: 3) {
-                            if branch.aheadCount > 0 {
-                                Text("↑\(branch.aheadCount)")
-                            }
-                            if branch.behindCount > 0 {
-                                Text("↓\(branch.behindCount)")
-                            }
-                        }
-                        .monospacedDigit()
-                        .help(description)
-                        .accessibilityLabel(description)
-                    }
-                    Spacer(minLength: 4)
-                    if snapshot.lastActivityAt == .distantPast {
-                        Text("Unknown")
-                    } else {
-                        Text(compactRelativeTime(snapshot.lastActivityAt))
-                            .monospacedDigit()
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(secondaryForeground)
-
+            VStack(alignment: .leading, spacing: 1) {
+                Text(snapshot.worktree.displayName)
+                    .font(
+                        .system(
+                            size: 12.5,
+                            weight: isSelected ? .medium : .regular
+                        )
+                    )
+                    .foregroundStyle(primaryForeground)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(snapshot.worktree.rootURL.lastPathComponent)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(
+                        isSelected
+                            ? primaryForeground.opacity(0.72)
+                            : Color.secondary.opacity(0.78)
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            trailingStatus
+                .fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.leading, 20)
+        .padding(.trailing, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
+        .frame(height: 40)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(
                     isSelected
                         ? Color(nsColor: AgentGitPalette.sidebarSelection)
-                        : Color.clear
+                        : isHovered
+                            ? Color(nsColor: AgentGitPalette.sidebarHover)
+                            : Color.clear
                 )
         )
         .overlay(alignment: .leading) {
             if isSelected {
                 RoundedRectangle(cornerRadius: 1, style: .continuous)
                     .fill(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
-                    .frame(width: 2, height: 28)
-                    .padding(.leading, 1)
+                    .frame(width: 2, height: 30)
             }
         }
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(worktreeAccessibilityLabel)
@@ -814,34 +1015,72 @@ struct WorktreeRow: View {
     }
 
     @ViewBuilder
-    private var metadataSeparator: some View {
-        Text("·")
+    private var worktreeStateIndicator: some View {
+        if snapshot.errorMessage != nil {
+            Image(systemName: issueIconName)
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(issueIconColor)
+        } else {
+            Circle()
+                .fill(isDirty ? dirtyIndicatorForeground : Color.clear)
+                .overlay {
+                    Circle()
+                        .stroke(
+                            isDirty ? dirtyIndicatorForeground : Color.secondary.opacity(0.52),
+                            lineWidth: 1
+                        )
+                }
+                .frame(width: 6, height: 6)
+        }
     }
 
     private var primaryForeground: Color {
-        Color(nsColor: .labelColor)
-    }
-
-    private var secondaryForeground: Color {
-        Color(nsColor: AgentGitPalette.sidebarMetadata)
-    }
-
-    private var dirtyCountForeground: Color {
         isSelected
-            ? Color(nsColor: .labelColor)
-            : Color(nsColor: AgentGitPalette.statusModified)
+            ? Color(nsColor: AgentGitPalette.sidebarSelectionBorder)
+            : .primary
     }
 
-    private var additionForeground: Color {
-        isSelected
-            ? .primary.opacity(0.82)
-            : Color(nsColor: AgentGitPalette.sidebarAdditionText)
+    private var isDirty: Bool {
+        snapshot.status.changedFileCount > 0 || !snapshot.diffStat.isEmpty
     }
 
-    private var deletionForeground: Color {
-        isSelected
-            ? .primary.opacity(0.82)
-            : Color(nsColor: AgentGitPalette.sidebarDeletionText)
+    private var dirtyIndicatorForeground: Color {
+        Color(nsColor: .systemOrange)
+    }
+
+    @ViewBuilder
+    private var trailingStatus: some View {
+        if !snapshot.diffStat.isEmpty {
+            HStack(spacing: 4) {
+                Text("+\(snapshot.diffStat.addedLineCount)")
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
+                Text("−\(snapshot.diffStat.deletedLineCount)")
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.statusDeleted))
+            }
+            .font(.system(size: 10.5).monospacedDigit())
+            .accessibilityLabel(
+                "+\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount)"
+            )
+        } else if snapshot.status.changedFileCount > 0 {
+            Text("\(snapshot.status.changedFileCount)")
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(dirtyIndicatorForeground)
+                .accessibilityLabel(
+                    countedLabel(
+                        snapshot.status.changedFileCount,
+                        singular: "changed file",
+                        plural: "changed files"
+                    )
+                )
+        } else if snapshot.lastActivityAt == .distantPast {
+            Text("—")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        } else {
+            Text(compactRelativeTime(snapshot.lastActivityAt))
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
     }
 
     private var issueIconName: String {

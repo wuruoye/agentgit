@@ -37,26 +37,25 @@ private struct AgentSessionShortcutButton: View {
         Button(action: openSession) {
             HStack(spacing: 5) {
                 Image(systemName: association.provider.systemImageName)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(tintColor)
 
                 Text(compactAgentSessionTitle(association.displayTitle))
-                    .font(.caption2.weight(.medium))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 7)
-            .frame(minHeight: 24)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: 112, minHeight: 26)
             .background(
-                tintColor.opacity(0.1),
-                in: RoundedRectangle(cornerRadius: 6)
+                Color(nsColor: AgentGitPalette.reviewControlBackground),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(tintColor.opacity(0.18))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder))
             }
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(association.hoverDescription(availability: availability))

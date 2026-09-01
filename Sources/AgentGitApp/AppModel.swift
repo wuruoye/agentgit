@@ -980,6 +980,24 @@ final class AppModel {
         )
     }
 
+    func loadLineHistory(
+        worktree: GitWorktree,
+        revision: String?,
+        path: String,
+        startLine: Int,
+        endLine: Int,
+        limit: Int = 500
+    ) async throws -> [GitCommit] {
+        try await repositoryService.loadLineHistory(
+            worktree: worktree,
+            revision: revision,
+            path: path,
+            startLine: startLine,
+            endLine: endLine,
+            limit: limit
+        )
+    }
+
     func historyContainsCommits(
         worktree: GitWorktree,
         revision: String?,
@@ -1253,6 +1271,16 @@ final class AppModel {
 
     func loadCommitMessage(worktree: GitWorktree, commit: GitCommit) async throws -> String {
         try await repositoryService.loadCommitMessage(worktree: worktree, commit: commit)
+    }
+
+    func loadCommitMetadata(
+        worktree: GitWorktree,
+        commit: GitCommit
+    ) async throws -> GitCommitMetadata {
+        try await repositoryService.loadCommitMetadata(
+            worktree: worktree,
+            commit: commit
+        )
     }
 
     func loadCommitChanges(

@@ -8,6 +8,7 @@ public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
     public let parentOIDs: [String]
     public let refNames: [String]
     public let subject: String
+    public let changedFileCount: Int?
 
     public init(
         oid: String,
@@ -16,7 +17,8 @@ public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
         authoredAt: Date,
         parentOIDs: [String],
         refNames: [String],
-        subject: String
+        subject: String,
+        changedFileCount: Int? = nil
     ) {
         self.oid = oid
         self.shortOID = shortOID
@@ -25,6 +27,7 @@ public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
         self.parentOIDs = parentOIDs
         self.refNames = refNames
         self.subject = subject
+        self.changedFileCount = changedFileCount
     }
 
     public var id: String {
@@ -37,6 +40,16 @@ public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
 
     public var references: [GitReferenceDecoration] {
         GitReferenceDecoration.parse(refNames)
+    }
+}
+
+public struct GitCommitMetadata: Codable, Equatable, Sendable {
+    public let treeOID: String
+    public let authorEmail: String
+
+    public init(treeOID: String, authorEmail: String) {
+        self.treeOID = treeOID
+        self.authorEmail = authorEmail
     }
 }
 
@@ -188,7 +201,8 @@ public enum GitLogParser {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
 
-        return try data.split(separator: 0, omittingEmptySubsequences: true).map { record in
+        var commits: [GitCommit] = []
+        for record in data.split(separator: 0, omittingEmptySubsequences: true) {
             guard let text = String(data: Data(record), encoding: .utf8) else {
                 throw GitLogParseError.invalidUTF8
             }
@@ -198,23 +212,63 @@ public enum GitLogParser {
                 maxSplits: 6,
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 7, let authoredAt = formatter.date(from: String(fields[3])) else {
+            if fields.count != 7 {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    continue
+                }
+                guard let changedFileCount = shortStatFileCount(trimmed),
+                      let previous = commits.popLast() else {
+                    throw GitLogParseError.malformedRecord(text)
+                }
+                commits.append(
+                    GitCommit(
+                        oid: previous.oid,
+                        shortOID: previous.shortOID,
+                        authorName: previous.authorName,
+                        authoredAt: previous.authoredAt,
+                        parentOIDs: previous.parentOIDs,
+                        refNames: previous.refNames,
+                        subject: previous.subject,
+                        changedFileCount: changedFileCount
+                    )
+                )
+                continue
+            }
+            guard let authoredAt = formatter.date(from: String(fields[3])) else {
                 throw GitLogParseError.malformedRecord(text)
             }
 
-            return GitCommit(
-                oid: String(fields[0]),
-                shortOID: String(fields[1]),
-                authorName: String(fields[2]),
-                authoredAt: authoredAt,
-                parentOIDs: fields[4].split(separator: " ").map(String.init),
-                refNames: fields[5]
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty },
-                subject: String(fields[6])
+            commits.append(
+                GitCommit(
+                    oid: String(fields[0]),
+                    shortOID: String(fields[1]),
+                    authorName: String(fields[2]),
+                    authoredAt: authoredAt,
+                    parentOIDs: fields[4].split(separator: " ").map(String.init),
+                    refNames: fields[5]
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty },
+                    subject: String(fields[6])
+                )
             )
         }
+        return commits
+    }
+
+    private static func shortStatFileCount(_ text: String) -> Int? {
+        guard let line = text.split(whereSeparator: \.isNewline).last else {
+            return nil
+        }
+        let words = line.split(whereSeparator: \.isWhitespace)
+        guard words.count >= 3,
+              let count = Int(words[0]),
+              words[1] == "file" || words[1] == "files",
+              words[2].hasPrefix("changed") else {
+            return nil
+        }
+        return count
     }
 }
 

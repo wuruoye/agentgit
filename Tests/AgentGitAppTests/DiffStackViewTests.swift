@@ -5,6 +5,169 @@ import XCTest
 
 @MainActor
 final class DiffStackViewTests: XCTestCase {
+    func testCodeHitTestingReachesSelectableTextView() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 300)
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let cell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 3, makeIfNecessary: true)
+        )
+        cell.layoutSubtreeIfNeeded()
+        let textView = try XCTUnwrap(
+            descendants(of: cell).compactMap { $0 as? NSTextView }.first {
+                $0.identifier?.rawValue == "diff-old-code-content"
+            }
+        )
+        let point = tableView.convert(
+            NSPoint(x: textView.bounds.midX, y: textView.bounds.midY),
+            from: textView
+        )
+
+        XCTAssertTrue(tableView.hitTest(point) === textView)
+        XCTAssertTrue(textView.acceptsFirstResponder)
+    }
+
+    func testDraggingCodeSelectsCharactersWithoutSelectingTableRows() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 300)
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let cell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 3, makeIfNecessary: true)
+        )
+        cell.layoutSubtreeIfNeeded()
+        let textView = try XCTUnwrap(
+            descendants(of: cell).compactMap { $0 as? NSTextView }.first {
+                $0.identifier?.rawValue == "diff-old-code-content"
+            }
+        )
+        let start = textView.convert(NSPoint(x: 8, y: 10), to: nil)
+        let end = textView.convert(NSPoint(x: 72, y: 10), to: nil)
+        let windowNumber = window.windowNumber
+        let down = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: start,
+                modifierFlags: [],
+                timestamp: 1,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
+        let dragged = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDragged,
+                location: end,
+                modifierFlags: [],
+                timestamp: 2,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 2,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
+        let up = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: end,
+                modifierFlags: [],
+                timestamp: 3,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 3,
+                clickCount: 1,
+                pressure: 0
+            )
+        )
+        NSApp.postEvent(dragged, atStart: false)
+        NSApp.postEvent(up, atStart: false)
+
+        tableView.mouseDown(with: down)
+
+        XCTAssertGreaterThan(textView.selectedRange().length, 0)
+        XCTAssertTrue(tableView.selectedRowIndexes.isEmpty)
+    }
+
+    func testSummaryAndFilesShareOneScrollableTable() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 180)
+        var requestedExpansion: Bool?
+        scrollView.onSetAllFilesExpanded = { requestedExpansion = $0 }
+        let commit = GitCommit(
+            oid: String(repeating: "a", count: 40),
+            shortOID: "aaaaaaa",
+            authorName: "Review Author",
+            authoredAt: Date(timeIntervalSince1970: 100),
+            parentOIDs: [String(repeating: "b", count: 40)],
+            refNames: ["refs/heads/main"],
+            subject: "Keep summary in the review scroll"
+        )
+        let summary = DiffStackSummary(
+            commit: commit,
+            metadata: GitCommitMetadata(
+                treeOID: String(repeating: "c", count: 40),
+                authorEmail: "review@example.com"
+            ),
+            message: "Keep summary in the review scroll\n\nDetailed body.",
+            fileCount: 1,
+            addedLineCount: 2,
+            deletedLineCount: 2,
+            isFileListExpanded: false
+        )
+        scrollView.display(
+            summary: summary,
+            groups: [makeGroup(includesSecondHunk: true)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let summaryCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 0, makeIfNecessary: true)
+        )
+        XCTAssertEqual(summaryCell.identifier?.rawValue, "diff-summary")
+        XCTAssertGreaterThan(tableView.rect(ofRow: 0).height, 120)
+        XCTAssertGreaterThan(
+            tableView.rect(ofRow: 1).minY,
+            tableView.rect(ofRow: 0).maxY - 1
+        )
+        XCTAssertNil(requestedExpansion)
+
+        scrollView.contentView.scroll(
+            to: NSPoint(x: 0, y: tableView.rect(ofRow: 0).maxY)
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        XCTAssertLessThanOrEqual(
+            tableView.rect(ofRow: 0).maxY - scrollView.contentView.bounds.minY,
+            0.5
+        )
+    }
+
     func testFileHeaderButtonsReceiveClicksBeforeRowDisclosure() {
         XCTAssertFalse(shouldToggleDiffRow(for: NSButton()))
         let selectableText = NSTextField()
@@ -13,6 +176,9 @@ final class DiffStackViewTests: XCTestCase {
         let staticText = NSTextField()
         staticText.isSelectable = false
         XCTAssertTrue(shouldToggleDiffRow(for: staticText))
+        let selectableTextView = NSTextView()
+        selectableTextView.isSelectable = true
+        XCTAssertFalse(shouldToggleDiffRow(for: selectableTextView))
     }
 
     func testSwitchingLayoutRebuildsUnifiedRowsIntoPairedRows() throws {
@@ -44,12 +210,12 @@ final class DiffStackViewTests: XCTestCase {
         firstPairCell.frame = NSRect(x: 0, y: 0, width: 1_000, height: 20)
         firstPairCell.layoutSubtreeIfNeeded()
         let firstPairText = descendants(of: firstPairCell).compactMap { view -> String? in
-            guard let field = view as? NSTextField,
+            guard let textView = view as? NSTextView,
                   view.identifier?.rawValue == "diff-old-code-content"
                     || view.identifier?.rawValue == "diff-new-code-content" else {
                 return nil
             }
-            return field.stringValue
+            return textView.string
         }
         XCTAssertEqual(firstPairText, ["let oldValue = 1", "let newValue = 2"])
         let oldCodeClip = try XCTUnwrap(
@@ -115,7 +281,7 @@ final class DiffStackViewTests: XCTestCase {
                 id: "working",
                 title: "Working",
                 emptyMessage: message,
-                isExpanded: false,
+                isExpanded: true,
                 files: []
             )
         }
@@ -156,6 +322,64 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(
             nonEmptyDiffStackGroups([working, staged]).map(\.id),
             [working.id]
+        )
+    }
+
+    func testFolderRowsKeepFilesCollapsedUntilFolderExpansion() throws {
+        let scrollView = makeScrollView()
+        let base = makeGroup()
+        let folderID = "navigator-folder:working:Sources"
+        let collapsed = DiffStackGroup(
+            id: base.id,
+            title: base.title,
+            emptyMessage: base.emptyMessage,
+            isExpanded: true,
+            files: base.files,
+            folders: [
+                DiffStackFolder(
+                    id: folderID,
+                    title: "Sources",
+                    isExpanded: false,
+                    fileIDs: base.files.map(\.id)
+                )
+            ]
+        )
+        scrollView.display(groups: [collapsed], layout: .sideBySide, scrollTarget: nil)
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        XCTAssertEqual(tableView.numberOfRows, 2)
+        let folderCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
+        )
+        XCTAssertTrue(
+            descendants(of: folderCell).compactMap {
+                ($0 as? NSTextField)?.stringValue
+            }.contains("Sources")
+        )
+
+        let expanded = DiffStackGroup(
+            id: base.id,
+            title: base.title,
+            emptyMessage: base.emptyMessage,
+            isExpanded: true,
+            files: base.files,
+            folders: [
+                DiffStackFolder(
+                    id: folderID,
+                    title: "Sources",
+                    isExpanded: true,
+                    fileIDs: base.files.map(\.id)
+                )
+            ]
+        )
+        scrollView.display(groups: [expanded], layout: .sideBySide, scrollTarget: nil)
+        XCTAssertEqual(tableView.numberOfRows, 7)
+        let fileCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        )
+        XCTAssertTrue(
+            descendants(of: fileCell).compactMap {
+                ($0 as? NSTextField)?.stringValue
+            }.contains(where: { $0.contains("Sample.swift") })
         )
     }
 
@@ -281,7 +505,7 @@ final class DiffStackViewTests: XCTestCase {
             scrollView.layoutSubtreeIfNeeded()
             let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
             let column = try XCTUnwrap(tableView.tableColumns.first)
-            XCTAssertEqual(tableView.effectiveStyle, .inset)
+            XCTAssertEqual(tableView.effectiveStyle, .plain)
             XCTAssertEqual(
                 tableView.frame.width,
                 scrollView.contentView.bounds.width,
@@ -289,7 +513,7 @@ final class DiffStackViewTests: XCTestCase {
             )
             XCTAssertEqual(
                 scrollView.contentView.bounds.width - column.width,
-                32,
+                0,
                 accuracy: 0.5
             )
             XCTAssertFalse(scrollView.hasHorizontalScroller)
@@ -299,13 +523,13 @@ final class DiffStackViewTests: XCTestCase {
             let firstCell = try XCTUnwrap(
                 tableView.view(atColumn: 0, row: 0, makeIfNecessary: true)
             )
-            XCTAssertEqual(firstCell.frame.minX, 16, accuracy: 0.5)
+            XCTAssertEqual(firstCell.frame.minX, 0, accuracy: 0.5)
             XCTAssertEqual(
                 tableView.frame.width - firstCell.frame.maxX,
-                16,
+                0,
                 accuracy: 0.5
             )
-            XCTAssertGreaterThanOrEqual(tableView.rect(ofRow: 0).minY, 8)
+            XCTAssertEqual(tableView.rect(ofRow: 0).minY, 0, accuracy: 0.5)
 
             scrollView.frame = NSRect(x: 0, y: 0, width: 760, height: 600)
             scrollView.layoutSubtreeIfNeeded()
@@ -316,7 +540,7 @@ final class DiffStackViewTests: XCTestCase {
             )
             XCTAssertEqual(
                 scrollView.contentView.bounds.width - column.width,
-                32,
+                0,
                 accuracy: 0.5
             )
 
@@ -523,7 +747,7 @@ final class DiffStackViewTests: XCTestCase {
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
         tableView.layoutSubtreeIfNeeded()
         let pairCell = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 4, makeIfNecessary: true)
+            tableView.view(atColumn: 0, row: 3, makeIfNecessary: true)
         )
         pairCell.layoutSubtreeIfNeeded()
 
@@ -540,12 +764,12 @@ final class DiffStackViewTests: XCTestCase {
         let oldCodeContent = try XCTUnwrap(
             descendants(of: pairCell).first {
                 $0.identifier?.rawValue == "diff-old-code-content"
-            } as? NSTextField
+            } as? NSTextView
         )
         let newCodeContent = try XCTUnwrap(
             descendants(of: pairCell).first {
                 $0.identifier?.rawValue == "diff-new-code-content"
-            } as? NSTextField
+            } as? NSTextView
         )
         XCTAssertGreaterThan(oldCodeClip.frame.width, 0)
         XCTAssertGreaterThan(newCodeClip.frame.width, 0)
@@ -786,9 +1010,20 @@ final class DiffStackViewTests: XCTestCase {
         let secondOffset = second.content.frame.minX
 
         for targetState in [true, false] {
+            let buttonIdentifier = targetState
+                ? "hunk-whole-file-toggle"
+                : "whole-file-toggle"
+            if targetState {
+                let hunkCell = try XCTUnwrap(
+                    descendants(of: scrollView).first {
+                        $0.identifier?.rawValue == "diff-hunk"
+                    }
+                )
+                _ = try revealHunkWholeFileButton(in: hunkCell)
+            }
             let wholeFileButton = try XCTUnwrap(
                 descendants(of: scrollView).compactMap { $0 as? NSButton }.first {
-                    $0.identifier?.rawValue == "whole-file-toggle" && !$0.isHidden
+                    $0.identifier?.rawValue == buttonIdentifier && !$0.isHidden
                 }
             )
             wholeFileButton.performClick(nil)
@@ -935,6 +1170,232 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(scrollView.contentView.bounds.minY, 0, accuracy: 0.5)
     }
 
+    func testBackgroundPresentationChangesPreserveScrollOffset() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 90)
+        let suiteName = "DiffStackViewTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = ReviewStateStore(defaults: defaults)
+        let key = ReviewStateKey(worktreeID: "/background", context: .pending)
+        scrollView.bind(store: store, key: key)
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 30))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        XCTAssertEqual(store.scrollOffset(for: key), 30, accuracy: 0.5)
+        let initialRebuildCount = scrollView.rowRebuildCount
+
+        scrollView.isApplicationActive = false
+        scrollView.mutationActionsEnabled = false
+        XCTAssertEqual(scrollView.rowRebuildCount, initialRebuildCount)
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let fileCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
+        )
+        let hunkCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        )
+        XCTAssertTrue(
+            descendants(of: fileCell).compactMap { $0 as? NSButton }
+                .first { $0.title == "Stage" }?.isEnabled == false
+        )
+        XCTAssertTrue(
+            descendants(of: hunkCell).compactMap { $0 as? NSButton }
+                .first { $0.title == "Stage Hunk" }?.isEnabled == false
+        )
+
+        scrollView.display(
+            groups: [
+                makeGroup(
+                    canOpenWorkingFile: false,
+                    canOpenInVisualStudioCode: false,
+                    isMutationEnabled: false
+                )
+            ],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        XCTAssertEqual(scrollView.rowRebuildCount, initialRebuildCount)
+        XCTAssertEqual(scrollView.contentView.bounds.minY, 30, accuracy: 0.5)
+        XCTAssertEqual(store.scrollOffset(for: key), 30, accuracy: 0.5)
+
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 10))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        XCTAssertEqual(store.scrollOffset(for: key), 30, accuracy: 0.5)
+
+        scrollView.isApplicationActive = true
+        scrollView.mutationActionsEnabled = true
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        XCTAssertEqual(scrollView.rowRebuildCount, initialRebuildCount)
+        XCTAssertEqual(scrollView.contentView.bounds.minY, 30, accuracy: 0.5)
+        XCTAssertEqual(store.scrollOffset(for: key), 30, accuracy: 0.5)
+    }
+
+    func testStructuralRefreshKeepsVisibleCodeAtSameViewportPosition() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 100)
+        let secondContent = "let stableViewportAnchor = 42"
+        let firstCollapsed = try XCTUnwrap(
+            makeGroup(id: "first", isFileExpanded: false).files.first
+        )
+        let firstExpanded = try XCTUnwrap(
+            makeGroup(id: "first", isFileExpanded: true).files.first
+        )
+        let second = try XCTUnwrap(
+            makeGroup(
+                id: "second",
+                path: "Sources/Second.swift",
+                additionContent: secondContent
+            ).files.first
+        )
+        func group(first: DiffStackFile) -> DiffStackGroup {
+            DiffStackGroup(
+                id: "working",
+                title: "Working",
+                emptyMessage: "No changes",
+                isExpanded: true,
+                files: [first, second]
+            )
+        }
+
+        scrollView.display(
+            groups: [group(first: firstCollapsed)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        var region = try codeRegion(containing: secondContent, in: tableView)
+        var row = tableView.row(for: region.cell)
+        let targetViewportY: CGFloat = 32
+        scrollView.contentView.scroll(
+            to: NSPoint(
+                x: 0,
+                y: tableView.rect(ofRow: row).minY - targetViewportY
+            )
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let before = tableView.rect(ofRow: row).minY
+            - scrollView.contentView.bounds.minY
+
+        scrollView.display(
+            groups: [group(first: firstExpanded)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        region = try codeRegion(containing: secondContent, in: tableView)
+        row = tableView.row(for: region.cell)
+        let after = tableView.rect(ofRow: row).minY
+            - scrollView.contentView.bounds.minY
+
+        XCTAssertEqual(before, targetViewportY, accuracy: 0.5)
+        XCTAssertEqual(after, before, accuracy: 0.5)
+    }
+
+    func testForegroundStructuralRefreshAtSummaryBoundaryKeepsAbsoluteOffset() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 220)
+        let commit = GitCommit(
+            oid: String(repeating: "a", count: 40),
+            shortOID: "aaaaaaa",
+            authorName: "Review Author",
+            authoredAt: Date(timeIntervalSince1970: 100),
+            parentOIDs: [String(repeating: "b", count: 40)],
+            refNames: ["refs/heads/main"],
+            subject: "Keep the summary boundary stable"
+        )
+        let summary = DiffStackSummary(
+            commit: commit,
+            metadata: GitCommitMetadata(
+                treeOID: String(repeating: "c", count: 40),
+                authorEmail: "review@example.com"
+            ),
+            message: """
+            Keep the summary boundary stable when foreground loading finishes.
+
+            The viewport starts inside this summary while code from the first
+            visible file remains at the bottom of the same viewport.
+            """,
+            fileCount: 2,
+            addedLineCount: 4,
+            deletedLineCount: 4,
+            isFileListExpanded: true
+        )
+        let firstCollapsed = try XCTUnwrap(
+            makeGroup(id: "first", isFileExpanded: false).files.first
+        )
+        let firstExpanded = try XCTUnwrap(
+            makeGroup(id: "first", isFileExpanded: true).files.first
+        )
+        let secondContent = "let summaryBoundaryAnchor = 42"
+        let second = try XCTUnwrap(
+            makeGroup(
+                id: "second",
+                path: "Sources/Second.swift",
+                additionContent: secondContent
+            ).files.first
+        )
+        func group(first: DiffStackFile) -> DiffStackGroup {
+            DiffStackGroup(
+                id: "working",
+                title: "Working",
+                emptyMessage: "No changes",
+                isExpanded: true,
+                files: [first, second]
+            )
+        }
+
+        scrollView.display(
+            summary: summary,
+            groups: [group(first: firstCollapsed)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let summaryBottom = tableView.rect(ofRow: 0).maxY
+        let targetOffset = summaryBottom - 24
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let code = try codeRegion(containing: secondContent, in: tableView)
+        let codeRow = tableView.row(for: code.cell)
+        XCTAssertLessThan(
+            tableView.rect(ofRow: codeRow).minY,
+            scrollView.contentView.bounds.maxY
+        )
+        XCTAssertLessThan(targetOffset, summaryBottom)
+
+        scrollView.isApplicationActive = false
+        scrollView.isApplicationActive = true
+        scrollView.display(
+            summary: summary,
+            groups: [group(first: firstExpanded)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            scrollView.contentView.bounds.minY,
+            targetOffset,
+            accuracy: 0.5
+        )
+    }
+
     func testGroupAndFileHeadersStickAsOneStack() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 80)
@@ -952,7 +1413,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         XCTAssertFalse(sticky.isHidden)
         XCTAssertTrue(sticky.isOpaque)
-        XCTAssertEqual(sticky.frame.height, 60, accuracy: 0.5)
+        XCTAssertEqual(sticky.frame.height, 57, accuracy: 0.5)
 
         let visibleHeaders = sticky.subviews
             .filter { !$0.isHidden }
@@ -960,9 +1421,9 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(visibleHeaders.count, 2)
         XCTAssertTrue(visibleHeaders.allSatisfy(\.clipsToBounds))
         XCTAssertEqual(visibleHeaders[0].frame.minY, 0, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[0].frame.height, 28, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.minY, 28, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.height, 32, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[0].frame.height, 30, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.minY, 30, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.height, 27, accuracy: 0.5)
 
         sticky.displayIfNeeded()
         let bitmap = try XCTUnwrap(
@@ -974,7 +1435,7 @@ final class DiffStackViewTests: XCTestCase {
 
         let labels = descendants(of: sticky)
             .compactMap { ($0 as? NSTextField)?.stringValue }
-        XCTAssertTrue(labels.contains("WORKING · 1"))
+        XCTAssertTrue(labels.contains("Working · 1"))
         XCTAssertTrue(labels.contains { $0.contains("Sample.swift") })
     }
 
@@ -996,7 +1457,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 7)
         XCTAssertEqual(
             tableView.rect(ofRow: 7).minY - scrollView.contentView.bounds.minY,
-            60,
+            57,
             accuracy: 0.5
         )
 
@@ -1004,7 +1465,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 2)
         XCTAssertEqual(
             tableView.rect(ofRow: 2).minY - scrollView.contentView.bounds.minY,
-            60,
+            57,
             accuracy: 0.5
         )
     }
@@ -1077,7 +1538,10 @@ final class DiffStackViewTests: XCTestCase {
                     continue
                 }
                 values.append(contentsOf: descendants(of: cell).compactMap {
-                    ($0 as? NSTextField)?.stringValue
+                    if let textField = $0 as? NSTextField {
+                        return textField.stringValue
+                    }
+                    return ($0 as? NSTextView)?.string
                 })
             }
             return values
@@ -1174,7 +1638,7 @@ final class DiffStackViewTests: XCTestCase {
         )
     }
 
-    func testSideBySideHunkHeaderMirrorsTitleAcrossBothPanes() throws {
+    func testSideBySideHunkHeaderUsesSectionHeadingAndRawHeaderTooltip() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 160)
         scrollView.display(groups: [makeGroup()], layout: .sideBySide, scrollTarget: nil)
@@ -1184,21 +1648,29 @@ final class DiffStackViewTests: XCTestCase {
             tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
         )
         hunkCell.layoutSubtreeIfNeeded()
-        let titleFields = hunkCell.subviews.compactMap { $0 as? NSTextField }.filter {
+        let fields = hunkCell.subviews.compactMap { $0 as? NSTextField }
+        let oldTitle = try XCTUnwrap(fields.first {
             $0.identifier?.rawValue == "hunk-title-old"
-                || $0.identifier?.rawValue == "hunk-title-new"
-        }
-
-        XCTAssertEqual(titleFields.count, 2)
-        XCTAssertEqual(titleFields.map(\.stringValue), ["Sample.value", "Sample.value"])
-        XCTAssertTrue(titleFields.allSatisfy {
-            $0.lineBreakMode == .byTruncatingTail
-                && $0.toolTip?.contains("@@") == true
         })
-        XCTAssertEqual(titleFields[0].frame.minX, 38, accuracy: 0.5)
+        let newTitle = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-new"
+        })
+        let unifiedTitle = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-unified"
+        })
+        XCTAssertEqual(oldTitle.stringValue, "Sample.value")
+        XCTAssertEqual(newTitle.stringValue, "Sample.value")
+        XCTAssertEqual(oldTitle.lineBreakMode, .byTruncatingTail)
+        XCTAssertEqual(newTitle.lineBreakMode, .byTruncatingTail)
+        XCTAssertTrue(oldTitle.toolTip?.contains("@@") == true)
+        XCTAssertTrue(newTitle.toolTip?.contains("@@") == true)
+        XCTAssertTrue(unifiedTitle.isHidden)
+        XCTAssertFalse(oldTitle.isHidden)
+        XCTAssertFalse(newTitle.isHidden)
+        XCTAssertEqual(oldTitle.frame.minX, 47, accuracy: 0.5)
         XCTAssertEqual(
-            titleFields[1].frame.minX,
-            hunkCell.bounds.width / 2 + 38,
+            newTitle.frame.minX,
+            floor(hunkCell.bounds.width / 2) + 47,
             accuracy: 0.5
         )
         let location = try XCTUnwrap(
@@ -1207,10 +1679,10 @@ final class DiffStackViewTests: XCTestCase {
             }
         )
         XCTAssertEqual(location.stringValue, "−1–3  +1–2")
-        XCTAssertFalse(location.isHidden)
+        XCTAssertTrue(location.isHidden)
     }
 
-    func testNarrowSideBySideHunkHeaderPreservesBothTitles() throws {
+    func testNarrowSideBySideHunkHeaderPreservesSectionHeading() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 590, height: 160)
         scrollView.display(
@@ -1237,8 +1709,39 @@ final class DiffStackViewTests: XCTestCase {
 
         XCTAssertGreaterThan(oldTitle.frame.width, 40)
         XCTAssertGreaterThan(newTitle.frame.width, 40)
+        XCTAssertEqual(oldTitle.stringValue, "Sample.value")
+        XCTAssertEqual(newTitle.stringValue, "Sample.value")
         XCTAssertTrue(location.isHidden)
-        XCTAssertEqual(tableView.rect(ofRow: 2).height, 24, accuracy: 0.5)
+        XCTAssertEqual(tableView.rect(ofRow: 2).height, 27, accuracy: 0.5)
+    }
+
+    func testHunkWithoutSectionKeepsSublimeBlankHeaderRow() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 160)
+        scrollView.display(
+            groups: [makeGroup(mutationMode: nil, sectionHeading: nil)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let hunkCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        )
+        hunkCell.layoutSubtreeIfNeeded()
+        let fields = hunkCell.subviews.compactMap { $0 as? NSTextField }
+        let oldTitle = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-old"
+        })
+        let newTitle = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-new"
+        })
+
+        XCTAssertEqual(oldTitle.stringValue, "")
+        XCTAssertEqual(newTitle.stringValue, "")
+        XCTAssertEqual(tableView.rect(ofRow: 2).height, 27, accuracy: 0.5)
+        XCTAssertTrue(oldTitle.toolTip?.contains("@@") == true)
+        XCTAssertTrue(newTitle.toolTip?.contains("@@") == true)
     }
 
     func testExpandingContextKeepsNextHunkAtSameViewportPosition() throws {
@@ -1310,7 +1813,7 @@ final class DiffStackViewTests: XCTestCase {
         var showsWholeFile = false
         scrollView.onToggleWholeFile = { _ in
             if let currentTableView = scrollView.documentView as? NSTableView {
-                anchorViewportY = currentTableView.rect(ofRow: showsWholeFile ? 13 : 10).minY
+                anchorViewportY = currentTableView.rect(ofRow: showsWholeFile ? 12 : 9).minY
                     - scrollView.contentView.bounds.minY
             }
             showsWholeFile.toggle()
@@ -1340,7 +1843,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.layoutSubtreeIfNeeded()
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
-        let initialCodeRow = 11
+        let initialCodeRow = 9
         let targetViewportY: CGFloat = 86
         scrollView.contentView.scroll(
             to: NSPoint(
@@ -1350,18 +1853,19 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.reflectScrolledClipView(scrollView.contentView)
         scrollView.layoutSubtreeIfNeeded()
-        let wholeFileToolRow = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let compactSecondHunkRow = 8
+        let compactSecondHunk = try XCTUnwrap(
+            tableView.view(
+                atColumn: 0,
+                row: compactSecondHunkRow,
+                makeIfNecessary: true
+            )
         )
-        let wholeFileButton = try XCTUnwrap(
-            descendants(of: wholeFileToolRow).compactMap { $0 as? NSButton }.first {
-                $0.identifier?.rawValue == "whole-file-toggle" && !$0.isHidden
-            }
-        )
+        let wholeFileButton = try revealHunkWholeFileButton(in: compactSecondHunk)
 
         wholeFileButton.performClick(nil)
 
-        let expandedCodeRow = 13
+        let expandedCodeRow = 12
         XCTAssertLessThanOrEqual(
             abs(
                 tableView.rect(ofRow: expandedCodeRow).minY
@@ -1371,22 +1875,162 @@ final class DiffStackViewTests: XCTestCase {
             4
         )
 
-        let expandedWholeFileToolRow = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let expandedFileHeader = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
         )
         let hideWholeFileButton = try XCTUnwrap(
-            descendants(of: expandedWholeFileToolRow).compactMap { $0 as? NSButton }.first {
+            descendants(of: expandedFileHeader).compactMap { $0 as? NSButton }.first {
                 $0.identifier?.rawValue == "whole-file-toggle" && !$0.isHidden
             }
         )
         hideWholeFileButton.performClick(nil)
         XCTAssertLessThanOrEqual(
             abs(
-                tableView.rect(ofRow: 10).minY
+                tableView.rect(ofRow: 9).minY
                     - scrollView.contentView.bounds.minY
                     - (try XCTUnwrap(anchorViewportY))
             ),
             4
+        )
+    }
+
+    func testWholeFileAnchorWaitsForAsyncContentBeforeRestoring() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 120)
+        let initialGap = makeContextGap(hiddenLineCount: 7, revealedLineNumbers: [])
+        let expandedGap = makeContextGap(
+            hiddenLineCount: 4,
+            revealedLineNumbers: [7, 8, 9]
+        )
+        scrollView.onToggleWholeFile = { _ in
+            scrollView.display(
+                groups: [
+                    self.makeGroup(
+                        includesSecondHunk: true,
+                        showsWholeFile: true,
+                        isLoadingWholeFile: true,
+                        contextGaps: [initialGap],
+                        canToggleWholeFile: true
+                    )
+                ],
+                layout: .unified,
+                scrollTarget: nil
+            )
+            scrollView.display(
+                groups: [
+                    self.makeGroup(
+                        includesSecondHunk: true,
+                        showsWholeFile: true,
+                        contextGaps: [expandedGap],
+                        canToggleWholeFile: true
+                    )
+                ],
+                layout: .unified,
+                scrollTarget: nil
+            )
+        }
+        scrollView.display(
+            groups: [
+                makeGroup(
+                    includesSecondHunk: true,
+                    contextGaps: [initialGap],
+                    canToggleWholeFile: true
+                )
+            ],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let targetViewportY: CGFloat = 82
+        scrollView.contentView.scroll(
+            to: NSPoint(
+                x: 0,
+                y: tableView.rect(ofRow: 9).minY - targetViewportY
+            )
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let secondHunk = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 8, makeIfNecessary: true)
+        )
+        let expandButton = try revealHunkWholeFileButton(in: secondHunk)
+
+        expandButton.performClick(nil)
+
+        XCTAssertEqual(
+            tableView.rect(ofRow: 12).minY - scrollView.contentView.bounds.minY,
+            targetViewportY,
+            accuracy: 0.5
+        )
+    }
+
+    func testCollapsingWholeFileKeepsVisibleChangedHunkAfterScrolling() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 120)
+        let initialGap = makeContextGap(hiddenLineCount: 7, revealedLineNumbers: [])
+        let expandedGap = makeContextGap(
+            hiddenLineCount: 4,
+            revealedLineNumbers: [7, 8, 9]
+        )
+        var showsWholeFile = false
+        scrollView.onToggleWholeFile = { _ in
+            showsWholeFile.toggle()
+            scrollView.display(
+                groups: [
+                    self.makeGroup(
+                        includesSecondHunk: true,
+                        showsWholeFile: showsWholeFile,
+                        contextGaps: [showsWholeFile ? expandedGap : initialGap],
+                        canToggleWholeFile: true
+                    )
+                ],
+                layout: .unified,
+                scrollTarget: nil
+            )
+        }
+        scrollView.display(
+            groups: [
+                makeGroup(
+                    includesSecondHunk: true,
+                    contextGaps: [initialGap],
+                    canToggleWholeFile: true
+                )
+            ],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let firstHunk = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        )
+        let expandButton = try revealHunkWholeFileButton(in: firstHunk)
+        expandButton.performClick(nil)
+
+        let targetViewportY: CGFloat = 82
+        scrollView.contentView.scroll(
+            to: NSPoint(
+                x: 0,
+                y: tableView.rect(ofRow: 12).minY - targetViewportY
+            )
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        scrollView.layoutSubtreeIfNeeded()
+        let expandedFileHeader = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
+        )
+        let collapseButton = try XCTUnwrap(
+            descendants(of: expandedFileHeader).compactMap { $0 as? NSButton }.first {
+                $0.identifier?.rawValue == "whole-file-toggle" && !$0.isHidden
+            }
+        )
+
+        collapseButton.performClick(nil)
+
+        XCTAssertEqual(
+            tableView.rect(ofRow: 9).minY - scrollView.contentView.bounds.minY,
+            targetViewportY,
+            accuracy: 0.5
         )
     }
 
@@ -1398,13 +2042,14 @@ final class DiffStackViewTests: XCTestCase {
             tableView.view(atColumn: 0, row: 4, makeIfNecessary: true)
         )
         let content = try XCTUnwrap(
-            descendants(of: cell).compactMap { $0 as? NSTextField }
-                .first { $0.stringValue == "let newValue = 2" }
+            descendants(of: cell).compactMap { $0 as? NSTextView }
+                .first { $0.string == "let newValue = 2" }
         )
-        XCTAssertFalse(try XCTUnwrap(content.cell).isScrollable)
         XCTAssertTrue(content.isSelectable)
 
-        let text = content.attributedStringValue
+        let text = NSAttributedString(
+            attributedString: try XCTUnwrap(content.textStorage)
+        )
         let keywordColor = try XCTUnwrap(
             text.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
         )
@@ -1855,6 +2500,7 @@ final class DiffStackViewTests: XCTestCase {
             fileCell.subviews.compactMap { $0 as? NSButton }
                 .first { $0.identifier?.rawValue == "review-toggle" }
         )
+        XCTAssertTrue(reviewButton.isHidden)
         XCTAssertEqual(reviewButton.toolTip, "Mark as Reviewed")
         reviewButton.performClick(nil)
         XCTAssertEqual(reviewedFileID, "sample")
@@ -1911,7 +2557,7 @@ final class DiffStackViewTests: XCTestCase {
                 $0.accessibilityLabel() == "Mark as Unreviewed"
             }
         )
-        XCTAssertFalse(reviewButton.isHidden)
+        XCTAssertTrue(reviewButton.isHidden)
     }
 
     func testIndexedPresentationUpdateChangesOnlyRequestedFileHeader() throws {
@@ -1978,7 +2624,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(secondReview.toolTip, "Mark as Unreviewed")
     }
 
-    func testFileContextToolRowTogglesWholeFileContext() throws {
+    func testHunkHeaderExpandsWholeFileAndFileHeaderCollapsesIt() throws {
         let scrollView = makeScrollView()
         var wholeFileID: String?
         scrollView.onToggleWholeFile = { wholeFileID = $0 }
@@ -1988,16 +2634,13 @@ final class DiffStackViewTests: XCTestCase {
             scrollTarget: nil
         )
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
-        var toggleCell = try XCTUnwrap(
+        let compactHunkCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
         )
-        var wholeFileButton = try XCTUnwrap(
-            descendants(of: toggleCell).compactMap { $0 as? NSButton }
-                .first { $0.identifier?.rawValue == "whole-file-toggle" }
-        )
-        XCTAssertEqual(wholeFileButton.toolTip, "Show entire file")
-        XCTAssertNotNil(wholeFileButton.image)
-        wholeFileButton.performClick(nil)
+        let expandButton = try revealHunkWholeFileButton(in: compactHunkCell)
+        XCTAssertEqual(expandButton.toolTip, "Show Entire File")
+        XCTAssertNotNil(expandButton.image)
+        expandButton.performClick(nil)
         XCTAssertEqual(wholeFileID, "sample")
         XCTAssertTrue(
             scrollView.contextMenu(
@@ -2011,15 +2654,16 @@ final class DiffStackViewTests: XCTestCase {
             layout: .unified,
             scrollTarget: nil
         )
-        toggleCell = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let expandedFileHeader = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
         )
-        wholeFileButton = try XCTUnwrap(
-            descendants(of: toggleCell).compactMap { $0 as? NSButton }
+        let collapseButton = try XCTUnwrap(
+            descendants(of: expandedFileHeader).compactMap { $0 as? NSButton }
                 .first { $0.identifier?.rawValue == "whole-file-toggle" }
         )
-        XCTAssertEqual(wholeFileButton.toolTip, "Show only modified hunks")
-        XCTAssertNotNil(wholeFileButton.image)
+        XCTAssertFalse(collapseButton.isHidden)
+        XCTAssertEqual(collapseButton.toolTip, "Show Only Modified Hunks")
+        XCTAssertNotNil(collapseButton.image)
         XCTAssertTrue(
             scrollView.contextMenu(
                 clickedRow: 1,
@@ -2028,45 +2672,124 @@ final class DiffStackViewTests: XCTestCase {
         )
     }
 
-    func testHunkHeaderKeepsWholeFileActionInDedicatedToolRow() throws {
+    func testHistoricalHunkShowsRealLineHistoryActionOnlyOnHover() throws {
         let scrollView = makeScrollView()
-        var wholeFileID: String?
-        scrollView.onToggleWholeFile = { wholeFileID = $0 }
+        var requestedFileID: String?
+        var requestedStartLine: Int?
+        var requestedEndLine: Int?
+        scrollView.onShowHunkHistory = { fileID, startLine, endLine in
+            requestedFileID = fileID
+            requestedStartLine = startLine
+            requestedEndLine = endLine
+        }
         scrollView.display(
-            groups: [makeGroup(canToggleWholeFile: true)],
-            layout: .unified,
+            groups: [makeGroup(mutationMode: nil)],
+            layout: .sideBySide,
             scrollTarget: nil
         )
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
         let hunkCell = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 3, makeIfNecessary: true)
+            tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
         )
-        let wholeFileButton = try XCTUnwrap(
+        let historyButton = try XCTUnwrap(
             descendants(of: hunkCell).compactMap { $0 as? NSButton }.first {
-                $0.identifier?.rawValue == "hunk-whole-file-toggle"
+                $0.identifier?.rawValue == "hunk-history"
             }
         )
-        let marker = try XCTUnwrap(
-            descendants(of: hunkCell).compactMap { $0 as? NSTextField }.first {
-                $0.identifier?.rawValue == "hunk-marker"
+        let menuButton = try XCTUnwrap(
+            descendants(of: hunkCell).compactMap { $0 as? NSButton }.first {
+                $0.identifier?.rawValue == "hunk-actions-menu"
             }
         )
 
-        XCTAssertTrue(wholeFileButton.isHidden)
-        XCTAssertFalse(marker.isHidden)
-        XCTAssertEqual(marker.stringValue, "@@")
+        XCTAssertTrue(historyButton.isHidden)
+        XCTAssertTrue(menuButton.isHidden)
         hunkCell.mouseEntered(with: try makeMouseMoveEvent())
-        XCTAssertTrue(wholeFileButton.isHidden)
-        XCTAssertFalse(marker.isHidden)
-        let toolRow = try XCTUnwrap(
+        XCTAssertFalse(historyButton.isHidden)
+        XCTAssertFalse(menuButton.isHidden)
+        XCTAssertEqual(historyButton.title, "Hunk History")
+        XCTAssertEqual(menuButton.accessibilityLabel(), "Hunk Actions")
+        historyButton.performClick(nil)
+        XCTAssertEqual(requestedFileID, "sample")
+        XCTAssertEqual(requestedStartLine, 1)
+        XCTAssertEqual(requestedEndLine, 2)
+
+        hunkCell.mouseExited(with: try makeMouseMoveEvent())
+        XCTAssertTrue(historyButton.isHidden)
+        XCTAssertTrue(menuButton.isHidden)
+    }
+
+    func testRendersHistoricalHunkHoverControlsOffscreen() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 220)
+        scrollView.display(
+            groups: [makeGroup(mutationMode: nil)],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let hunkCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
         )
-        let toolButton = try XCTUnwrap(
-            descendants(of: toolRow).compactMap { $0 as? NSButton }.first {
+        hunkCell.mouseEntered(with: try makeMouseMoveEvent())
+        scrollView.displayIfNeeded()
+
+        let bitmap = try XCTUnwrap(
+            scrollView.bitmapImageRepForCachingDisplay(in: scrollView.bounds)
+        )
+        scrollView.cacheDisplay(in: scrollView.bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let output = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        .appendingPathComponent(".build/verification", isDirectory: true)
+        .appendingPathComponent("AgentGitHunk-history-hover.png")
+        try FileManager.default.createDirectory(
+            at: output.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try png.write(to: output)
+        XCTAssertGreaterThan(png.count, 1_000)
+    }
+
+    func testWholeFileCollapseActionRemainsInStickyFileHeader() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 90)
+        var wholeFileID: String?
+        scrollView.onToggleWholeFile = { wholeFileID = $0 }
+        scrollView.display(
+            groups: [
+                makeGroup(
+                    includesSecondHunk: true,
+                    showsWholeFile: true,
+                    canToggleWholeFile: true
+                )
+            ],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        scrollView.contentView.scroll(
+            to: NSPoint(x: 0, y: tableView.rect(ofRow: 5).minY)
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        scrollView.layoutSubtreeIfNeeded()
+
+        let tableButtonIDs = Set(
+            descendants(of: tableView).compactMap { ($0 as? NSButton).map(ObjectIdentifier.init) }
+        )
+        let stickyCollapseButton = try XCTUnwrap(
+            descendants(of: scrollView).compactMap { $0 as? NSButton }.first {
                 $0.identifier?.rawValue == "whole-file-toggle"
+                    && !$0.isHidden
+                    && !tableButtonIDs.contains(ObjectIdentifier($0))
             }
         )
-        toolButton.performClick(nil)
+        XCTAssertEqual(stickyCollapseButton.toolTip, "Show Only Modified Hunks")
+        stickyCollapseButton.performClick(nil)
         XCTAssertEqual(wholeFileID, "sample")
     }
 
@@ -2278,6 +3001,18 @@ final class DiffStackViewTests: XCTestCase {
         )
     }
 
+    private func revealHunkWholeFileButton(in hunkCell: NSView) throws -> NSButton {
+        let button = try XCTUnwrap(
+            descendants(of: hunkCell).compactMap { $0 as? NSButton }.first {
+                $0.identifier?.rawValue == "hunk-whole-file-toggle"
+            }
+        )
+        XCTAssertTrue(button.isHidden)
+        hunkCell.mouseEntered(with: try makeMouseMoveEvent())
+        XCTAssertFalse(button.isHidden)
+        return button
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
@@ -2293,10 +3028,10 @@ final class DiffStackViewTests: XCTestCase {
             cell.layoutSubtreeIfNeeded()
             guard let content = descendants(of: cell).first(where: { view in
                 guard view.identifier?.rawValue == "diff-new-code-content",
-                      let field = view as? NSTextField else {
+                      let textView = view as? NSTextView else {
                     return false
                 }
-                return field.stringValue == text
+                return textView.string == text
             }), let clip = descendants(of: cell).first(where: {
                 $0.identifier?.rawValue == "diff-new-code-clip"
             }) else {
@@ -2322,6 +3057,7 @@ final class DiffStackViewTests: XCTestCase {
         isFocused: Bool = false,
         isReviewed: Bool = false,
         showsWholeFile: Bool = false,
+        isLoadingWholeFile: Bool = false,
         contextGaps: [DiffStackContextGap] = [],
         path: String = "Sources/Sample.swift",
         originalPath: String? = nil,
@@ -2334,7 +3070,9 @@ final class DiffStackViewTests: XCTestCase {
         canApplyPrimaryAction: Bool = true,
         canDiscard: Bool = true,
         isMutationEnabled: Bool = true,
-        canToggleWholeFile: Bool = false
+        canToggleWholeFile: Bool = false,
+        mutationMode: DiffStackMutationMode? = .working,
+        sectionHeading: String? = "Sample.value"
     ) -> DiffStackGroup {
         let change = GitFileChange(
             path: path,
@@ -2378,7 +3116,7 @@ final class DiffStackViewTests: XCTestCase {
             GitDiffHunk(
                 id: 0,
                 header: "@@ -1,3 +1,2 @@",
-                sectionHeading: "Sample.value",
+                sectionHeading: sectionHeading,
                 oldStart: 1,
                 oldCount: 3,
                 newStart: 1,
@@ -2437,7 +3175,7 @@ final class DiffStackViewTests: XCTestCase {
                     isFocused: isFocused,
                     isReviewed: isReviewed,
                     showsWholeFile: showsWholeFile,
-                    isLoadingWholeFile: false,
+                    isLoadingWholeFile: isLoadingWholeFile,
                     canToggleWholeFile: canToggleWholeFile || showsWholeFile,
                     canOpenWorkingFile: canOpenWorkingFile,
                     canOpenInVisualStudioCode: canOpenInVisualStudioCode,
@@ -2446,7 +3184,7 @@ final class DiffStackViewTests: XCTestCase {
                     isMutationEnabled: isMutationEnabled,
                     mutationSnapshotID: DiffReviewSnapshotID(diff: diff),
                     contextGaps: contextGaps,
-                    mutationMode: .working,
+                    mutationMode: mutationMode,
                     diff: diff,
                     imageDiff: nil
                 )

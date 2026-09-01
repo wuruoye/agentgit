@@ -216,6 +216,37 @@ final class ReviewStateTests: XCTestCase {
         )
     }
 
+    func testNavigatorFoldersCanExpandAndCollapseAsOneSet() {
+        var state = ReviewState(expandedNavigatorFolderIDs: ["preserved"])
+
+        XCTAssertTrue(
+            setNavigatorFolderExpansion(
+                in: &state,
+                folderIDs: ["first", "second"],
+                isExpanded: true
+            )
+        )
+        XCTAssertEqual(
+            state.expandedNavigatorFolderIDs,
+            ["first", "preserved", "second"]
+        )
+        XCTAssertFalse(
+            setNavigatorFolderExpansion(
+                in: &state,
+                folderIDs: ["first", "second"],
+                isExpanded: true
+            )
+        )
+        XCTAssertTrue(
+            setNavigatorFolderExpansion(
+                in: &state,
+                folderIDs: ["first", "second"],
+                isExpanded: false
+            )
+        )
+        XCTAssertEqual(state.expandedNavigatorFolderIDs, ["preserved"])
+    }
+
     @MainActor
     func testReviewStateStoreRestoresPersistentReviewStateWithoutFilter() {
         let suiteName = "ReviewStateTests.\(UUID().uuidString)"

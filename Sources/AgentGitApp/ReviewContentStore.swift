@@ -62,6 +62,17 @@ struct HistoricalReviewDiffCacheKey: Codable, Hashable, Sendable {
 struct HistoricalReviewDetails: Codable, Equatable, Sendable {
     let message: String
     let changes: [GitFileChange]
+    let commitMetadata: GitCommitMetadata?
+
+    init(
+        message: String,
+        changes: [GitFileChange],
+        commitMetadata: GitCommitMetadata? = nil
+    ) {
+        self.message = message
+        self.changes = changes
+        self.commitMetadata = commitMetadata
+    }
 }
 
 struct StartupReviewContent: Sendable {

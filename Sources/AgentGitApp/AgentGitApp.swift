@@ -30,7 +30,7 @@ struct AgentGitApp: App {
             width: AgentGitWindowMetrics.defaultWidth,
             height: AgentGitWindowMetrics.defaultHeight
         )
-        .windowToolbarStyle(.unified)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             AgentGitReviewCommands()
 

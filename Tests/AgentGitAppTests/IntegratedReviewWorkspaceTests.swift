@@ -3,6 +3,79 @@ import XCTest
 @testable import AgentGitApp
 
 final class IntegratedReviewWorkspaceTests: XCTestCase {
+    func testHunkHistoryFilterDescribesSingleAndMultipleLines() {
+        let single = HunkHistoryFilter(
+            worktreeID: "/repo",
+            revision: "head",
+            fileID: "file",
+            path: "Sources/App.swift",
+            startLine: 42,
+            endLine: 42
+        )
+        let multiple = HunkHistoryFilter(
+            worktreeID: "/repo",
+            revision: "head",
+            fileID: "file",
+            path: "Sources/App.swift",
+            startLine: 42,
+            endLine: 49
+        )
+
+        XCTAssertEqual(single.lineLabel, "line 42")
+        XCTAssertEqual(multiple.lineLabel, "lines 42–49")
+    }
+
+    func testCommitListTimestampStaysInSublimeEnglishFormat() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let now = try XCTUnwrap(
+            calendar.date(
+                from: DateComponents(
+                    year: 2026,
+                    month: 9,
+                    day: 1,
+                    hour: 20,
+                    minute: 0
+                )
+            )
+        )
+        let sameDay = try XCTUnwrap(
+            calendar.date(
+                from: DateComponents(
+                    year: 2026,
+                    month: 9,
+                    day: 1,
+                    hour: 18,
+                    minute: 5
+                )
+            )
+        )
+        let previousDay = try XCTUnwrap(
+            calendar.date(
+                from: DateComponents(
+                    year: 2026,
+                    month: 8,
+                    day: 31,
+                    hour: 18,
+                    minute: 5
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            commitListTimestamp(sameDay, relativeTo: now, calendar: calendar),
+            "18:05"
+        )
+        XCTAssertEqual(
+            commitListTimestamp(previousDay, relativeTo: now, calendar: calendar),
+            "Mon, 18:05"
+        )
+        XCTAssertEqual(
+            commitSummaryTimestamp(previousDay),
+            "2026, Aug 31, Mon, 18:05"
+        )
+    }
+
     func testReviewNavigationWidthProtectsNarrowReviewPane() {
         XCTAssertEqual(
             clampedReviewNavigationPaneWidth(240, totalWidth: 800),
@@ -16,7 +89,7 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
         XCTAssertEqual(
             clampedReviewNavigationPaneWidth(400, totalWidth: 1_200),
-            300,
+            400,
             accuracy: 0.001
         )
     }
@@ -28,6 +101,29 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         XCTAssertTrue(
             commitMessageNeedsFullReader(String(repeating: "long message ", count: 24))
         )
+    }
+
+    func testExpandedReviewFolderChoosesItsFirstSortedFile() {
+        let folders = [
+            DiffStackFolder(
+                id: "folder:Sources",
+                title: "Sources",
+                isExpanded: false,
+                fileIDs: ["Sources/First.swift", "Sources/Second.swift"]
+            ),
+            DiffStackFolder(
+                id: "folder:Tests",
+                title: "Tests",
+                isExpanded: false,
+                fileIDs: ["Tests/FirstTests.swift"]
+            )
+        ]
+
+        XCTAssertEqual(
+            firstReviewFileID(in: "folder:Sources", folders: folders),
+            "Sources/First.swift"
+        )
+        XCTAssertNil(firstReviewFileID(in: "folder:Missing", folders: folders))
     }
 
     func testOverviewRowsExposeConciseVoiceOverLabels() {

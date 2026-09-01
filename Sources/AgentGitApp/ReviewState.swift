@@ -342,6 +342,21 @@ func synchronizeNavigatorFolderExpansion(
     return state.expandedNavigatorFolderIDs != previous
 }
 
+@discardableResult
+func setNavigatorFolderExpansion(
+    in state: inout ReviewState,
+    folderIDs: Set<String>,
+    isExpanded: Bool
+) -> Bool {
+    let previous = state.expandedNavigatorFolderIDs
+    if isExpanded {
+        state.expandedNavigatorFolderIDs.formUnion(folderIDs)
+    } else {
+        state.expandedNavigatorFolderIDs.subtract(folderIDs)
+    }
+    return state.expandedNavigatorFolderIDs != previous
+}
+
 /// 刻意不做 @Observable：滚动位置每帧都在变，进入观察体系会把整个工作区拖进重绘。
 @MainActor
 final class ReviewStateStore {

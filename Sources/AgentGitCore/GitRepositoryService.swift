@@ -159,6 +159,8 @@ public enum GitMutationError: Error, Equatable, Sendable {
 public enum GitHistoryLoadError: LocalizedError, Equatable, Sendable {
     case invalidOffset(Int)
     case invalidPageSize(Int)
+    case invalidLineRange(start: Int, end: Int)
+    case emptyPath
 
     public var errorDescription: String? {
         switch self {
@@ -166,6 +168,10 @@ public enum GitHistoryLoadError: LocalizedError, Equatable, Sendable {
             "History offset must be zero or greater; received \(offset)."
         case let .invalidPageSize(pageSize):
             "History page size must be greater than zero; received \(pageSize)."
+        case let .invalidLineRange(start, end):
+            "Line history requires a positive range; received \(start)...\(end)."
+        case .emptyPath:
+            "Line history requires a repository-relative file path."
         }
     }
 }
@@ -275,7 +281,7 @@ private enum GitSupplementalLoadResult<Value: Sendable>: Sendable {
 
 public struct GitRepositoryService: Sendable {
     /// oid, short oid, author, author date, parents, refs, subject —— 与 GitLogParser 对应。
-    private static let historyFormat = "%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%D%x1f%s"
+    private static let historyFormat = "%x00%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%D%x1f%s"
     private static let diffBatchSize = 24
     private static let maximumPatchOutputBytes = 8 * 1_024 * 1_024
     private static let maximumHistoryOutputBytes = 8 * 1_024 * 1_024
@@ -1095,6 +1101,7 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
+            "--shortstat",
             "--decorate=full",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
@@ -1107,6 +1114,7 @@ public struct GitRepositoryService: Sendable {
             arguments: arguments,
             workingDirectory: worktree.rootURL,
             maximumOutputBytes: Self.maximumHistoryOutputBytes,
+            environment: ["LC_ALL": "C"],
             timeout: Self.repositoryScanTimeout
         )
         let loaded = try GitLogParser.parse(data)
@@ -1116,6 +1124,52 @@ public struct GitRepositoryService: Sendable {
             nextOffset: offset + commits.count,
             hasMore: loaded.count > pageSize
         )
+    }
+
+    public func loadLineHistory(
+        worktree: GitWorktree,
+        revision: String?,
+        path: String,
+        startLine: Int,
+        endLine: Int,
+        limit: Int = 500
+    ) async throws -> [GitCommit] {
+        guard !path.isEmpty else {
+            throw GitHistoryLoadError.emptyPath
+        }
+        guard startLine > 0, endLine >= startLine else {
+            throw GitHistoryLoadError.invalidLineRange(
+                start: startLine,
+                end: endLine
+            )
+        }
+        guard limit > 0 && limit < Int.max else {
+            throw GitHistoryLoadError.invalidPageSize(limit)
+        }
+        guard !worktree.isUnborn else {
+            return []
+        }
+
+        var arguments = [
+            "log",
+            "-z",
+            "-L", "\(startLine),\(endLine):\(path)",
+            "--decorate=full",
+            "--format=\(Self.historyFormat)",
+            "--no-patch",
+            "--max-count=\(limit)"
+        ]
+        if let revision {
+            arguments.append(revision)
+        }
+        let data = try await runner.run(
+            arguments: arguments,
+            workingDirectory: worktree.rootURL,
+            maximumOutputBytes: Self.maximumHistoryOutputBytes,
+            environment: ["LC_ALL": "C"],
+            timeout: Self.repositoryScanTimeout
+        )
+        return try GitLogParser.parse(data)
     }
 
     public func historyContainsCommits(
@@ -1168,6 +1222,7 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
+            "--shortstat",
             "--decorate=full",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
@@ -1188,6 +1243,7 @@ public struct GitRepositoryService: Sendable {
             arguments: arguments,
             workingDirectory: worktree.rootURL,
             maximumOutputBytes: Self.maximumHistoryOutputBytes,
+            environment: ["LC_ALL": "C"],
             timeout: Self.repositoryScanTimeout
         )
         let loaded = try GitLogParser.parse(data)
@@ -1216,6 +1272,37 @@ public struct GitRepositoryService: Sendable {
         )
         return String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func loadCommitMetadata(
+        worktree: GitWorktree,
+        commit: GitCommit
+    ) async throws -> GitCommitMetadata {
+        let data = try await runner.run(
+            arguments: [
+                "show",
+                "-s",
+                "--format=%T%x1f%ae",
+                commit.oid
+            ],
+            workingDirectory: worktree.rootURL,
+            maximumOutputBytes: 64 * 1_024,
+            timeout: Self.quickMetadataTimeout
+        )
+        let text = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = text.split(
+            separator: "\u{1f}",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard fields.count == 2, !fields[0].isEmpty else {
+            throw GitLogParseError.malformedRecord(text)
+        }
+        return GitCommitMetadata(
+            treeOID: String(fields[0]),
+            authorEmail: String(fields[1])
+        )
     }
 
     public func loadCommitChanges(
