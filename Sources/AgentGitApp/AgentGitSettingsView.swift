@@ -2,9 +2,11 @@ import AgentGitCore
 import AgentGitIntegrationShared
 import SwiftUI
 
-enum AgentGitSettingsSection: Hashable {
+enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     case review
     case agents
+
+    var id: Self { self }
 
     var title: String {
         switch self {
@@ -13,11 +15,132 @@ enum AgentGitSettingsSection: Hashable {
         }
     }
 
+    var subtitle: String {
+        switch self {
+        case .review: "Configure diff presentation and review behavior."
+        case .agents: "Manage optional AgentGit integrations and local sessions."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .review: "rectangle.split.2x1"
+        case .agents: "sparkles.rectangle.stack"
+        }
+    }
+
     var preferredContentHeight: CGFloat {
         switch self {
-        case .review: 280
-        case .agents: 540
+        case .review: 590
+        case .agents: 620
         }
+    }
+}
+
+private struct ReviewSettingsPreview: View {
+    let layout: DiffLayoutMode
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.accentColor)
+                    .frame(width: 3, height: 23)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("Sources/ReviewView.swift")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Spacer()
+                Text("−2  +4")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(Color(nsColor: AgentGitPalette.fileHeader))
+
+            HStack {
+                Text("renderReview()")
+                    .font(.system(size: 10.5, design: .monospaced))
+                Spacer()
+                Text(layout.title)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(Color(nsColor: AgentGitPalette.hunkHeader))
+
+            if layout == .sideBySide {
+                HStack(spacing: 0) {
+                    codePreview(isAddition: false)
+                    Divider()
+                    codePreview(isAddition: true)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    codeLine("− let state = oldValue", isAddition: false)
+                    codeLine("+ let state = newValue", isAddition: true)
+                }
+            }
+        }
+        .background(Color(nsColor: AgentGitPalette.canvas))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 1)
+        }
+    }
+
+    private func codePreview(isAddition: Bool) -> some View {
+        codeLine(
+            isAddition ? "+ let state = newValue" : "− let state = oldValue",
+            isAddition: isAddition
+        )
+    }
+
+    private func codeLine(_ text: String, isAddition: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 10.5, design: .monospaced))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                Color(
+                    nsColor: isAddition
+                        ? AgentGitPalette.additionBackground
+                        : AgentGitPalette.deletionBackground
+                )
+            )
+    }
+}
+
+private struct AgentGitSettingsCard<Content: View>: View {
+    let accent: Color
+    @ViewBuilder let content: Content
+
+    init(
+        accent: Color = .secondary,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.accent = accent
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(17)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Color(nsColor: AgentGitPalette.reviewControlBackground),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(accent.opacity(0.16), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.025), radius: 8, y: 2)
     }
 }
 
@@ -39,32 +162,34 @@ struct AgentGitSettingsView: View {
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Settings Section", selection: $selectedSection) {
-                Text(AgentGitSettingsSection.review.title)
-                    .tag(AgentGitSettingsSection.review)
-                Text(AgentGitSettingsSection.agents.title)
-                    .tag(AgentGitSettingsSection.agents)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 240)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-
+        HStack(spacing: 0) {
+            settingsSidebar
             Divider()
 
-            switch selectedSection {
-            case .review:
-                reviewSettings
-            case .agents:
-                agentSettings
+            VStack(spacing: 0) {
+                settingsHeader
+                Divider()
+
+                ScrollView {
+                    Group {
+                        switch selectedSection {
+                        case .review:
+                            reviewSettings
+                        case .agents:
+                            agentSettings
+                        }
+                    }
+                    .padding(22)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(
-            width: 560,
+            width: 820,
             height: fixedContentHeight ?? selectedSection.preferredContentHeight
         )
+        .background(Color(nsColor: .windowBackgroundColor))
         .task(id: model.isApplicationActive && selectedSection == .agents) {
             guard model.isApplicationActive, selectedSection == .agents else {
                 return
@@ -73,162 +198,387 @@ struct AgentGitSettingsView: View {
         }
     }
 
-    private var reviewSettings: some View {
-        Form {
-            Section("Diff") {
-                Picker("Layout", selection: layoutBinding) {
-                    ForEach(DiffLayoutMode.allCases) { layout in
-                        Text(layout.title).tag(layout)
-                    }
+    private var settingsSidebar: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 11) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 42, height: 42)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("AgentGit")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Text("Preferences")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
                 }
-                .pickerStyle(.segmented)
+            }
+            .padding(.horizontal, 4)
 
-                Picker("Context", selection: contextBinding) {
-                    ForEach(Self.contextChoices, id: \.self) { context in
-                        Text(context.title).tag(context)
+            VStack(spacing: 6) {
+                ForEach(AgentGitSettingsSection.allCases) { section in
+                    Button {
+                        selectedSection = section
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: section.systemImage)
+                                .frame(width: 20)
+                            Text(section.title)
+                                .font(.system(size: 12.5, weight: .medium))
+                            Spacer(minLength: 4)
+                            if section == .agents {
+                                Circle()
+                                    .fill(agentIntegrationSummaryColor)
+                                    .frame(width: 7, height: 7)
+                            }
+                        }
+                        .foregroundStyle(
+                            selectedSection == section
+                                ? Color.accentColor
+                                : Color.primary
+                        )
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background(
+                            selectedSection == section
+                                ? Color.accentColor.opacity(0.11)
+                                : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        )
                     }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel(section.title)
+                    .accessibilityValue(
+                        selectedSection == section ? "Selected" : ""
+                    )
                 }
+            }
 
-                Toggle("Ignore whitespace changes", isOn: ignoresWhitespaceBinding)
+            Spacer(minLength: 16)
+
+            Label("Local configuration", systemImage: "lock.shield")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+        }
+        .padding(16)
+        .frame(width: 210)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(.ultraThinMaterial)
+    }
+
+    private var settingsHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(selectedSection.title)
+                    .font(.system(size: 20, weight: .semibold))
+                Text(selectedSection.subtitle)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if selectedSection == .agents {
+                Label(
+                    "\(model.agentAssociations.associations.count) sessions",
+                    systemImage: "link"
+                )
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Color.secondary.opacity(0.07), in: Capsule())
             }
         }
-        .formStyle(.grouped)
-        .padding(12)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+    }
+
+    private var reviewSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            AgentGitSettingsCard(accent: .accentColor) {
+                VStack(alignment: .leading, spacing: 16) {
+                    settingsCardHeading(
+                        "Diff Presentation",
+                        detail: "Choose the layout and context used throughout the Review workspace.",
+                        image: "rectangle.split.2x1"
+                    )
+
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 14) {
+                        GridRow {
+                            settingsFieldLabel("Layout")
+                            Picker("Layout", selection: layoutBinding) {
+                                ForEach(DiffLayoutMode.allCases) { layout in
+                                    Text(layout.title).tag(layout)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+
+                        GridRow {
+                            settingsFieldLabel("Context")
+                            Picker("Context", selection: contextBinding) {
+                                ForEach(Self.contextChoices, id: \.self) { context in
+                                    Text(context.title).tag(context)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        GridRow {
+                            settingsFieldLabel("Comparison")
+                            Toggle(
+                                "Ignore whitespace changes",
+                                isOn: ignoresWhitespaceBinding
+                            )
+                            .toggleStyle(.switch)
+                        }
+                    }
+                    .font(.system(size: 12))
+                }
+            }
+
+            AgentGitSettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    settingsCardHeading(
+                        "Live Preview",
+                        detail: "The preview uses the same hierarchy as file and hunk headers.",
+                        image: "rectangle.and.text.magnifyingglass"
+                    )
+                    ReviewSettingsPreview(layout: model.diffLayout)
+                }
+            }
+        }
     }
 
     private var agentSettings: some View {
-        Form {
-            Section("Agent Integrations") {
-                ForEach(AgentProvider.allCases, id: \.self) { provider in
-                    let status = pluginStatus(provider)
-                    let plugin = AgentIntegrationPlugin.plugin(for: provider)
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 9) {
-                            Image(systemName: provider.systemImageName)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(provider.tintColor)
-                                .frame(width: 24, height: 24)
-                                .background(
-                                    provider.tintColor.opacity(0.1),
-                                    in: RoundedRectangle(cornerRadius: 6)
-                                )
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(provider.displayName)
-                                    .font(.body.weight(.medium))
-                                Text(pluginCapabilityDescription(plugin))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Circle()
-                                .fill(integrationStatusColor(status))
-                                .frame(width: 7, height: 7)
-                            Text(status.title)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                            if status == .configuring
-                                || status == .disabling
-                                || status == .notChecked {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else if status == .configured {
-                                Button("Disable") {
-                                    Task {
-                                        await model.agentPluginConfigurator.disable(provider)
-                                    }
-                                }
-                            } else if let actionTitle = integrationActionTitle(status) {
-                                Button(actionTitle) {
-                                    Task {
-                                        await model.agentPluginConfigurator.enable(provider)
-                                    }
-                                }
-                            }
+        VStack(alignment: .leading, spacing: 16) {
+            AgentGitSettingsCard(accent: agentIntegrationSummaryColor) {
+                VStack(alignment: .leading, spacing: 0) {
+                    settingsCardHeading(
+                        "Agent Integrations",
+                        detail: "Each provider can enable the AgentGit registration Skill independently.",
+                        image: "sparkles.rectangle.stack"
+                    )
+                    .padding(.bottom, 8)
+
+                    ForEach(Array(AgentProvider.allCases.enumerated()), id: \.element) {
+                        index,
+                        provider in
+                        if index > 0 {
+                            Divider()
+                                .padding(.leading, 39)
                         }
-                        if case let .failed(message) = status {
-                            Text(message)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                                .textSelection(.enabled)
-                        } else if status == .needsUpdate {
-                            Text("A newer AgentGit integration plugin is available.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let event = model.agentAssociations.latestRegistrationEvent(
-                            for: provider
-                        ) {
-                            Text(
-                                "\(registrationEventTitle(event)) · "
-                                    + compactRelativeTime(event.createdAt)
-                            )
-                            .font(.caption)
-                            .foregroundStyle(registrationEventColor(event))
-                            .help(event.message)
-                        } else if status == .configured {
-                            Text("Waiting for the first repository write registration.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        integrationRow(provider)
+                            .padding(.vertical, 10)
                     }
                 }
-
-                LabeledContent("Skill Runtime") {
-                    Text(skillBridgePath)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-
-                Text(
-                    "Each integration is installed through the agent's official plugin CLI and can "
-                        + "be enabled independently. The registration Skill checks the current "
-                        + "worktree, organizes session details, and calls the local Skill runtime."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
 
-            Section("Agent Sessions") {
-                LabeledContent("Registered") {
-                    Text("\(model.agentAssociations.associations.count)")
-                        .monospacedDigit()
-                }
-
-                if let persistenceError = model.agentAssociations.persistenceErrorMessage {
-                    Label("Session storage is unavailable", systemImage: "externaldrive.badge.exclamationmark")
-                        .foregroundStyle(.red)
-                    Text(persistenceError)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                        .help(persistenceError)
-                    Button("Repair Storage") {
-                        model.agentAssociations.repairPersistence()
-                    }
-                    .disabled(!model.agentAssociations.canRepairPersistence)
-                } else {
-                    Text(
-                        "Session associations are stored locally with private file permissions. "
-                            + "Remove an association from its session button context menu."
+            AgentGitSettingsCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    settingsCardHeading(
+                        "Skill Runtime",
+                        detail: "The bundled helper receives registration data from each provider Skill.",
+                        image: "terminal"
                     )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                if let recoveryMessage = model.agentAssociations.recoveryMessage {
-                    Text(recoveryMessage)
-                        .font(.caption)
+                    Text(skillBridgePath)
+                        .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .truncationMode(.middle)
                         .textSelection(.enabled)
-                        .help(recoveryMessage)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            Color(nsColor: AgentGitPalette.inputBackground),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
                 }
             }
+
+            AgentGitSettingsCard {
+                agentSessionStorageSettings
+            }
         }
-        .formStyle(.grouped)
-        .padding(12)
+    }
+
+    private func integrationRow(_ provider: AgentProvider) -> some View {
+        let status = pluginStatus(provider)
+        let plugin = AgentIntegrationPlugin.plugin(for: provider)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: provider.systemImageName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(provider.tintColor)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        provider.tintColor.opacity(0.1),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(provider.displayName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(pluginCapabilityDescription(plugin))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Circle()
+                    .fill(integrationStatusColor(status))
+                    .frame(width: 7, height: 7)
+                Text(status.title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                if status == .configuring
+                    || status == .disabling
+                    || status == .notChecked {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if status == .configured {
+                    Button("Disable") {
+                        Task {
+                            await model.agentPluginConfigurator.disable(provider)
+                        }
+                    }
+                    .controlSize(.small)
+                } else if let actionTitle = integrationActionTitle(status) {
+                    Button(actionTitle) {
+                        Task {
+                            await model.agentPluginConfigurator.enable(provider)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            if case let .failed(message) = status {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            } else if status == .needsUpdate {
+                Text("A newer AgentGit integration plugin is available.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let event = model.agentAssociations.latestRegistrationEvent(
+                for: provider
+            ) {
+                Text(
+                    "\(registrationEventTitle(event)) · "
+                        + compactRelativeTime(event.createdAt)
+                )
+                .font(.caption)
+                .foregroundStyle(registrationEventColor(event))
+                .help(event.message)
+            } else if status == .configured {
+                Text("Waiting for the first repository write registration.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var agentSessionStorageSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsCardHeading(
+                "Agent Sessions",
+                detail: "Associations stay on this Mac with private file permissions.",
+                image: "link"
+            )
+
+            HStack {
+                Text("Registered")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(model.agentAssociations.associations.count)")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.07), in: Capsule())
+            }
+
+            if let persistenceError = model.agentAssociations.persistenceErrorMessage {
+                Label(
+                    "Session storage is unavailable",
+                    systemImage: "externaldrive.badge.exclamationmark"
+                )
+                .foregroundStyle(.red)
+                Text(persistenceError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .help(persistenceError)
+                Button("Repair Storage") {
+                    model.agentAssociations.repairPersistence()
+                }
+                .disabled(!model.agentAssociations.canRepairPersistence)
+            }
+
+            if let recoveryMessage = model.agentAssociations.recoveryMessage {
+                Text(recoveryMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                    .help(recoveryMessage)
+            }
+        }
+    }
+
+    private func settingsCardHeading(
+        _ title: String,
+        detail: String,
+        image: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: image)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30, height: 30)
+                .background(
+                    Color.accentColor.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func settingsFieldLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 82, alignment: .leading)
+    }
+
+    private var agentIntegrationSummaryColor: Color {
+        let statuses = AgentProvider.allCases.map(pluginStatus)
+        if statuses.contains(where: { status in
+            if case .failed = status {
+                return true
+            }
+            return false
+        }) {
+            return .red
+        }
+        if statuses.allSatisfy({ $0 == .configured }) {
+            return .green
+        }
+        return .orange
     }
 
     private var layoutBinding: Binding<DiffLayoutMode> {

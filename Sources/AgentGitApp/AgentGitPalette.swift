@@ -13,9 +13,10 @@ enum AgentGitTypography {
 }
 
 enum AgentGitPalette {
-    static let canvas = adaptive(
-        light: srgb(252, 253, 253),
-        dark: srgb(30, 31, 33)
+    static let canvas = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.22
     )
     static let chrome = NSColor.controlBackgroundColor
     static let selectedChrome = NSColor.windowBackgroundColor
@@ -31,69 +32,85 @@ enum AgentGitPalette {
         fraction: 0.08
     )
     static let activeControl = NSColor.labelColor
-    static let sidebarBackground = adaptive(
-        light: srgb(246, 246, 248),
-        dark: srgb(39, 39, 42)
+    static let sidebarBackground = NSColor.windowBackgroundColor
+    static let sidebarCardBackground = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.74
     )
-    static let sidebarChrome = adaptive(
-        light: srgb(239, 239, 241),
-        dark: srgb(47, 47, 50)
+    static let sidebarCardBorder = blended(
+        foreground: NSColor.separatorColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.58
     )
-    static let sidebarInputBackground = adaptive(
-        light: srgb(253, 253, 253),
-        dark: srgb(31, 31, 33)
+    static let sidebarChrome = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.7
     )
-    static let sidebarHover = adaptive(
-        light: srgb(233, 233, 236),
-        dark: srgb(52, 52, 56)
+    static let sidebarInputBackground = blended(
+        foreground: NSColor.textBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.82
+    )
+    static let sidebarHover = blended(
+        foreground: NSColor.labelColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.055
     )
     static let sidebarGroupHeader = blended(
-        foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
+        foreground: NSColor.controlBackgroundColor,
         background: NSColor.windowBackgroundColor,
-        fraction: 0.14
+        fraction: 0.58
     )
-    static let sidebarSelection = adaptive(
-        light: srgb(213, 230, 249),
-        dark: srgb(33, 59, 89)
+    static let sidebarSelection = blended(
+        foreground: NSColor.systemBlue,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.075
     )
     static let sidebarSelectionBorder = NSColor.systemBlue
     static let sidebarMetadata = NSColor.secondaryLabelColor
-    static let sidebarDivider = adaptive(
-        light: srgb(60, 60, 67, alpha: 0.18),
-        dark: srgb(235, 235, 245, alpha: 0.11)
+    static let sidebarDivider = blended(
+        foreground: NSColor.separatorColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.62
     )
-    static let reviewChrome = adaptive(
-        light: srgb(199, 204, 209),
-        dark: srgb(43, 43, 46)
+    static let reviewChrome = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.82
     )
-    static let reviewNavigationBackground = adaptive(
-        light: srgb(236, 237, 239),
-        dark: srgb(37, 38, 41)
+    static let reviewNavigationBackground = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.62
     )
-    static let reviewTabBarBackground = adaptive(
-        light: srgb(199, 204, 209),
-        dark: srgb(48, 50, 54)
+    static let reviewTabBarBackground = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.76
     )
-    static let reviewHeaderBorder = adaptive(
-        light: srgb(217, 217, 220),
-        dark: srgb(57, 57, 61)
+    static let reviewHeaderBorder = blended(
+        foreground: NSColor.separatorColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.64
     )
-    static let reviewControlBackground = adaptive(
-        light: srgb(236, 237, 239),
-        dark: srgb(48, 48, 51)
+    static let reviewControlBackground = blended(
+        foreground: NSColor.textBackgroundColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.58
     )
-    static let reviewControlBorder = adaptive(
-        light: srgb(173, 179, 184),
-        dark: srgb(71, 71, 75)
+    static let reviewControlBorder = blended(
+        foreground: NSColor.separatorColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.62
     )
-    static let reviewHover = adaptive(
-        light: srgb(229, 229, 232),
-        dark: srgb(59, 59, 63)
+    static let reviewHover = blended(
+        foreground: NSColor.labelColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.065
     )
-    static let reviewHunkText = adaptive(
-        light: srgb(64, 64, 64),
-        dark: srgb(141, 182, 221)
-    )
+    static let reviewHunkText = NSColor.labelColor
     static let reviewContextGap = adaptive(
         light: srgb(247, 250, 252),
         dark: srgb(35, 40, 45)
@@ -102,9 +119,10 @@ enum AgentGitPalette {
         light: srgb(117, 124, 131),
         dark: srgb(139, 146, 153)
     )
-    static let reviewActionBackground = adaptive(
-        light: srgb(173, 179, 184),
-        dark: srgb(72, 77, 82)
+    static let reviewActionBackground = blended(
+        foreground: NSColor.labelColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.095
     )
     static let reviewActionConfirmationBackground = adaptive(
         light: srgb(255, 233, 231),
@@ -114,9 +132,10 @@ enum AgentGitPalette {
         light: srgb(181, 46, 44),
         dark: srgb(255, 133, 130)
     )
-    static let commitCountBackground = adaptive(
-        light: srgb(211, 214, 217),
-        dark: srgb(74, 77, 81)
+    static let commitCountBackground = blended(
+        foreground: NSColor.labelColor,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.075
     )
     static let commitPrimaryText = adaptive(
         light: srgb(4, 4, 4),
@@ -126,37 +145,44 @@ enum AgentGitPalette {
         light: srgb(112, 112, 112),
         dark: srgb(166, 166, 166)
     )
-    static let commitSelection = adaptive(
-        light: srgb(209, 224, 240),
-        dark: srgb(45, 60, 76)
+    static let groupHeader = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.68
     )
-    static let groupHeader = adaptive(
-        light: srgb(246, 246, 247),
-        dark: srgb(40, 40, 43)
+    static let folderHeader = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.windowBackgroundColor,
+        fraction: 0.78
     )
-    static let folderHeader = adaptive(
-        light: srgb(237, 239, 242),
-        dark: srgb(43, 44, 47)
+    static let fileListRow = blended(
+        foreground: NSColor.controlBackgroundColor,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.56
     )
-    static let fileHeader = adaptive(
-        light: srgb(186, 212, 238),
-        dark: srgb(33, 47, 61)
+    static let fileHeader = blended(
+        foreground: NSColor.systemBlue,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.08
     )
-    static let fileHeaderFocused = adaptive(
-        light: srgb(205, 225, 245),
-        dark: srgb(38, 57, 76)
+    static let fileHeaderFocused = blended(
+        foreground: NSColor.systemBlue,
+        background: NSColor.controlBackgroundColor,
+        fraction: 0.14
     )
-    static let fileHeaderBoundary = adaptive(
-        light: srgb(93, 146, 201, alpha: 0.42),
-        dark: srgb(113, 165, 217, alpha: 0.46)
+    static let fileHeaderBoundary = blended(
+        foreground: NSColor.systemBlue,
+        background: NSColor.separatorColor,
+        fraction: 0.38
     )
     static let fileContext = adaptive(
         light: srgb(251, 251, 252),
         dark: srgb(34, 34, 37)
     )
-    static let hunkHeader = adaptive(
-        light: srgb(228, 237, 246),
-        dark: srgb(32, 47, 62)
+    static let hunkHeader = blended(
+        foreground: NSColor.systemBlue,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.055
     )
     static let codeText = adaptive(
         light: srgb(51, 51, 51),
@@ -183,7 +209,7 @@ enum AgentGitPalette {
     static let additionBackground = blended(
         foreground: adaptive(
             light: srgb(229, 248, 226),
-            dark: srgb(45, 82, 48)
+            dark: srgb(38, 59, 41)
         ),
         background: NSColor.textBackgroundColor,
         fraction: 1
@@ -191,7 +217,7 @@ enum AgentGitPalette {
     static let deletionBackground = blended(
         foreground: adaptive(
             light: srgb(248, 226, 226),
-            dark: srgb(87, 48, 48)
+            dark: srgb(66, 40, 40)
         ),
         background: NSColor.textBackgroundColor,
         fraction: 1
@@ -204,7 +230,7 @@ enum AgentGitPalette {
     static let additionInline = blended(
         foreground: adaptive(
             light: srgb(196, 240, 194),
-            dark: srgb(57, 103, 60)
+            dark: srgb(48, 82, 51)
         ),
         background: NSColor.textBackgroundColor,
         fraction: 1
@@ -212,7 +238,7 @@ enum AgentGitPalette {
     static let deletionInline = blended(
         foreground: adaptive(
             light: srgb(240, 194, 194),
-            dark: srgb(112, 59, 59)
+            dark: srgb(91, 49, 49)
         ),
         background: NSColor.textBackgroundColor,
         fraction: 1
@@ -231,6 +257,9 @@ enum AgentGitPalette {
     static let statusModified = readableStatusColor(NSColor.systemOrange)
     static let statusRenamed = readableStatusColor(NSColor.systemBlue)
     static let statusConflicted = readableStatusColor(NSColor.systemPurple)
+
+    /// 侧栏里 worktree 相对上游领先或落后的计数。属于提示信息，不是警告，所以用蓝色。
+    static let worktreeTracking = readableStatusColor(NSColor.systemBlue)
 
     static let commitEdge0 = adaptive(
         light: srgb(51, 153, 255),

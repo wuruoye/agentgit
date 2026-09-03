@@ -670,6 +670,10 @@ final class DiffStackViewTests: XCTestCase {
             }
         )
 
+        XCTAssertTrue(stage.isHidden)
+        XCTAssertTrue(discard.isHidden)
+        fileCell.mouseEntered(with: try makeMouseMoveEvent())
+        fileCell.layoutSubtreeIfNeeded()
         XCTAssertFalse(stage.isHidden)
         XCTAssertFalse(discard.isHidden)
         XCTAssertGreaterThanOrEqual(stage.frame.minX, fileCell.bounds.minX)
@@ -678,9 +682,142 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(discard.frame.maxX, fileCell.bounds.maxX)
         XCTAssertGreaterThanOrEqual(menu.frame.minX, fileCell.bounds.minX)
         XCTAssertLessThanOrEqual(menu.frame.maxX, fileCell.bounds.maxX)
+        XCTAssertGreaterThanOrEqual(menu.frame.width, 24)
         XCTAssertEqual(menu.toolTip, "File Actions")
         XCTAssertEqual(menu.accessibilityLabel(), "File Actions")
         XCTAssertEqual(title.lineBreakMode, .byTruncatingMiddle)
+    }
+
+    func testDeletedFileHeaderUsesSublimeStatusAndStatisticsStructure() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 160)
+        scrollView.display(
+            groups: [
+                makeGroup(
+                    isFileExpanded: false,
+                    status: .deleted,
+                    statusLabel: "D",
+                    canApplyPrimaryAction: false,
+                    canDiscard: false,
+                    mutationMode: nil
+                )
+            ],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let fileCell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
+        )
+        fileCell.layoutSubtreeIfNeeded()
+        let statusLabel = try XCTUnwrap(
+            descendants(of: fileCell).compactMap { $0 as? NSTextField }.first {
+                $0.identifier?.rawValue == "file-status-label"
+            }
+        )
+        let statistics = try XCTUnwrap(
+            descendants(of: fileCell).first {
+                $0.identifier?.rawValue == "file-diff-stats"
+            }
+        )
+
+        XCTAssertFalse(statusLabel.isHidden)
+        XCTAssertEqual(statusLabel.stringValue, "D")
+        XCTAssertEqual(statusLabel.accessibilityLabel(), "Deleted File")
+        XCTAssertEqual(
+            statistics.accessibilityLabel(),
+            "2 deletions, 1 addition"
+        )
+    }
+
+    func testRendersSublimeAlignedCollapsedFileListOffscreen() throws {
+        let files = try [
+            makeGroup(
+                id: "readme",
+                isFileExpanded: false,
+                isFocused: true,
+                path: "agents/README.md",
+                canApplyPrimaryAction: false,
+                canDiscard: false,
+                mutationMode: nil
+            ),
+            makeGroup(
+                id: "deleted",
+                isFileExpanded: false,
+                path: ".agents/skills/concurrency/SKILL.md",
+                status: .deleted,
+                statusLabel: "D",
+                canApplyPrimaryAction: false,
+                canDiscard: false,
+                mutationMode: nil
+            ),
+            makeGroup(
+                id: "pipeline",
+                isFileExpanded: false,
+                path: ".agents/skills/pipeline-change/SKILL.md",
+                canApplyPrimaryAction: false,
+                canDiscard: false,
+                mutationMode: nil
+            ),
+            makeGroup(
+                id: "deploy",
+                isFileExpanded: false,
+                path: "devops/release/deploy.sh",
+                canApplyPrimaryAction: false,
+                canDiscard: false,
+                mutationMode: nil
+            )
+        ].map { group in
+            try XCTUnwrap(group.files.first)
+        }
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 180)
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        scrollView.display(
+            summary: DiffStackSummary(isFileListExpanded: false),
+            groups: [
+                DiffStackGroup(
+                    id: "context",
+                    title: nil,
+                    emptyMessage: "No file changes",
+                    isExpanded: true,
+                    files: files
+                )
+            ],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        scrollView.displayIfNeeded()
+
+        let bitmap = try XCTUnwrap(
+            scrollView.bitmapImageRepForCachingDisplay(in: scrollView.bounds)
+        )
+        scrollView.cacheDisplay(in: scrollView.bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(png.count, 10_000)
+        XCTAssertGreaterThan(sampledColorSignatures(in: bitmap).count, 8)
+        let output = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        .appendingPathComponent(".build/verification", isDirectory: true)
+        .appendingPathComponent("AgentGitChanged-files-sublime.png")
+        try FileManager.default.createDirectory(
+            at: output.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try png.write(to: output)
     }
 
     func testLongCodeLineScrollsInsideFixedSideBySidePane() throws {
@@ -952,6 +1089,59 @@ final class DiffStackViewTests: XCTestCase {
 
         XCTAssertEqual(expandedFirst.content.frame.minX, firstOffset, accuracy: 0.5)
         XCTAssertEqual(expandedSecond.content.frame.minX, secondOffset, accuracy: 0.5)
+    }
+
+    func testContextExpansionRebuildsOnlyWhenRevealedRowsChange() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 300)
+        let initialGap = makeContextGap(
+            hiddenLineCount: 7,
+            revealedLineNumbers: [],
+            contextRenderID: 1
+        )
+        scrollView.display(
+            groups: [makeGroup(includesSecondHunk: true, contextGaps: [initialGap])],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+
+        scrollView.loadingContextGapIDs = [initialGap.id]
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let loadingButton = try XCTUnwrap(
+            (0..<tableView.numberOfRows).lazy.compactMap { row in
+                tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
+            }.flatMap { self.descendants(of: $0) }
+                .compactMap { $0 as? NSButton }
+                .first { $0.identifier?.rawValue == "hunk-context-expand" }
+        )
+        XCTAssertFalse(loadingButton.isEnabled)
+        XCTAssertEqual(loadingButton.accessibilityLabel(), "Loading hidden lines…")
+        XCTAssertEqual(scrollView.rowRebuildCount, 1)
+
+        let sourceOnlyGap = makeContextGap(
+            hiddenLineCount: 7,
+            revealedLineNumbers: [],
+            contextRenderID: 2
+        )
+        scrollView.display(
+            groups: [makeGroup(includesSecondHunk: true, contextGaps: [sourceOnlyGap])],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        XCTAssertEqual(scrollView.rowRebuildCount, 1)
+
+        let revealedGap = makeContextGap(
+            hiddenLineCount: 6,
+            revealedLineNumbers: [9],
+            contextRenderID: 2
+        )
+        scrollView.display(
+            groups: [makeGroup(includesSecondHunk: true, contextGaps: [revealedGap])],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        XCTAssertEqual(scrollView.rowRebuildCount, 2)
     }
 
     func testWholeFileRoundTripPreservesEachHunksHorizontalOffset() throws {
@@ -1413,7 +1603,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         XCTAssertFalse(sticky.isHidden)
         XCTAssertTrue(sticky.isOpaque)
-        XCTAssertEqual(sticky.frame.height, 57, accuracy: 0.5)
+        XCTAssertEqual(sticky.frame.height, 60, accuracy: 0.5)
 
         let visibleHeaders = sticky.subviews
             .filter { !$0.isHidden }
@@ -1423,7 +1613,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(visibleHeaders[0].frame.minY, 0, accuracy: 0.5)
         XCTAssertEqual(visibleHeaders[0].frame.height, 30, accuracy: 0.5)
         XCTAssertEqual(visibleHeaders[1].frame.minY, 30, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.height, 27, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.height, 30, accuracy: 0.5)
 
         sticky.displayIfNeeded()
         let bitmap = try XCTUnwrap(
@@ -1457,7 +1647,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 7)
         XCTAssertEqual(
             tableView.rect(ofRow: 7).minY - scrollView.contentView.bounds.minY,
-            57,
+            60,
             accuracy: 0.5
         )
 
@@ -1465,7 +1655,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 2)
         XCTAssertEqual(
             tableView.rect(ofRow: 2).minY - scrollView.contentView.bounds.minY,
-            57,
+            60,
             accuracy: 0.5
         )
     }
@@ -2082,11 +2272,17 @@ final class DiffStackViewTests: XCTestCase {
             tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
         )
         let fileButtons = fileCell.subviews.compactMap { $0 as? NSButton }
-        try XCTUnwrap(fileButtons.first { $0.title == "Stage" }).performClick(nil)
+        let fileStage = try XCTUnwrap(fileButtons.first { $0.title == "Stage" })
+        let fileDiscard = try XCTUnwrap(fileButtons.first { $0.title == "Discard" })
+        XCTAssertTrue(fileStage.isHidden)
+        XCTAssertTrue(fileDiscard.isHidden)
+        fileCell.mouseEntered(with: try makeMouseMoveEvent())
+        XCTAssertFalse(fileStage.isHidden)
+        XCTAssertFalse(fileDiscard.isHidden)
+        fileStage.performClick(nil)
         XCTAssertEqual(focusedFileID, "sample")
         XCTAssertEqual(fileAction, .stage)
         fileAction = nil
-        let fileDiscard = try XCTUnwrap(fileButtons.first { $0.title == "Discard" })
         fileDiscard.performClick(nil)
         XCTAssertNil(fileAction)
         XCTAssertEqual(fileDiscard.title, "Confirm")
@@ -2100,12 +2296,18 @@ final class DiffStackViewTests: XCTestCase {
             tableView.view(atColumn: 0, row: 2, makeIfNecessary: true)
         )
         let hunkButtons = hunkCell.subviews.compactMap { $0 as? NSButton }
+        let hunkStage = try XCTUnwrap(hunkButtons.first { $0.title == "Stage Hunk" })
+        let hunkDiscard = try XCTUnwrap(hunkButtons.first { $0.title == "Discard" })
+        XCTAssertTrue(hunkStage.isHidden)
+        XCTAssertTrue(hunkDiscard.isHidden)
+        hunkCell.mouseEntered(with: try makeMouseMoveEvent())
+        XCTAssertFalse(hunkStage.isHidden)
+        XCTAssertFalse(hunkDiscard.isHidden)
         focusedFileID = nil
-        try XCTUnwrap(hunkButtons.first { $0.title == "Stage Hunk" }).performClick(nil)
+        hunkStage.performClick(nil)
         XCTAssertEqual(focusedFileID, "sample")
         XCTAssertEqual(hunkAction, .stage)
         hunkAction = nil
-        let hunkDiscard = try XCTUnwrap(hunkButtons.first { $0.title == "Discard" })
         hunkDiscard.performClick(nil)
         XCTAssertNil(hunkAction)
         XCTAssertEqual(hunkDiscard.title, "Confirm")
@@ -2385,6 +2587,7 @@ final class DiffStackViewTests: XCTestCase {
         let fileCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
         )
+        fileCell.mouseEntered(with: try makeMouseMoveEvent())
         let buttons = fileCell.subviews.compactMap { $0 as? NSButton }
         XCTAssertTrue(buttons.first { $0.title == "Stage" }?.isHidden == true)
         XCTAssertTrue(buttons.first { $0.title == "Discard" }?.isHidden == false)
@@ -2415,6 +2618,7 @@ final class DiffStackViewTests: XCTestCase {
         let fileCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: 1, makeIfNecessary: true)
         )
+        fileCell.mouseEntered(with: try makeMouseMoveEvent())
         fileCell.layoutSubtreeIfNeeded()
         let fileButtons = descendants(of: fileCell).compactMap { $0 as? NSButton }
         XCTAssertTrue(fileButtons.contains(where: {
@@ -2844,6 +3048,16 @@ final class DiffStackViewTests: XCTestCase {
     func testRendersSideBySideSnapshotOffscreen() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 420)
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
         scrollView.display(
             groups: [
                 makeGroup(
@@ -2865,7 +3079,8 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.cacheDisplay(in: scrollView.bounds, to: bitmap)
         let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-        XCTAssertGreaterThan(png.count, 1_000)
+        XCTAssertGreaterThan(png.count, 10_000)
+        XCTAssertGreaterThan(sampledColorSignatures(in: bitmap).count, 8)
 
         let outputDirectory = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
@@ -2886,6 +3101,17 @@ final class DiffStackViewTests: XCTestCase {
         let scrollView = makeScrollView()
         scrollView.appearance = NSAppearance(named: .darkAqua)
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 420)
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = scrollView
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
         scrollView.display(
             groups: [
                 makeGroup(
@@ -2907,7 +3133,8 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.cacheDisplay(in: scrollView.bounds, to: bitmap)
         let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-        XCTAssertGreaterThan(png.count, 1_000)
+        XCTAssertGreaterThan(png.count, 10_000)
+        XCTAssertGreaterThan(sampledColorSignatures(in: bitmap).count, 8)
 
         let outputDirectory = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
@@ -2930,6 +3157,26 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.layoutSubtreeIfNeeded()
         return scrollView
+    }
+
+    private func sampledColorSignatures(
+        in bitmap: NSBitmapImageRep
+    ) -> Set<String> {
+        var colors: Set<String> = []
+        for y in stride(from: 4, to: bitmap.pixelsHigh, by: 12) {
+            for x in stride(from: 4, to: bitmap.pixelsWide, by: 12) {
+                guard let color = bitmap.colorAt(x: x, y: y)?
+                    .usingColorSpace(.deviceRGB) else {
+                    continue
+                }
+                colors.insert(
+                    [color.redComponent, color.greenComponent, color.blueComponent]
+                        .map { String(Int(($0 * 255).rounded())) }
+                        .joined(separator: ",")
+                )
+            }
+        }
+        return colors
     }
 
     private func makeScrollWheelEvent(

@@ -1805,6 +1805,64 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(expanded.visibleWorktrees.count, 6)
     }
 
+    func testPinnedWorktreesStayFirstAndVisibleWhenCollapsed() {
+        let now = Date(timeIntervalSince1970: 200_000)
+        let project = GitProject(rootURL: URL(fileURLWithPath: "/projects/pinned"))
+        let recent = (0..<5).map { index in
+            makeWorktreeSnapshot(
+                name: "recent-\(index)",
+                activityAt: now.addingTimeInterval(TimeInterval(-index * 60)),
+                isDirty: true
+            )
+        }
+        // 两天没动过，折叠视图本来看不到它。
+        let stale = makeWorktreeSnapshot(
+            name: "stale",
+            activityAt: now.addingTimeInterval(-48 * 60 * 60),
+            isDirty: false
+        )
+        let snapshot = GitProjectSnapshot(
+            project: project,
+            worktrees: recent + [stale],
+            refreshedAt: now
+        )
+
+        let collapsed = projectWorktreePresentation(
+            snapshot: snapshot,
+            selectedWorktreeID: nil,
+            pinnedWorktreeIDs: [stale.id],
+            showsAll: false,
+            now: now
+        )
+        XCTAssertEqual(collapsed.visibleWorktrees.first?.id, stale.id)
+        // 置顶不占“最近四个”的名额，所以一共露出五条。
+        XCTAssertEqual(collapsed.visibleWorktrees.count, 5)
+        XCTAssertEqual(collapsed.hiddenWorktreeCount, 1)
+
+        let expanded = projectWorktreePresentation(
+            snapshot: snapshot,
+            selectedWorktreeID: nil,
+            pinnedWorktreeIDs: [stale.id],
+            showsAll: true,
+            now: now
+        )
+        XCTAssertEqual(expanded.visibleWorktrees.first?.id, stale.id)
+        XCTAssertEqual(expanded.visibleWorktrees.count, 6)
+
+        // 选中另一个折叠外的 worktree 时，不能把置顶那条挤掉。
+        let selectedElsewhere = projectWorktreePresentation(
+            snapshot: snapshot,
+            selectedWorktreeID: recent.last?.id,
+            pinnedWorktreeIDs: [stale.id],
+            showsAll: false,
+            now: now
+        )
+        XCTAssertEqual(selectedElsewhere.visibleWorktrees.first?.id, stale.id)
+        XCTAssertTrue(
+            selectedElsewhere.visibleWorktrees.contains { $0.id == recent.last?.id }
+        )
+    }
+
     func testWorktreesSortByDisplayedActivityTime() {
         let now = Date(timeIntervalSince1970: 200_000)
         let recentClean = makeWorktreeSnapshot(

@@ -3,6 +3,59 @@ import XCTest
 @testable import AgentGitApp
 
 final class IntegratedReviewWorkspaceTests: XCTestCase {
+    func testReviewWaitsForTheExactCompletedDiffLoad() {
+        let requested = IntegratedDiffLoadKey(
+            worktreeID: "/repo",
+            activityDate: Date(timeIntervalSince1970: 1),
+            context: .pending,
+            options: GitDiffOptions(),
+            fileIDs: [.pending(scope: .working, changeID: "file")]
+        )
+        let stale = IntegratedDiffLoadKey(
+            worktreeID: requested.worktreeID,
+            activityDate: Date(timeIntervalSince1970: 0),
+            context: requested.context,
+            options: requested.options,
+            fileIDs: requested.fileIDs
+        )
+
+        XCTAssertFalse(
+            reviewDiffsAreReady(
+                fileCount: 1,
+                requested: requested,
+                completed: nil
+            )
+        )
+        XCTAssertFalse(
+            reviewDiffsAreReady(
+                fileCount: 1,
+                requested: requested,
+                completed: stale
+            )
+        )
+        XCTAssertTrue(
+            reviewDiffsAreReady(
+                fileCount: 1,
+                requested: requested,
+                completed: requested
+            )
+        )
+    }
+
+    func testSingleOverviewSelectionProducesAVisibilityTarget() {
+        XCTAssertEqual(
+            overviewVisibilityTargetID([.pending]),
+            AnyHashable(IntegratedOverviewSelection.pending)
+        )
+        XCTAssertEqual(
+            overviewVisibilityTargetID([.commit("abc123")]),
+            AnyHashable("abc123")
+        )
+        XCTAssertNil(
+            overviewVisibilityTargetID([.commit("abc123"), .commit("def456")])
+        )
+    }
+
     func testHunkHistoryFilterDescribesSingleAndMultipleLines() {
         let single = HunkHistoryFilter(
             worktreeID: "/repo",
@@ -76,22 +129,11 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
     }
 
-    func testReviewNavigationWidthProtectsNarrowReviewPane() {
-        XCTAssertEqual(
-            clampedReviewNavigationPaneWidth(240, totalWidth: 800),
-            233,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(
-            clampedReviewNavigationPaneWidth(100, totalWidth: 800),
-            180,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(
-            clampedReviewNavigationPaneWidth(400, totalWidth: 1_200),
-            400,
-            accuracy: 0.001
-        )
+    func testNativeReviewSplitUsesBoundedNavigationAndReviewWidths() {
+        XCTAssertEqual(ReviewSplitLayoutMetrics.minimumNavigationWidth, 180)
+        XCTAssertEqual(ReviewSplitLayoutMetrics.idealNavigationWidth, 400)
+        XCTAssertEqual(ReviewSplitLayoutMetrics.maximumNavigationWidth, 520)
+        XCTAssertEqual(ReviewSplitLayoutMetrics.minimumReviewWidth, 560)
     }
 
     func testLongCommitMessagesOfferFullReader() {
@@ -104,26 +146,27 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
     }
 
     func testExpandedReviewFolderChoosesItsFirstSortedFile() {
-        let folders = [
-            DiffStackFolder(
-                id: "folder:Sources",
-                title: "Sources",
-                isExpanded: false,
-                fileIDs: ["Sources/First.swift", "Sources/Second.swift"]
-            ),
-            DiffStackFolder(
-                id: "folder:Tests",
-                title: "Tests",
-                isExpanded: false,
-                fileIDs: ["Tests/FirstTests.swift"]
-            )
-        ]
+        let first = makeFileItem(path: "Sources/First.swift")
+        let second = makeFileItem(path: "Sources/Second.swift")
+        let test = makeFileItem(path: "Tests/FirstTests.swift")
+        let nodes = navigatorTreeNodes(
+            items: [second, test, first],
+            namespace: "context"
+        )
 
         XCTAssertEqual(
-            firstReviewFileID(in: "folder:Sources", folders: folders),
-            "Sources/First.swift"
+            firstNavigatorFileID(
+                in: "navigator-folder:context:Sources",
+                nodes: nodes
+            ),
+            first.id.stackID
         )
-        XCTAssertNil(firstReviewFileID(in: "folder:Missing", folders: folders))
+        XCTAssertNil(
+            firstNavigatorFileID(
+                in: "navigator-folder:context:Missing",
+                nodes: nodes
+            )
+        )
     }
 
     func testOverviewRowsExposeConciseVoiceOverLabels() {

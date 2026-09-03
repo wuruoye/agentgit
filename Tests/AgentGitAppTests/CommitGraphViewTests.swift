@@ -82,6 +82,30 @@ final class CommitGraphViewTests: XCTestCase {
         XCTAssertEqual(layout.displayWidth, 50)
     }
 
+    func testGraphNodesStayInsideTheCanvasAtBothOuterLanes() {
+        for (laneCount, width) in [(2, CGFloat(23)), (5, CGFloat(50))] {
+            let firstLaneX = commitGraphLaneX(
+                lane: 0,
+                laneCount: laneCount,
+                width: width
+            )
+            let lastLaneX = commitGraphLaneX(
+                lane: laneCount - 1,
+                laneCount: laneCount,
+                width: width
+            )
+
+            XCTAssertGreaterThanOrEqual(
+                firstLaneX - CommitGraphMetrics.maximumNodeExtent,
+                0
+            )
+            XCTAssertLessThanOrEqual(
+                lastLaneX + CommitGraphMetrics.maximumNodeExtent,
+                width
+            )
+        }
+    }
+
     func testAppendingTenThousandCommitHistoryWithinOneSecond() {
         let commits = (0..<10_000).map { index in
             commit(

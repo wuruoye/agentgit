@@ -279,15 +279,23 @@ func invalidateReviewedSnapshots(
     return state.reviewedSnapshotByFileID != previous
 }
 
+/// 首次见到的文件默认折叠；这次 Review 的文件总数不超过 `automaticExpansionLimit` 时改为默认
+/// 展开，常见规模的改动一打开就能直接读 diff，不用再逐个点开。用户自己折叠或展开的结果记在
+/// `knownFileIDs` 里，不受这个默认值影响。
 @discardableResult
 func synchronizeReviewFileExpansion(
     in state: inout ReviewState,
-    fileIDs: Set<String>
+    fileIDs: Set<String>,
+    automaticExpansionLimit: Int = 0
 ) -> Bool {
     let previousCollapsed = state.collapsedFileIDs
     let previousKnown = state.knownFileIDs
     let newFileIDs = fileIDs.subtracting(state.knownFileIDs)
-    state.collapsedFileIDs.formUnion(newFileIDs)
+    if fileIDs.count <= automaticExpansionLimit {
+        state.collapsedFileIDs.subtract(newFileIDs)
+    } else {
+        state.collapsedFileIDs.formUnion(newFileIDs)
+    }
     state.collapsedFileIDs.formIntersection(fileIDs)
     state.knownFileIDs = fileIDs
     return state.collapsedFileIDs != previousCollapsed

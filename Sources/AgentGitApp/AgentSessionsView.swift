@@ -8,18 +8,53 @@ struct AgentSessionsButton: View {
     let worktree: GitWorktree
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(sortedAssociations) { association in
-                AgentSessionShortcutButton(
-                    association: association,
-                    availability: model.agentAssociations.navigationAvailability(
-                        for: association
-                    ),
-                    openSession: { model.agentAssociations.open(association) },
-                    removeSession: { model.agentAssociations.remove(association) }
+        // 一个会话直接给按钮；多个会话时标题在工具栏里会全部被截成同样的前缀，改成一个下拉，
+        // 菜单里才能看到完整标题和最近更新时间。
+        Group {
+            if sortedAssociations.count == 1, let association = sortedAssociations.first {
+                shortcutButton(for: association)
+            } else if sortedAssociations.count > 1 {
+                Menu {
+                    ForEach(sortedAssociations) { association in
+                        Button {
+                            model.agentAssociations.open(association)
+                        } label: {
+                            Text(association.menuTitle)
+                        }
+                    }
+                    Divider()
+                    ForEach(sortedAssociations) { association in
+                        Button("Remove \(association.menuTitle)", role: .destructive) {
+                            model.agentAssociations.remove(association)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("\(sortedAssociations.count) Sessions")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Agent sessions registered for this worktree")
+                .accessibilityLabel(
+                    "\(sortedAssociations.count) agent sessions for this worktree"
                 )
             }
         }
+    }
+
+    private func shortcutButton(for association: AgentAssociation) -> some View {
+        AgentSessionShortcutButton(
+            association: association,
+            availability: model.agentAssociations.navigationAvailability(
+                for: association
+            ),
+            openSession: { model.agentAssociations.open(association) },
+            removeSession: { model.agentAssociations.remove(association) }
+        )
     }
 
     private var sortedAssociations: [AgentAssociation] {
@@ -32,32 +67,36 @@ private struct AgentSessionShortcutButton: View {
     let availability: AgentSessionNavigationAvailability
     let openSession: () -> Void
     let removeSession: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: openSession) {
             HStack(spacing: 5) {
                 Image(systemName: association.provider.systemImageName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(tintColor)
 
                 Text(compactAgentSessionTitle(association.displayTitle))
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
             }
             .padding(.horizontal, 8)
-            .frame(maxWidth: 112, minHeight: 26)
+            .frame(maxWidth: 124, minHeight: 28)
             .background(
-                Color(nsColor: AgentGitPalette.reviewControlBackground),
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                isHovered
+                    ? Color(nsColor: AgentGitPalette.reviewHover)
+                    : Color(nsColor: AgentGitPalette.reviewControlBackground),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tintColor.opacity(0.14), lineWidth: 1)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
         .help(association.hoverDescription(availability: availability))
         .accessibilityLabel(
             "Open \(association.provider.displayName) session \(association.displayTitle)"
@@ -99,7 +138,15 @@ func compactAgentSessionTitle(
 
 private extension AgentAssociation {
     var displayTitle: String {
-        title.isEmpty ? "\(provider.displayName) Session" : title
+        title.isEmpty
+            ? "\(provider.displayName) \(compactRelativeTime(updatedAt))"
+            : title
+    }
+
+    /// 菜单里空间充足，标题不截断，用 provider 和更新时间把同名会话区分开。
+    var menuTitle: String {
+        let base = title.isEmpty ? "\(provider.displayName) Session" : title
+        return "\(provider.displayName) · \(base) · \(compactRelativeTime(updatedAt))"
     }
 
     func hoverDescription(

@@ -75,6 +75,7 @@ final class AppModel {
     private static let ignoresWhitespaceKey = "agentgit.diff-ignore-whitespace"
     private static let diffLayoutKey = "agentgit.diff-layout"
     private static let collapsedProjectIDsKey = "agentgit.collapsed-project-ids"
+    private static let pinnedWorktreeIDsKey = "agentgit.pinned-worktree-ids"
     private static let selectedWorktreeIDKey = "agentgit.selected-worktree-id"
     private static let selectedWorktreeProjectIDKey = "agentgit.selected-worktree-project-id"
     private static let projectIdentityVersionKey = "agentgit.project-identity-version"
@@ -123,6 +124,16 @@ final class AppModel {
             defaults.set(
                 collapsedProjectIDs.sorted(),
                 forKey: Self.collapsedProjectIDsKey
+            )
+        }
+    }
+    /// 置顶的 worktree。ID 就是 worktree 路径，跨项目天然唯一，所以一个集合就够，
+    /// 排序时只在各自项目内生效。
+    var pinnedWorktreeIDs: Set<GitWorktreeSnapshot.ID> {
+        didSet {
+            defaults.set(
+                pinnedWorktreeIDs.sorted(),
+                forKey: Self.pinnedWorktreeIDsKey
             )
         }
     }
@@ -187,6 +198,9 @@ final class AppModel {
         ) ?? .unified
         self.collapsedProjectIDs = Set(
             defaults.stringArray(forKey: Self.collapsedProjectIDsKey) ?? []
+        )
+        self.pinnedWorktreeIDs = Set(
+            defaults.stringArray(forKey: Self.pinnedWorktreeIDsKey) ?? []
         )
         let cachedByProjectID = Dictionary(
             (cachedPayload?.projects ?? []).map { ($0.id, $0) },
@@ -1439,6 +1453,7 @@ final class AppModel {
             pendingEventContentPathsByWorktreeID[worktreeID] = nil
         }
         collapsedProjectIDs.remove(id)
+        pinnedWorktreeIDs.subtract(removedWorktreeIDs)
         if let selectedWorktreeID, removedWorktreeIDs.contains(selectedWorktreeID) {
             self.selectedWorktreeID = firstAvailableWorktreeID()
         }
@@ -1510,6 +1525,18 @@ final class AppModel {
                 return
             }
             self.foregroundRefreshTask = nil
+        }
+    }
+
+    func isWorktreePinned(id: GitWorktreeSnapshot.ID) -> Bool {
+        pinnedWorktreeIDs.contains(id)
+    }
+
+    func toggleWorktreePinned(id: GitWorktreeSnapshot.ID) {
+        if pinnedWorktreeIDs.contains(id) {
+            pinnedWorktreeIDs.remove(id)
+        } else {
+            pinnedWorktreeIDs.insert(id)
         }
     }
 

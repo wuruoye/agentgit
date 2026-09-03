@@ -110,8 +110,9 @@ final class AgentSessionsViewTests: XCTestCase {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        XCTAssertGreaterThan(hostingView.fittingSize.width, 280)
-        XCTAssertLessThanOrEqual(hostingView.fittingSize.width, size.width)
+        // 多个会话收进一个下拉，工具栏里只占一个控件的宽度；标题在菜单里才完整可读。
+        XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
+        XCTAssertLessThan(hostingView.fittingSize.width, 200)
         XCTAssertLessThanOrEqual(hostingView.fittingSize.height, size.height)
 
         let bitmap = try XCTUnwrap(

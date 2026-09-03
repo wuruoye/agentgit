@@ -10,7 +10,8 @@ struct WorktreeSwitcherProject: Identifiable {
 
 func worktreeSwitcherProjects(
     from states: [ProjectState],
-    query: String
+    query: String,
+    pinnedWorktreeIDs: Set<GitWorktreeSnapshot.ID> = []
 ) -> [WorktreeSwitcherProject] {
     let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
     return states.compactMap { state in
@@ -29,9 +30,14 @@ func worktreeSwitcherProjects(
         guard !worktrees.isEmpty else {
             return nil
         }
+        // 置顶在切换器里同样生效，否则同一个 worktree 在侧栏和 ⌘ 切换器里位置对不上。
+        let orderedWorktrees = pinnedWorktreeIDs.isEmpty
+            ? worktrees
+            : worktrees.filter { pinnedWorktreeIDs.contains($0.id) }
+                + worktrees.filter { !pinnedWorktreeIDs.contains($0.id) }
         return WorktreeSwitcherProject(
             project: state.project,
-            worktrees: worktrees
+            worktrees: orderedWorktrees
         )
     }
 }
@@ -69,46 +75,78 @@ struct WorktreeSwitcherView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            switcherHeader
+            Divider()
             searchField
-                .padding(12)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             Divider()
             if projects.isEmpty {
-                ContentUnavailableView {
-                    Label(
-                        query.isEmpty ? "No Worktrees" : "No Matching Worktrees",
-                        systemImage: query.isEmpty
-                            ? "point.3.connected.trianglepath.dotted"
-                            : "line.3.horizontal.decrease.circle"
-                    )
-                } description: {
-                    if !query.isEmpty {
-                        Text("No project or worktree matches “\(query)”.")
-                    }
-                } actions: {
-                    if !query.isEmpty {
-                        Button("Clear Filter") {
-                            query = ""
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                WorktreeSwitcherEmptyState(
+                    query: query,
+                    clearFilter: { query = "" }
+                )
             } else {
                 ScrollViewReader { scrollProxy in
-                    List(selection: $selection) {
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
                         ForEach(projects) { project in
-                            Section(project.project.displayName) {
+                                VStack(spacing: 2) {
+                                    HStack(spacing: 7) {
+                                        Image(systemName: "folder.fill")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(Color.accentColor.opacity(0.78))
+                                        Text(project.project.displayName)
+                                            .font(.system(size: 12, weight: .semibold))
+                                        Spacer()
+                                        Text("\(project.worktrees.count)")
+                                            .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.secondary.opacity(0.07), in: Capsule())
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 32)
+
                                 ForEach(project.worktrees) { worktree in
-                                    WorktreeSwitcherRow(snapshot: worktree)
-                                        .id(worktree.id)
-                                        .tag(worktree.id)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture(count: 2) {
-                                            open(worktree.id)
+                                        Button {
+                                            selection = worktree.id
+                                        } label: {
+                                            WorktreeSwitcherRow(
+                                                snapshot: worktree,
+                                                isSelected: selection == worktree.id
+                                            )
                                         }
+                                        .buttonStyle(.plain)
+                                        .padding(.horizontal, 4)
+                                        .id(worktree.id)
+                                        .simultaneousGesture(
+                                            TapGesture(count: 2).onEnded {
+                                                open(worktree.id)
+                                            }
+                                        )
+                                    }
+                                }
+                                .padding(.bottom, 4)
+                                .background(
+                                    Color(nsColor: AgentGitPalette.sidebarCardBackground),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(
+                                            Color(nsColor: AgentGitPalette.sidebarCardBorder),
+                                            lineWidth: 1
+                                        )
+                                }
+                                .clipShape(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
                                 }
                             }
+                            .padding(12)
                         }
-                    }
                     .onChange(of: selection) { _, worktreeID in
                         guard let worktreeID else {
                             return
@@ -116,7 +154,6 @@ struct WorktreeSwitcherView: View {
                         scrollProxy.scrollTo(worktreeID, anchor: .center)
                     }
                 }
-                .listStyle(.inset)
             }
             Divider()
             HStack(spacing: 10) {
@@ -134,9 +171,12 @@ struct WorktreeSwitcherView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!contains(selection))
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color(nsColor: AgentGitPalette.reviewChrome))
         }
-        .frame(minWidth: 520, idealWidth: 560, minHeight: 380, idealHeight: 440)
+        .frame(minWidth: 580, idealWidth: 620, minHeight: 420, idealHeight: 500)
+        .background(Color(nsColor: AgentGitPalette.canvas))
         .onAppear {
             let selectedWorktreeID = model.selectedWorktreeID
             selection = contains(selectedWorktreeID)
@@ -160,7 +200,40 @@ struct WorktreeSwitcherView: View {
     }
 
     private var projects: [WorktreeSwitcherProject] {
-        worktreeSwitcherProjects(from: model.projects, query: query)
+        worktreeSwitcherProjects(
+            from: model.projects,
+            query: query,
+            pinnedWorktreeIDs: model.pinnedWorktreeIDs
+        )
+    }
+
+    private var switcherHeader: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "rectangle.stack.badge.person.crop")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 34, height: 34)
+                .background(
+                    Color.accentColor.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Switch Worktree")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Search registered projects and open an existing worktree.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text("\(projects.flatMap(\.worktrees).count)")
+                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.07), in: Capsule())
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
     }
 
     private var searchField: some View {
@@ -196,15 +269,15 @@ struct WorktreeSwitcherView: View {
                 .accessibilityLabel("Clear Filter")
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(
-            Color(nsColor: .textBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 7)
+            Color(nsColor: AgentGitPalette.inputBackground),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(.separator.opacity(0.7))
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 1)
         }
     }
 
@@ -237,8 +310,44 @@ struct WorktreeSwitcherView: View {
     }
 }
 
+private struct WorktreeSwitcherEmptyState: View {
+    let query: String
+    let clearFilter: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(
+                systemName: query.isEmpty
+                    ? "point.3.connected.trianglepath.dotted"
+                    : "line.3.horizontal.decrease.circle"
+            )
+            .font(.system(size: 24, weight: .regular))
+            .foregroundStyle(.tertiary)
+            .frame(width: 46, height: 46)
+            .background(Color.secondary.opacity(0.055), in: Circle())
+
+            Text(query.isEmpty ? "No Worktrees" : "No Matching Worktrees")
+                .font(.system(size: 14, weight: .semibold))
+
+            if !query.isEmpty {
+                Text("No project or worktree matches “\(query)”.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                Button("Clear Filter", action: clearFilter)
+                    .controlSize(.small)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct WorktreeSwitcherRow: View {
     let snapshot: GitWorktreeSnapshot
+    var isSelected = false
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 9) {
@@ -286,7 +395,25 @@ private struct WorktreeSwitcherRow: View {
                 .font(.caption.monospacedDigit().weight(.medium))
             }
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+        .background(
+            isSelected
+                ? Color.accentColor.opacity(0.08)
+                : isHovered ? Color.secondary.opacity(0.045) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.accentColor)
+                    .frame(width: 3, height: 30)
+                    .padding(.leading, 1)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
     }
 }

@@ -4,21 +4,16 @@ import SwiftUI
 
 enum SidebarLayoutMetrics {
     static let visibleWidth: CGFloat = 360
-    static let headerHeight: CGFloat = 46
-    static let headerIdentifier = NSUserInterfaceItemIdentifier(
-        "AgentGitSidebarHeader"
-    )
     // NavigationSplitView adds an 8pt sidebar container inset on macOS.
     static let navigationContentWidth = visibleWidth - 8
-    static let navigationTopInset: CGFloat = 8
 }
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var projectsShowingAllWorktrees: Set<GitProject.ID> = []
     @State private var sidebarFilterText = ""
+    @State private var showsOnlyPendingWorktrees = false
     @State private var projectDropTargetID: GitProject.ID?
-    @State private var windowTitlebarInset: CGFloat = 32
 
     init(initialSidebarFilterText: String = "") {
         _sidebarFilterText = State(initialValue: initialSidebarFilterText)
@@ -27,19 +22,20 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                Color.clear
-                    .frame(
-                        height: max(
-                            0,
-                            SidebarLayoutMetrics.headerHeight
-                                - windowTitlebarInset
-                                - SidebarLayoutMetrics.navigationTopInset
-                        )
-                    )
+                AgentGitSidebarBrandView(
+                    isRefreshing: model.projects.contains(where: \.isLoading),
+                    hasIssues: sidebarHasIssues,
+                    pendingWorktreeCount: pendingWorktreeCount,
+                    showsOnlyPendingWorktrees: $showsOnlyPendingWorktrees
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 11)
+                .padding(.bottom, 7)
+
                 SidebarSearchField(text: $sidebarFilterText)
 
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    LazyVStack(spacing: 8) {
                         ForEach(Array(filteredProjects.enumerated()), id: \.element.id) {
                             projectIndex, projectState in
                             VStack(spacing: 0) {
@@ -100,14 +96,33 @@ struct ContentView: View {
                                     VStack(spacing: 0) {
                                         projectContents(projectState)
                                     }
-                                    .padding(.vertical, 1)
+                                    .padding(.bottom, 4)
                                 }
                             }
-                            .padding(.bottom, 4)
+                            .background(
+                                Color.secondary.opacity(0.022),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(
+                                        Color.secondary.opacity(0.11),
+                                        lineWidth: 1
+                                    )
+                            }
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                            .shadow(
+                                color: Color.black.opacity(0.025),
+                                radius: 4,
+                                y: 1
+                            )
+                            .padding(.horizontal, 8)
                         }
                     }
-                    .padding(.top, 4)
-                    .padding(.bottom, 8)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
                 }
                 .overlay {
                     if !sidebarFilterQuery.isEmpty, filteredProjects.isEmpty {
@@ -129,44 +144,49 @@ struct ContentView: View {
             if let snapshot = model.selectedWorktree {
                 WorktreeReviewView(snapshot: snapshot)
             } else if model.projects.isEmpty {
-                ContentUnavailableView {
-                    Label("No Git Projects", systemImage: "folder.badge.plus")
-                } description: {
-                    Text("Add a Git project to discover all of its worktrees.")
-                } actions: {
-                    Button("Add Project", action: model.chooseProject)
-                }
+                AgentGitWorkspaceEmptyState(
+                    title: "No Git Projects",
+                    detail: "Add a Git project to discover and review all of its worktrees.",
+                    systemImage: "folder.badge.plus",
+                    actionTitle: "Add Project",
+                    action: model.chooseProject
+                )
             } else if model.projects.contains(where: { $0.isLoading })
                         && model.projects.allSatisfy({ $0.snapshot == nil }) {
-                ContentUnavailableView {
-                    Label("Reading Worktrees…", systemImage: "clock")
-                } description: {
-                    Text("AgentGit is reading the saved projects.")
-                }
+                AgentGitWorkspaceEmptyState(
+                    title: "Reading Worktrees…",
+                    detail: "AgentGit is restoring saved repository snapshots.",
+                    systemImage: "clock",
+                    isLoading: true
+                )
             } else {
-                ContentUnavailableView {
-                    Label(
-                        "Select a Worktree",
-                        systemImage: "point.3.connected.trianglepath.dotted"
-                    )
-                } description: {
-                    Text("Choose a worktree from the sidebar to review its changes.")
-                }
+                AgentGitWorkspaceEmptyState(
+                    title: "Select a Worktree",
+                    detail: "Choose a worktree from the sidebar to review its changes.",
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                )
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .background(
-            WindowTitleVisibilityConfigurator(
-                titlebarInset: $windowTitlebarInset,
-                refreshDisabled: model.selectedWorktree == nil,
-                refresh: {
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
                     Task {
                         await model.refreshSelectedWorktree()
                     }
-                },
-                addProject: model.chooseProject
-            )
-        )
+                } label: {
+                    Label("Refresh Current Worktree", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.selectedWorktree == nil)
+                .help("Refresh Current Worktree (⌘R)")
+
+                Button(action: model.chooseProject) {
+                    Label("Add Project", systemImage: "plus")
+                }
+                .help("Add Project (⌘O)")
+            }
+        }
         .task {
             model.setApplicationActive(NSApp.isActive)
             await model.loadProjectsIfNeeded()
@@ -266,6 +286,32 @@ struct ContentView: View {
         sidebarFilterText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 置顶的排最前，其余保持原顺序。搜索和「只看待办」两条路径都要用，
+    /// 否则置顶项会散落在结果中间。
+    private func pinnedFirst(
+        _ worktrees: [GitWorktreeSnapshot]
+    ) -> [GitWorktreeSnapshot] {
+        guard !model.pinnedWorktreeIDs.isEmpty else {
+            return worktrees
+        }
+        return worktrees.filter { model.pinnedWorktreeIDs.contains($0.id) }
+            + worktrees.filter { !model.pinnedWorktreeIDs.contains($0.id) }
+    }
+
+    /// 只显示需要处理的 worktree：有未提交改动、有没推的提交、落后上游或读不出来。
+    private func visibleWorktrees(
+        _ worktrees: [GitWorktreeSnapshot]
+    ) -> [GitWorktreeSnapshot] {
+        guard showsOnlyPendingWorktrees else {
+            return worktrees
+        }
+        return worktrees.filter {
+            worktreeReviewStatus($0).needsAttention
+                || $0.id == model.selectedWorktreeID
+                || model.isWorktreePinned(id: $0.id)
+        }
+    }
+
     private var filteredProjects: [ProjectState] {
         guard !sidebarFilterQuery.isEmpty else {
             return model.projects
@@ -278,6 +324,21 @@ struct ContentView: View {
                 worktreeMatchesSidebarFilter($0, query: sidebarFilterQuery)
             }) == true
         }
+    }
+
+    private var sidebarWorktrees: [GitWorktreeSnapshot] {
+        model.projects.compactMap(\.snapshot).flatMap(\.worktrees)
+    }
+
+    private var pendingWorktreeCount: Int {
+        sidebarWorktrees.count { worktreeReviewStatus($0).needsAttention }
+    }
+
+    private var sidebarHasIssues: Bool {
+        model.projectAdditionError != nil
+            || model.cacheErrorMessage != nil
+            || model.agentAssociations.errorMessage != nil
+            || model.projects.contains { $0.errorMessage != nil }
     }
 
     @ViewBuilder
@@ -376,23 +437,42 @@ struct ContentView: View {
                 state.project,
                 query: sidebarFilterQuery
             )
-            let presentation = if sidebarFilterQuery.isEmpty {
+            let presentation = if showsOnlyPendingWorktrees {
+                ProjectWorktreePresentation(
+                    visibleWorktrees: pinnedFirst(
+                        visibleWorktrees(
+                            sidebarFilterQuery.isEmpty || projectMatches
+                                ? snapshot.worktrees
+                                : snapshot.worktrees.filter {
+                                    worktreeMatchesSidebarFilter(
+                                        $0,
+                                        query: sidebarFilterQuery
+                                    )
+                                }
+                        )
+                    ),
+                    hiddenWorktreeCount: 0
+                )
+            } else if sidebarFilterQuery.isEmpty {
                 projectWorktreePresentation(
                     snapshot: snapshot,
                     selectedWorktreeID: model.selectedWorktreeID,
+                    pinnedWorktreeIDs: model.pinnedWorktreeIDs,
                     showsAll: projectsShowingAllWorktrees.contains(state.id),
                     now: Date()
                 )
             } else {
                 ProjectWorktreePresentation(
-                    visibleWorktrees: projectMatches
-                        ? snapshot.worktrees
-                        : snapshot.worktrees.filter {
-                            worktreeMatchesSidebarFilter(
-                                $0,
-                                query: sidebarFilterQuery
-                            )
-                        },
+                    visibleWorktrees: pinnedFirst(
+                        projectMatches
+                            ? snapshot.worktrees
+                            : snapshot.worktrees.filter {
+                                worktreeMatchesSidebarFilter(
+                                    $0,
+                                    query: sidebarFilterQuery
+                                )
+                            }
+                    ),
                     hiddenWorktreeCount: 0
                 )
             }
@@ -406,12 +486,21 @@ struct ContentView: View {
                 } label: {
                     WorktreeRow(
                         snapshot: worktree,
-                        isSelected: model.selectedWorktreeID == worktree.id
+                        isSelected: model.selectedWorktreeID == worktree.id,
+                        isPinned: model.isWorktreePinned(id: worktree.id)
                     )
                 }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 7)
                     .contextMenu {
+                        Button(
+                            model.isWorktreePinned(id: worktree.id)
+                                ? "Unpin from Top"
+                                : "Pin to Top"
+                        ) {
+                            model.toggleWorktreePinned(id: worktree.id)
+                        }
+                        Divider()
                         Button("Refresh Worktree") {
                             Task {
                                 await model.refreshWorktree(id: worktree.id)
@@ -469,197 +558,90 @@ struct ContentView: View {
     }
 }
 
-struct WindowTitleVisibilityConfigurator: NSViewRepresentable {
-    @Binding var titlebarInset: CGFloat
-    let refreshDisabled: Bool
-    let refresh: () -> Void
-    let addProject: () -> Void
+struct AgentGitSidebarBrandView: View {
+    let isRefreshing: Bool
+    let hasIssues: Bool
+    var pendingWorktreeCount: Int = 0
+    var showsOnlyPendingWorktrees: Binding<Bool>?
 
-    init(
-        titlebarInset: Binding<CGFloat> = .constant(0),
-        refreshDisabled: Bool = false,
-        refresh: @escaping () -> Void = {},
-        addProject: @escaping () -> Void = {}
-    ) {
-        _titlebarInset = titlebarInset
-        self.refreshDisabled = refreshDisabled
-        self.refresh = refresh
-        self.addProject = addProject
-    }
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 20, height: 20)
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+            Text("AgentGit")
+                .font(.system(size: 12.5, weight: .semibold))
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            configure(from: view, coordinator: context.coordinator)
-        }
-        return view
-    }
+            Spacer(minLength: 6)
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            configure(from: nsView, coordinator: context.coordinator)
-        }
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.removeHeader()
-    }
-
-    private func configure(from view: NSView, coordinator: Coordinator) {
-        guard let window = view.window else {
-            return
-        }
-        window.styleMask.insert(.fullSizeContentView)
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.titlebarSeparatorStyle = .none
-        window.isMovableByWindowBackground = true
-        let measuredInset = window.styleMask.contains(.fullScreen)
-            ? 0
-            : max(0, window.frame.height - window.contentLayoutRect.height)
-        if abs(titlebarInset - measuredInset) > 0.5 {
-            titlebarInset = measuredInset
-        }
-        coordinator.installHeader(
-            in: window,
-            refreshDisabled: refreshDisabled,
-            refresh: refresh,
-            addProject: addProject
-        )
-    }
-
-    @MainActor
-    final class Coordinator {
-        private var headerView: NSHostingView<AnyView>?
-        private weak var containerView: NSView?
-        private var constraints: [NSLayoutConstraint] = []
-
-        func installHeader(
-            in window: NSWindow,
-            refreshDisabled: Bool,
-            refresh: @escaping () -> Void,
-            addProject: @escaping () -> Void
-        ) {
-            guard let nextContentView = window.contentView else {
-                return
+            if pendingWorktreeCount > 0 {
+                pendingCountLabel
             }
-            let nextContainerView = nextContentView.superview ?? nextContentView
-            let rootView = AnyView(
-                SidebarHeader(
-                    refreshDisabled: refreshDisabled,
-                    refresh: refresh,
-                    addProject: addProject
-                )
-                .ignoresSafeArea(.container, edges: .top)
-            )
-            if containerView !== nextContainerView || headerView == nil {
-                removeHeader()
-                let hostingView = NSHostingView(rootView: rootView)
-                hostingView.identifier = SidebarLayoutMetrics.headerIdentifier
-                hostingView.translatesAutoresizingMaskIntoConstraints = false
-                nextContainerView.addSubview(
-                    hostingView,
-                    positioned: .above,
-                    relativeTo: nextContentView.superview === nextContainerView
-                        ? nextContentView
-                        : nil
-                )
-                constraints = [
-                    hostingView.leadingAnchor.constraint(
-                        equalTo: nextContainerView.leadingAnchor
-                    ),
-                    hostingView.topAnchor.constraint(
-                        equalTo: nextContainerView.topAnchor
-                    ),
-                    hostingView.widthAnchor.constraint(
-                        equalToConstant: SidebarLayoutMetrics.visibleWidth
-                    ),
-                    hostingView.heightAnchor.constraint(
-                        equalToConstant: SidebarLayoutMetrics.headerHeight
+
+            Circle()
+                .fill(statusColor)
+                .frame(width: 7, height: 7)
+                .help(statusLabel)
+                .accessibilityLabel(statusLabel)
+        }
+    }
+
+    /// 这个计数以前只是展示。它是侧栏里唯一「现在该我做点什么」的信号，做成筛选开关：
+    /// 点一下只留下待处理的 worktree，再点一下恢复全部。
+    @ViewBuilder
+    private var pendingCountLabel: some View {
+        let title = "\(pendingWorktreeCount) pending"
+        if let showsOnlyPendingWorktrees {
+            let isOn = showsOnlyPendingWorktrees.wrappedValue
+            Button {
+                showsOnlyPendingWorktrees.wrappedValue.toggle()
+            } label: {
+                Text(title)
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(
+                        isOn ? Color.white : Color(nsColor: .systemOrange)
                     )
-                ]
-                NSLayoutConstraint.activate(constraints)
-                headerView = hostingView
-                containerView = nextContainerView
-            } else {
-                headerView?.rootView = rootView
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        isOn
+                            ? Color(nsColor: .systemOrange)
+                            : Color(nsColor: .systemOrange).opacity(0.13),
+                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    )
             }
-        }
-
-        func removeHeader() {
-            NSLayoutConstraint.deactivate(constraints)
-            constraints.removeAll()
-            headerView?.removeFromSuperview()
-            headerView = nil
-            containerView = nil
+            .buttonStyle(.plain)
+            .help(
+                isOn
+                    ? "Showing only worktrees that need attention"
+                    : "Show only worktrees that need attention"
+            )
+            .accessibilityLabel(
+                isOn
+                    ? "Showing only the \(pendingWorktreeCount) worktrees that need attention"
+                    : "Show only the \(pendingWorktreeCount) worktrees that need attention"
+            )
+        } else {
+            Text(title)
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(Color(nsColor: .systemOrange))
         }
     }
-}
 
-struct SidebarHeader: View {
-    let refreshDisabled: Bool
-    let refresh: () -> Void
-    let addProject: () -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text("Projects")
-                .font(.system(size: 13, weight: .medium))
-            Spacer(minLength: 12)
-            SidebarHeaderActionButton(
-                systemName: "arrow.clockwise",
-                help: "Refresh Current Worktree (⌘R)",
-                disabled: refreshDisabled,
-                action: refresh
-            )
-            SidebarHeaderActionButton(
-                systemName: "plus",
-                help: "Add Project (⌘O)",
-                action: addProject
-            )
+    private var statusColor: Color {
+        if hasIssues {
+            return .orange
         }
-        .padding(.leading, 78)
-        .padding(.trailing, 11)
-        .frame(height: 46)
-        .background(Color(nsColor: AgentGitPalette.sidebarChrome))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(nsColor: AgentGitPalette.sidebarDivider))
-                .frame(height: 1)
-        }
+        return isRefreshing ? .blue : .green
     }
-}
 
-private struct SidebarHeaderActionButton: View {
-    let systemName: String
-    let help: String
-    var disabled = false
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 14, weight: .regular))
-                .frame(width: 28, height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(
-                            isHovered && !disabled
-                                ? Color(nsColor: AgentGitPalette.sidebarHover)
-                                : Color.clear
-                        )
-                )
-                .contentShape(Rectangle())
+    private var statusLabel: String {
+        if hasIssues {
+            return "Repository attention required"
         }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .help(help)
-        .onHover { isHovered = $0 }
+        return isRefreshing ? "Refreshing repositories" : "Repositories ready"
     }
 }
 
@@ -667,13 +649,13 @@ struct SidebarSearchField: View {
     @Binding var text: String
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .regular))
+                .font(.system(size: 12.5, weight: .regular))
                 .foregroundStyle(.secondary)
             TextField("Filter projects and worktrees", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(.system(size: 12))
             if !text.isEmpty {
                 Button {
                     text = ""
@@ -686,20 +668,98 @@ struct SidebarSearchField: View {
                 .accessibilityLabel("Clear Filter")
             }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 28)
+        .padding(.horizontal, 10)
+        .frame(height: 32)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color(nsColor: AgentGitPalette.sidebarInputBackground))
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor).opacity(0.78))
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color(nsColor: AgentGitPalette.sidebarDivider), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
         }
-        .padding(.horizontal, 9)
-        .padding(.top, 8)
-        .padding(.bottom, 7)
+        .padding(.horizontal, 12)
+        .padding(.top, 7)
+        .padding(.bottom, 6)
         .accessibilityElement(children: .contain)
+    }
+}
+
+struct AgentGitWorkspaceEmptyState: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    var isLoading = false
+    var actionTitle: String?
+    var action: (() -> Void)?
+
+    init(
+        title: String,
+        detail: String,
+        systemImage: String,
+        isLoading: Bool = false,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.detail = detail
+        self.systemImage = systemImage
+        self.isLoading = isLoading
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(nsColor: AgentGitPalette.canvas),
+                    Color.accentColor.opacity(0.018)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.09))
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.regular)
+                    } else {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 22, weight: .regular))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                .frame(width: 54, height: 54)
+
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+
+                if let actionTitle, let action {
+                    Button(actionTitle, action: action)
+                        .controlSize(.regular)
+                }
+            }
+            .padding(28)
+            .background(
+                Color(nsColor: AgentGitPalette.reviewControlBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.09), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.025), radius: 10, y: 2)
+        }
     }
 }
 
@@ -805,25 +865,38 @@ struct ProjectWorktreePresentation {
 func projectWorktreePresentation(
     snapshot: GitProjectSnapshot,
     selectedWorktreeID: GitWorktreeSnapshot.ID?,
+    pinnedWorktreeIDs: Set<GitWorktreeSnapshot.ID> = [],
     showsAll: Bool,
     now: Date
 ) -> ProjectWorktreePresentation {
     let recentCutoff = now.addingTimeInterval(-24 * 60 * 60)
-    let orderedWorktrees = snapshot.worktrees.sorted(by: compareWorktreeSnapshots)
-    var defaultWorktrees = Array(
-        orderedWorktrees.filter { worktree in
+    // 置顶的排在本项目最前，其余保持按活动时间的顺序。
+    let orderedWorktrees = snapshot.worktrees.sorted { lhs, rhs in
+        let lhsPinned = pinnedWorktreeIDs.contains(lhs.id)
+        let rhsPinned = pinnedWorktreeIDs.contains(rhs.id)
+        guard lhsPinned == rhsPinned else {
+            return lhsPinned
+        }
+        return compareWorktreeSnapshots(lhs, rhs)
+    }
+    let pinned = orderedWorktrees.filter { pinnedWorktreeIDs.contains($0.id) }
+    let unpinned = orderedWorktrees.filter { !pinnedWorktreeIDs.contains($0.id) }
+    // 折叠时置顶的永远露出来，不占“最近四个”的名额，也不会被选中项挤掉。
+    var recentWorktrees = Array(
+        unpinned.filter { worktree in
             worktree.status.changedFileCount > 0
                 || !worktree.diffStat.isEmpty
                 || worktree.lastActivityAt >= recentCutoff
         }.prefix(4)
     )
-    if let selected = orderedWorktrees.first(where: { $0.id == selectedWorktreeID }),
-       !defaultWorktrees.contains(where: { $0.id == selected.id }) {
-        if defaultWorktrees.count == 4 {
-            defaultWorktrees.removeLast()
+    if let selected = unpinned.first(where: { $0.id == selectedWorktreeID }),
+       !recentWorktrees.contains(where: { $0.id == selected.id }) {
+        if recentWorktrees.count == 4 {
+            recentWorktrees.removeLast()
         }
-        defaultWorktrees.append(selected)
+        recentWorktrees.append(selected)
     }
+    let defaultWorktrees = pinned + recentWorktrees
     return ProjectWorktreePresentation(
         visibleWorktrees: showsAll ? orderedWorktrees : defaultWorktrees,
         hiddenWorktreeCount: orderedWorktrees.count - defaultWorktrees.count
@@ -847,10 +920,10 @@ private struct ProjectWorktreeDisclosureRow: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 37)
-            .frame(height: 25)
+            .padding(.leading, 32)
+            .frame(height: 27)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(
                         isHovered
                             ? Color(nsColor: AgentGitPalette.sidebarHover)
@@ -877,9 +950,13 @@ struct ProjectHeader: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 12)
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Color.accentColor.opacity(0.76))
+                    .frame(width: 13)
                 Text(projectState.project.displayName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.primary.opacity(0.74))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.84))
                     .lineLimit(1)
                 if projectState.errorMessage != nil {
                     Image(
@@ -904,16 +981,18 @@ struct ProjectHeader: View {
                 Spacer(minLength: 4)
                 if let count = projectState.snapshot?.worktrees.count {
                     Text("\(count)")
-                        .font(.system(size: 10.5).monospacedDigit())
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.07), in: Capsule())
                 }
             }
             .contentShape(Rectangle())
-            .padding(.horizontal, 6)
-            .frame(height: 24)
+            .padding(.horizontal, 7)
+            .frame(height: 31)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(
                         isHovered
                             ? Color(nsColor: AgentGitPalette.sidebarHover)
@@ -923,14 +1002,7 @@ struct ProjectHeader: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .padding(.top, showsDivider ? 5 : 0)
-        .overlay(alignment: .top) {
-            if showsDivider {
-                Rectangle()
-                    .fill(Color(nsColor: AgentGitPalette.sidebarDivider))
-                    .frame(height: 1)
-            }
-        }
+        .padding(.top, showsDivider ? 1 : 0)
         .help(projectHeaderHelpText(projectState))
         .accessibilityLabel(
             "\(isCollapsed ? "Expand" : "Collapse") \(projectState.project.displayName)"
@@ -952,6 +1024,7 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 struct WorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
     var isSelected = false
+    var isPinned = false
     @State private var isHovered = false
 
     var body: some View {
@@ -959,11 +1032,11 @@ struct WorktreeRow: View {
             worktreeStateIndicator
                 .frame(width: 10, alignment: .center)
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 0) {
                 Text(snapshot.worktree.displayName)
                     .font(
                         .system(
-                            size: 12.5,
+                            size: 12,
                             weight: isSelected ? .medium : .regular
                         )
                     )
@@ -971,7 +1044,7 @@ struct WorktreeRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(snapshot.worktree.rootURL.lastPathComponent)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(
                         isSelected
                             ? primaryForeground.opacity(0.72)
@@ -982,13 +1055,20 @@ struct WorktreeRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            if isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+
             trailingStatus
                 .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.leading, 20)
-        .padding(.trailing, 8)
+        .padding(.leading, 15)
+        .padding(.trailing, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 40)
+        .frame(height: 32)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(
@@ -1001,9 +1081,10 @@ struct WorktreeRow: View {
         )
         .overlay(alignment: .leading) {
             if isSelected {
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
-                    .frame(width: 2, height: 30)
+                    .frame(width: 3, height: 20)
+                    .padding(.leading, 1)
             }
         }
         .contentShape(Rectangle())
@@ -1035,9 +1116,7 @@ struct WorktreeRow: View {
     }
 
     private var primaryForeground: Color {
-        isSelected
-            ? Color(nsColor: AgentGitPalette.sidebarSelectionBorder)
-            : .primary
+        .primary
     }
 
     private var isDirty: Bool {
@@ -1072,6 +1151,11 @@ struct WorktreeRow: View {
                         plural: "changed files"
                     )
                 )
+        } else if let indicator = reviewStatus.compactIndicator {
+            Text(indicator)
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(Color(nsColor: AgentGitPalette.worktreeTracking))
+                .accessibilityLabel(reviewStatus.accessibilityDescription)
         } else if snapshot.lastActivityAt == .distantPast {
             Text("—")
                 .font(.system(size: 10.5))
@@ -1081,6 +1165,10 @@ struct WorktreeRow: View {
                 .font(.system(size: 10.5).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    private var reviewStatus: WorktreeReviewStatus {
+        worktreeReviewStatus(snapshot)
     }
 
     private var issueIconName: String {
@@ -1095,6 +1183,9 @@ struct WorktreeRow: View {
 
     private var worktreeAccessibilityLabel: String {
         var components = [snapshot.worktree.displayName]
+        if isPinned {
+            components.append("Pinned to top")
+        }
         if snapshot.worktree.isDetached {
             components.append("Detached HEAD")
         }

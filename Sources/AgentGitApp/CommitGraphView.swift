@@ -199,6 +199,33 @@ enum CommitGraphVerticalPosition: CGFloat, Equatable, Sendable {
     case bottom = 1
 }
 
+enum CommitGraphMetrics {
+    /// Commit 行高。图谱 Canvas、Pending 标记和 Commit 行共用它，改一处三处一起变。
+    static let rowHeight: CGFloat = 42
+    static let horizontalPadding: CGFloat = 7
+    static let maximumNodeExtent: CGFloat = 6.5
+}
+
+func commitGraphLaneX(
+    lane: Int,
+    laneCount: Int,
+    width: CGFloat
+) -> CGFloat {
+    let count = max(1, min(laneCount, 5))
+    let displayedLane = min(max(0, lane), count - 1)
+    let horizontalPadding = min(
+        CommitGraphMetrics.horizontalPadding,
+        max(0, width / 2)
+    )
+    let availableWidth = max(0, width - horizontalPadding * 2)
+    let laneSpacing = count == 1
+        ? 0
+        : min(9, availableWidth / CGFloat(count - 1))
+    return count == 1
+        ? width / 2
+        : horizontalPadding + CGFloat(displayedLane) * laneSpacing
+}
+
 struct CommitGraphView: View {
     let row: CommitGraphRow
     let totalLaneCount: Int
@@ -276,7 +303,7 @@ struct CommitGraphView: View {
                 }
             }
         }
-        .frame(width: width, height: 51)
+        .frame(width: width, height: CommitGraphMetrics.rowHeight)
         .accessibilityHidden(true)
     }
 
@@ -285,17 +312,12 @@ struct CommitGraphView: View {
         position: CommitGraphVerticalPosition,
         size: CGSize
     ) -> CGPoint {
-        let count = max(1, min(totalLaneCount, 5))
-        let displayedLane = min(lane, count - 1)
-        let horizontalPadding: CGFloat = 3
-        let availableWidth = max(0, size.width - horizontalPadding * 2)
-        let laneSpacing = count == 1
-            ? 0
-            : min(9, availableWidth / CGFloat(count - 1))
         return CGPoint(
-            x: count == 1
-                ? size.width / 2
-                : horizontalPadding + CGFloat(displayedLane) * laneSpacing,
+            x: commitGraphLaneX(
+                lane: lane,
+                laneCount: totalLaneCount,
+                width: size.width
+            ),
             y: size.height * position.rawValue
         )
     }

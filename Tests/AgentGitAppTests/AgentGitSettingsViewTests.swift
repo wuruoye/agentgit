@@ -17,25 +17,31 @@ final class AgentGitSettingsViewTests: XCTestCase {
             AgentGitSettingsView(initialSection: .review).environment(model),
             appearance: .aqua,
             fileName: "AgentGitSettings-review-light.png",
-            size: NSSize(width: 560, height: 280)
+            size: NSSize(width: 820, height: 590)
         )
         try await render(
             AgentGitSettingsView(initialSection: .review).environment(model),
             appearance: .darkAqua,
             fileName: "AgentGitSettings-review-dark.png",
-            size: NSSize(width: 560, height: 280)
+            size: NSSize(width: 820, height: 590)
+        )
+        try await render(
+            AgentGitSettingsView(initialSection: .review).environment(model),
+            appearance: .accessibilityHighContrastAqua,
+            fileName: "AgentGitSettings-review-high-contrast.png",
+            size: NSSize(width: 820, height: 590)
         )
         try await render(
             AgentGitSettingsView(initialSection: .agents).environment(model),
             appearance: .aqua,
             fileName: "AgentGitSettings-agents-light.png",
-            size: NSSize(width: 560, height: 540)
+            size: NSSize(width: 820, height: 620)
         )
         try await render(
             AgentGitSettingsView(initialSection: .agents).environment(model),
             appearance: .darkAqua,
             fileName: "AgentGitSettings-agents-dark.png",
-            size: NSSize(width: 560, height: 540)
+            size: NSSize(width: 820, height: 620)
         )
     }
 
@@ -77,7 +83,7 @@ final class AgentGitSettingsViewTests: XCTestCase {
             ).environment(model),
             appearance: .aqua,
             fileName: "AgentGitSettings-repair.png",
-            size: NSSize(width: 560, height: 620)
+            size: NSSize(width: 820, height: 620)
         )
     }
 
@@ -85,7 +91,7 @@ final class AgentGitSettingsViewTests: XCTestCase {
         _ content: some View,
         appearance: NSAppearance.Name,
         fileName: String,
-        size: NSSize = NSSize(width: 560, height: 652)
+        size: NSSize = NSSize(width: 820, height: 620)
     ) async throws {
         let colorScheme: ColorScheme = appearance == .darkAqua ? .dark : .light
         let hostingView = NSHostingView(
@@ -116,12 +122,10 @@ final class AgentGitSettingsViewTests: XCTestCase {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        let settingsNavigation = descendants(of: hostingView).compactMap {
-            $0 as? NSSegmentedControl
-        }.first
-        XCTAssertEqual(settingsNavigation?.segmentCount, 2)
-        XCTAssertEqual(settingsNavigation?.label(forSegment: 0), "Review")
-        XCTAssertEqual(settingsNavigation?.label(forSegment: 1), "Agents")
+        XCTAssertEqual(
+            AgentGitSettingsSection.allCases.map(\.title),
+            ["Review", "Agents"]
+        )
 
         let bitmap = try XCTUnwrap(
             hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)

@@ -230,27 +230,40 @@ final class ContentViewLayoutTests: XCTestCase {
             )
         ]
         let graph = CommitGraphLayout(commits: commits)
+        let selectedCommit = IntegratedOverviewSelection.commit(commits[1].id)
         let content = VStack(spacing: 0) {
             ReviewPaneTabBar(selection: .constant(.commits))
             Divider()
-            PendingOverviewRow(
-                workingCount: 12,
-                untrackedCount: 2,
-                stagedCount: 4,
-                graphWidth: graph.displayWidth
-            )
-            ForEach(commits) { commit in
-                IntegratedCommitRow(
-                    commit: commit,
-                    graphRow: graph.rowsByCommitID[commit.id],
-                    graphLaneCount: graph.renderedLaneCount,
-                    graphWidth: graph.displayWidth,
-                    isSearchResult: false
+            List(selection: .constant(Set([selectedCommit]))) {
+                PendingOverviewRow(
+                    workingCount: 12,
+                    untrackedCount: 2,
+                    stagedCount: 4,
+                    graphWidth: graph.displayWidth
                 )
+                .tag(IntegratedOverviewSelection.pending)
+                .listRowInsets(
+                    EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8)
+                )
+                ForEach(commits) { commit in
+                    IntegratedCommitRow(
+                        commit: commit,
+                        graphRow: graph.rowsByCommitID[commit.id],
+                        graphLaneCount: graph.renderedLaneCount,
+                        graphWidth: graph.displayWidth,
+                        isSearchResult: false
+                    )
+                    .tag(IntegratedOverviewSelection.commit(commit.id))
+                    .listRowInsets(
+                        EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8)
+                    )
+                }
             }
-            Spacer(minLength: 0)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
         .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
+        .environment(\.controlActiveState, .key)
 
         try await render(
             content,
@@ -543,21 +556,28 @@ final class ContentViewLayoutTests: XCTestCase {
         )
         try await render(
             WorktreeSwitcherView().environment(model),
-            size: NSSize(width: 560, height: 440),
+            size: NSSize(width: 620, height: 500),
             fileName: "AgentGitWorktree-switcher.png",
             requiresPendingActions: false
         )
         try await render(
             WorktreeSwitcherView().environment(model),
-            size: NSSize(width: 560, height: 440),
+            size: NSSize(width: 620, height: 500),
             fileName: "AgentGitWorktree-switcher-dark.png",
             appearanceName: .darkAqua,
             requiresPendingActions: false
         )
         try await render(
+            WorktreeSwitcherView().environment(model),
+            size: NSSize(width: 620, height: 500),
+            fileName: "AgentGitWorktree-switcher-high-contrast.png",
+            appearanceName: .accessibilityHighContrastAqua,
+            requiresPendingActions: false
+        )
+        try await render(
             WorktreeSwitcherView(initialQuery: "missing-worktree")
                 .environment(model),
-            size: NSSize(width: 560, height: 440),
+            size: NSSize(width: 620, height: 500),
             fileName: "AgentGitWorktree-switcher-empty.png",
             requiresPendingActions: false
         )
@@ -594,8 +614,7 @@ final class ContentViewLayoutTests: XCTestCase {
                 .environment(activePendingModel),
             size: NSSize(width: 1_200, height: 680),
             fileName: "AgentGitContent-pending-active.png",
-            requiresPendingActions: false,
-            expectedButtonTitles: ["Stage", "Discard"]
+            requiresPendingActions: false
         )
         try await render(
             WorktreeReviewView(snapshot: selectedSnapshot)
@@ -603,8 +622,7 @@ final class ContentViewLayoutTests: XCTestCase {
             size: NSSize(width: 1_200, height: 680),
             fileName: "AgentGitContent-pending-active-dark.png",
             appearanceName: .darkAqua,
-            requiresPendingActions: false,
-            expectedButtonTitles: ["Stage", "Discard"]
+            requiresPendingActions: false
         )
         activePendingModel.reviewStates.saveLastContext(
             .pending,
@@ -618,8 +636,7 @@ final class ContentViewLayoutTests: XCTestCase {
                 .environment(activePendingModel),
             size: NSSize(width: 1_200, height: 680),
             fileName: "AgentGitContent-pending-files.png",
-            requiresPendingActions: false,
-            expectedButtonTitles: ["Stage", "Discard"]
+            requiresPendingActions: false
         )
         activePendingModel.setApplicationActive(false)
 
@@ -816,11 +833,14 @@ final class ContentViewLayoutTests: XCTestCase {
             snapshot: snapshot
         )
         let components = VStack(spacing: 0) {
-            SidebarHeader(
-                refreshDisabled: false,
-                refresh: {},
-                addProject: {}
+            AgentGitSidebarBrandView(
+                isRefreshing: false,
+                hasIssues: false,
+                pendingWorktreeCount: 2
             )
+            .padding(.horizontal, 14)
+            .padding(.top, 11)
+            .padding(.bottom, 7)
             SidebarSearchField(text: .constant(""))
             VStack(spacing: 0) {
                 ProjectHeader(
@@ -836,29 +856,33 @@ final class ContentViewLayoutTests: XCTestCase {
                     .padding(.horizontal, 7)
                 WorktreeRow(snapshot: clean)
                     .padding(.horizontal, 7)
-                ProjectHeader(
-                    projectState: projectState,
-                    isCollapsed: true,
-                    showsDivider: true,
-                    toggle: {}
-                )
-                .padding(.horizontal, 7)
             }
-            .padding(.top, 4)
-            .padding(.bottom, 8)
+            .padding(.bottom, 4)
+            .background(
+                Color.secondary.opacity(0.022),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.11), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(color: Color.black.opacity(0.025), radius: 4, y: 1)
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: AgentGitPalette.sidebarBackground))
 
         try await render(
             components,
-            size: NSSize(width: 360, height: 280),
+            size: NSSize(width: 360, height: 520),
             fileName: "AgentGitSidebar-components.png",
             requiresPendingActions: false
         )
         try await render(
             components,
-            size: NSSize(width: 360, height: 280),
+            size: NSSize(width: 360, height: 520),
             fileName: "AgentGitSidebar-components-dark.png",
             appearanceName: .darkAqua,
             requiresPendingActions: false
@@ -930,6 +954,148 @@ final class ContentViewLayoutTests: XCTestCase {
         )
     }
 
+    func testNativeReviewSplitterResizesPaneWithoutMovingWindow() async throws {
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults)
+        model.setApplicationActive(false)
+        let selectedSnapshot = makeProjectSnapshot().worktrees[0]
+        let size = NSSize(width: 1_200, height: 680)
+        let hostingView = NSHostingView(
+            rootView: WorktreeReviewView(snapshot: selectedSnapshot)
+                .environment(model)
+                .environment(\.reviewSplitDefaultsSuiteName, suiteName)
+        )
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        let window = OffscreenRenderWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.setContentSize(size)
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(50))
+            hostingView.layoutSubtreeIfNeeded()
+        }
+        let descendantViews = descendants(of: hostingView)
+        let splitViews = descendantViews.compactMap { $0 as? NSSplitView }
+        let splitDescriptions = splitViews.map { splitView in
+            "vertical=\(splitView.isVertical), frame=\(splitView.frame), "
+                + "children=\(splitView.subviews.map(\.frame))"
+        }
+        let reviewSplitView = try XCTUnwrap(
+            splitViews.first { $0.subviews.count >= 2 },
+            "No two-pane NSSplitView in: \(splitDescriptions)"
+        )
+        let windowFrame = window.frame
+        let initialNavigationWidth = reviewSplitView.subviews[0].frame.width
+        let targetNavigationWidth = initialNavigationWidth + 60
+            <= ReviewSplitLayoutMetrics.maximumNavigationWidth
+            ? initialNavigationWidth + 60
+            : max(
+                ReviewSplitLayoutMetrics.minimumNavigationWidth,
+                initialNavigationWidth - 60
+            )
+        reviewSplitView.setPosition(
+            targetNavigationWidth,
+            ofDividerAt: 0
+        )
+        reviewSplitView.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThan(
+            abs(
+                reviewSplitView.subviews[0].frame.width
+                    - initialNavigationWidth
+            ),
+            40
+        )
+        XCTAssertEqual(window.frame, windowFrame)
+    }
+
+    func testNativeReviewSplitterRestoresPersistedWidth() async throws {
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let targetWidth: CGFloat = 468
+        let size = NSSize(width: 1_200, height: 680)
+
+        do {
+            let controller = ReviewSplitViewController(
+                defaults: defaults,
+                navigation: AnyView(Color.clear),
+                review: AnyView(Color.clear)
+            )
+            let window = OffscreenRenderWindow(
+                contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentViewController = controller
+            window.setContentSize(size)
+            controller.view.frame = NSRect(origin: .zero, size: size)
+            controller.viewDidLayout()
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            window.makeKeyAndOrderFront(nil)
+            controller.managedSplitView.layoutSubtreeIfNeeded()
+            controller.managedSplitView.setPosition(
+                targetWidth,
+                ofDividerAt: 0
+            )
+            controller.managedSplitView.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(
+                controller.managedSplitView.subviews[0].frame.width,
+                targetWidth,
+                accuracy: 1
+            )
+            XCTAssertEqual(
+                defaults.double(
+                    forKey: ReviewSplitLayoutMetrics.widthDefaultsKey
+                ),
+                Double(targetWidth),
+                accuracy: 1
+            )
+            window.orderOut(nil)
+        }
+
+        let restoredController = ReviewSplitViewController(
+            defaults: defaults,
+            navigation: AnyView(Color.clear),
+            review: AnyView(Color.clear)
+        )
+        let restoredWindow = OffscreenRenderWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        restoredWindow.contentViewController = restoredController
+        restoredWindow.setContentSize(size)
+        restoredController.view.frame = NSRect(origin: .zero, size: size)
+        restoredController.viewDidLayout()
+        restoredWindow.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        restoredWindow.makeKeyAndOrderFront(nil)
+        defer { restoredWindow.orderOut(nil) }
+        for _ in 0..<10 {
+            try await Task.sleep(for: .milliseconds(50))
+            restoredController.managedSplitView.layoutSubtreeIfNeeded()
+        }
+
+        XCTAssertEqual(
+            restoredController.managedSplitView.subviews[0].frame.width,
+            targetWidth,
+            accuracy: 1
+        )
+    }
+
     func testRendersSidebarWindowChromeOffscreen() async throws {
         try await renderSidebarWindowChrome(
             appearanceName: .aqua,
@@ -958,15 +1124,12 @@ final class ContentViewLayoutTests: XCTestCase {
                 .titled,
                 .closable,
                 .miniaturizable,
-                .resizable,
-                .fullSizeContentView
+                .resizable
             ],
             backing: .buffered,
             defer: false
         )
         window.appearance = appearance
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
         window.contentView = hostingView
         window.setContentSize(contentSize)
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
@@ -988,31 +1151,12 @@ final class ContentViewLayoutTests: XCTestCase {
         let closeButton = try XCTUnwrap(window.standardWindowButton(.closeButton))
         XCTAssertNotNil(window.standardWindowButton(.miniaturizeButton))
         XCTAssertNotNil(window.standardWindowButton(.zoomButton))
-        let headerView = try XCTUnwrap(
-            descendants(of: frameView).first {
-                $0.identifier == SidebarLayoutMetrics.headerIdentifier
-            }
-        )
-        let headerFrame = frameView.convert(headerView.bounds, from: headerView)
-        let closeButtonFrame = frameView.convert(
-            closeButton.bounds,
-            from: closeButton
-        )
-        XCTAssertEqual(
-            headerFrame.width,
-            SidebarLayoutMetrics.visibleWidth,
-            accuracy: 1
-        )
-        XCTAssertEqual(
-            headerFrame.height,
-            SidebarLayoutMetrics.headerHeight,
-            accuracy: 1
-        )
-        XCTAssertTrue(
-            headerFrame.contains(
-                NSPoint(x: closeButtonFrame.midX, y: closeButtonFrame.midY)
-            )
-        )
+        XCTAssertFalse(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.styleMask.contains(.resizable))
+        XCTAssertTrue(window.isMovable)
+        XCTAssertFalse(window.isMovableByWindowBackground)
+        XCTAssertGreaterThan(window.frame.height, window.contentLayoutRect.height)
+        XCTAssertFalse(closeButton.isHidden)
         let output = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -1266,29 +1410,17 @@ private final class OffscreenRenderWindow: NSWindow {
 }
 
 private struct SidebarWindowChromeHarness: View {
-    @State private var titlebarInset: CGFloat = 32
-
     var body: some View {
         VStack(spacing: 0) {
-            Color.clear
-                .frame(
-                    height: max(
-                        0,
-                        SidebarLayoutMetrics.headerHeight - titlebarInset
-                    )
-                )
+            AgentGitSidebarBrandView(
+                isRefreshing: false,
+                hasIssues: false
+            )
+            .padding(14)
             SidebarSearchField(text: .constant(""))
             Spacer()
         }
         .background(Color(nsColor: AgentGitPalette.sidebarBackground))
-        .background(
-            WindowTitleVisibilityConfigurator(
-                titlebarInset: $titlebarInset,
-                refreshDisabled: false,
-                refresh: {},
-                addProject: {}
-            )
-        )
     }
 }
 
