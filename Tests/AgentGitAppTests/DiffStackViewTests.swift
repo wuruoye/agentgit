@@ -33,7 +33,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertTrue(textView.acceptsFirstResponder)
     }
 
-    func testDraggingCodeSelectsCharactersWithoutSelectingTableRows() throws {
+    func testDraggingAcrossCodeRowsSelectsTextFromEveryDraggedRow() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 300)
         scrollView.display(
@@ -53,17 +53,16 @@ final class DiffStackViewTests: XCTestCase {
         defer { window.orderOut(nil) }
         scrollView.layoutSubtreeIfNeeded()
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
-        let cell = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 3, makeIfNecessary: true)
+        let firstTextView = try oldCodeTextView(in: tableView, row: 3)
+        let secondTextView = try oldCodeTextView(in: tableView, row: 4)
+        let start = firstTextView.convert(
+            NSPoint(x: 8, y: firstTextView.bounds.midY),
+            to: nil
         )
-        cell.layoutSubtreeIfNeeded()
-        let textView = try XCTUnwrap(
-            descendants(of: cell).compactMap { $0 as? NSTextView }.first {
-                $0.identifier?.rawValue == "diff-old-code-content"
-            }
+        let end = secondTextView.convert(
+            NSPoint(x: 60, y: secondTextView.bounds.midY),
+            to: nil
         )
-        let start = textView.convert(NSPoint(x: 8, y: 10), to: nil)
-        let end = textView.convert(NSPoint(x: 72, y: 10), to: nil)
         let windowNumber = window.windowNumber
         let down = try XCTUnwrap(
             NSEvent.mouseEvent(
@@ -107,10 +106,208 @@ final class DiffStackViewTests: XCTestCase {
         NSApp.postEvent(dragged, atStart: false)
         NSApp.postEvent(up, atStart: false)
 
-        tableView.mouseDown(with: down)
+        // AppKit 把代码上的点击直接派给这个文本视图，不经过表格。
+        firstTextView.mouseDown(with: down)
 
-        XCTAssertGreaterThan(textView.selectedRange().length, 0)
+        let selected = scrollView.codeSelectionText()
+        let selectedLines = selected.components(separatedBy: "\n")
+        XCTAssertEqual(selectedLines.count, 2, selected)
+        XCTAssertTrue(
+            "let oldValue = 1".hasSuffix(try XCTUnwrap(selectedLines.first)),
+            selected
+        )
+        XCTAssertTrue(
+            "return oldValue".hasPrefix(try XCTUnwrap(selectedLines.last)),
+            selected
+        )
+        XCTAssertFalse(try XCTUnwrap(selectedLines.first).isEmpty, selected)
+        XCTAssertFalse(try XCTUnwrap(selectedLines.last).isEmpty, selected)
         XCTAssertTrue(tableView.selectedRowIndexes.isEmpty)
+    }
+
+    func testDraggingAcrossUnifiedCodeRowsSelectsTextFromEveryDraggedRow() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 300)
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let firstTextView = try codeTextView(
+            in: tableView,
+            row: 3,
+            identifier: "diff-unified-code-content"
+        )
+        let secondTextView = try codeTextView(
+            in: tableView,
+            row: 4,
+            identifier: "diff-unified-code-content"
+        )
+        let bandBeforeDrag = topEdgeOpaquePixelCount(of: firstTextView)
+        let start = firstTextView.convert(
+            NSPoint(x: 8, y: firstTextView.bounds.midY),
+            to: nil
+        )
+        let end = secondTextView.convert(
+            NSPoint(x: 60, y: secondTextView.bounds.midY),
+            to: nil
+        )
+        let windowNumber = window.windowNumber
+        let down = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: start,
+                modifierFlags: [],
+                timestamp: 1,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
+        let dragged = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDragged,
+                location: end,
+                modifierFlags: [],
+                timestamp: 2,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 2,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
+        let up = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: end,
+                modifierFlags: [],
+                timestamp: 3,
+                windowNumber: windowNumber,
+                context: nil,
+                eventNumber: 3,
+                clickCount: 1,
+                pressure: 0
+            )
+        )
+        NSApp.postEvent(dragged, atStart: false)
+        NSApp.postEvent(up, atStart: false)
+
+        // AppKit 把代码上的点击直接派给这个文本视图，不经过表格。
+        firstTextView.mouseDown(with: down)
+
+        let selected = scrollView.codeSelectionText()
+        XCTAssertEqual(selected.components(separatedBy: "\n").count, 2, selected)
+        // 选中了但没画出来等于用户看不见选区：字形碰不到行顶那一像素行，
+        // 那里变成不透明只可能是选区底色铺满了整行高。
+        XCTAssertEqual(bandBeforeDrag, 0)
+        XCTAssertGreaterThan(topEdgeOpaquePixelCount(of: firstTextView), 100)
+    }
+
+    private func topEdgeOpaquePixelCount(of view: NSView) -> Int {
+        guard let representation = view.bitmapImageRepForCachingDisplay(
+            in: view.bounds
+        ) else {
+            return 0
+        }
+        view.cacheDisplay(in: view.bounds, to: representation)
+        return (0..<representation.pixelsWide).count { x in
+            (representation.colorAt(x: x, y: 0)?.alphaComponent ?? 0) > 0.05
+        }
+    }
+
+    private func oldCodeTextView(
+        in tableView: NSTableView,
+        row: Int
+    ) throws -> NSTextView {
+        try codeTextView(
+            in: tableView,
+            row: row,
+            identifier: "diff-old-code-content"
+        )
+    }
+
+    private func codeTextView(
+        in tableView: NSTableView,
+        row: Int,
+        identifier: String
+    ) throws -> NSTextView {
+        let cell = try XCTUnwrap(
+            tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
+        )
+        cell.layoutSubtreeIfNeeded()
+        return try XCTUnwrap(
+            descendants(of: cell).compactMap { $0 as? NSTextView }.first {
+                $0.identifier?.rawValue == identifier
+            }
+        )
+    }
+
+    func testRedisplayWithFewerRowsDoesNotCrash() throws {
+        // 重画时行数变少：rebuildRows 已经把 rows 换短，reloadData 还没跑，这时如果
+        // 通知 AppKit 行高变化，它会按旧行数回头要视图，直接下标越界闪退。
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 400)
+        let longSummary = DiffStackSummary(
+            commit: GitCommit(
+                oid: String(repeating: "a", count: 40),
+                shortOID: "aaaaaaa",
+                authorName: "Review Author",
+                authoredAt: Date(timeIntervalSince1970: 100),
+                parentOIDs: [String(repeating: "b", count: 40)],
+                refNames: ["refs/heads/main"],
+                subject: "Shrink the row count on redisplay"
+            ),
+            metadata: GitCommitMetadata(
+                treeOID: String(repeating: "c", count: 40),
+                authorEmail: "review@example.com"
+            ),
+            message: String(
+                repeating: "A long commit body line that forces a tall summary row.\n",
+                count: 12
+            ),
+            fileCount: 1,
+            addedLineCount: 2,
+            deletedLineCount: 2,
+            isFileListExpanded: true
+        )
+        scrollView.display(
+            summary: longSummary,
+            groups: [makeGroup(includesSecondHunk: true)],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let initialRowCount = tableView.numberOfRows
+        XCTAssertGreaterThan(initialRowCount, 4)
+
+        scrollView.display(
+            summary: DiffStackSummary(isFileListExpanded: false),
+            groups: [makeGroup(isFileExpanded: false)],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+
+        XCTAssertLessThan(tableView.numberOfRows, initialRowCount)
+        for row in 0..<tableView.numberOfRows {
+            XCTAssertNotNil(tableView.view(atColumn: 0, row: row, makeIfNecessary: true))
+        }
     }
 
     func testSummaryAndFilesShareOneScrollableTable() throws {
@@ -1076,7 +1273,7 @@ final class DiffStackViewTests: XCTestCase {
         let secondOffset = second.content.frame.minX
         let expandButton = try XCTUnwrap(
             descendants(of: scrollView).compactMap { $0 as? NSButton }.first {
-                $0.identifier?.rawValue == "hunk-context-expand"
+                $0.identifier?.rawValue == "hunk-context-expand" && !$0.isHidden
             }
         )
 
@@ -1113,7 +1310,9 @@ final class DiffStackViewTests: XCTestCase {
                 tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
             }.flatMap { self.descendants(of: $0) }
                 .compactMap { $0 as? NSButton }
-                .first { $0.identifier?.rawValue == "hunk-context-expand" }
+                .first {
+                    $0.identifier?.rawValue == "hunk-context-expand" && !$0.isHidden
+                }
         )
         XCTAssertFalse(loadingButton.isEnabled)
         XCTAssertEqual(loadingButton.accessibilityLabel(), "Loading hidden lines…")
@@ -1603,7 +1802,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         XCTAssertFalse(sticky.isHidden)
         XCTAssertTrue(sticky.isOpaque)
-        XCTAssertEqual(sticky.frame.height, 60, accuracy: 0.5)
+        XCTAssertEqual(sticky.frame.height, 57, accuracy: 0.5)
 
         let visibleHeaders = sticky.subviews
             .filter { !$0.isHidden }
@@ -1611,9 +1810,9 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(visibleHeaders.count, 2)
         XCTAssertTrue(visibleHeaders.allSatisfy(\.clipsToBounds))
         XCTAssertEqual(visibleHeaders[0].frame.minY, 0, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[0].frame.height, 30, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.minY, 30, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.height, 30, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[0].frame.height, 26, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.minY, 26, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.height, 31, accuracy: 0.5)
 
         sticky.displayIfNeeded()
         let bitmap = try XCTUnwrap(
@@ -1647,7 +1846,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 7)
         XCTAssertEqual(
             tableView.rect(ofRow: 7).minY - scrollView.contentView.bounds.minY,
-            60,
+            57,
             accuracy: 0.5
         )
 
@@ -1655,7 +1854,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 2)
         XCTAssertEqual(
             tableView.rect(ofRow: 2).minY - scrollView.contentView.bounds.minY,
-            60,
+            57,
             accuracy: 0.5
         )
     }
@@ -1902,7 +2101,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(oldTitle.stringValue, "Sample.value")
         XCTAssertEqual(newTitle.stringValue, "Sample.value")
         XCTAssertTrue(location.isHidden)
-        XCTAssertEqual(tableView.rect(ofRow: 2).height, 27, accuracy: 0.5)
+        XCTAssertEqual(tableView.rect(ofRow: 2).height, 23, accuracy: 0.5)
     }
 
     func testHunkWithoutSectionKeepsSublimeBlankHeaderRow() throws {
@@ -1929,7 +2128,7 @@ final class DiffStackViewTests: XCTestCase {
 
         XCTAssertEqual(oldTitle.stringValue, "")
         XCTAssertEqual(newTitle.stringValue, "")
-        XCTAssertEqual(tableView.rect(ofRow: 2).height, 27, accuracy: 0.5)
+        XCTAssertEqual(tableView.rect(ofRow: 2).height, 23, accuracy: 0.5)
         XCTAssertTrue(oldTitle.toolTip?.contains("@@") == true)
         XCTAssertTrue(newTitle.toolTip?.contains("@@") == true)
     }
@@ -1958,7 +2157,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.layoutSubtreeIfNeeded()
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
-        let initialHunkRow = 8
+        let initialHunkRow = 7
         let targetViewportY: CGFloat = 82
         scrollView.contentView.scroll(
             to: NSPoint(
@@ -1967,16 +2166,14 @@ final class DiffStackViewTests: XCTestCase {
             )
         )
         scrollView.reflectScrolledClipView(scrollView.contentView)
-        let contextEdgeCell = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 7, makeIfNecessary: true)
-        )
-        let expandButton = try XCTUnwrap(
-            descendants(of: contextEdgeCell).compactMap { $0 as? NSButton }.first {
-                $0.identifier?.rawValue == "hunk-context-expand"
-            }
-        )
         let hunkCell = try XCTUnwrap(
             tableView.view(atColumn: 0, row: initialHunkRow, makeIfNecessary: true)
+        )
+        // 展开入口现在就在这条 hunk 标题条的左端，不再是它上面单独一行。
+        let expandButton = try XCTUnwrap(
+            descendants(of: hunkCell).compactMap { $0 as? NSButton }.first {
+                $0.identifier?.rawValue == "hunk-context-expand" && !$0.isHidden
+            }
         )
         XCTAssertTrue(
             descendants(of: hunkCell).compactMap { ($0 as? NSTextField)?.stringValue }
@@ -1985,7 +2182,7 @@ final class DiffStackViewTests: XCTestCase {
 
         expandButton.performClick(nil)
 
-        let expandedHunkRow = 11
+        let expandedHunkRow = 10
         XCTAssertEqual(
             tableView.rect(ofRow: expandedHunkRow).minY
                 - scrollView.contentView.bounds.minY,
@@ -2003,7 +2200,7 @@ final class DiffStackViewTests: XCTestCase {
         var showsWholeFile = false
         scrollView.onToggleWholeFile = { _ in
             if let currentTableView = scrollView.documentView as? NSTableView {
-                anchorViewportY = currentTableView.rect(ofRow: showsWholeFile ? 12 : 9).minY
+                anchorViewportY = currentTableView.rect(ofRow: showsWholeFile ? 11 : 8).minY
                     - scrollView.contentView.bounds.minY
             }
             showsWholeFile.toggle()
@@ -2033,7 +2230,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.layoutSubtreeIfNeeded()
         let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
-        let initialCodeRow = 9
+        let initialCodeRow = 8
         let targetViewportY: CGFloat = 86
         scrollView.contentView.scroll(
             to: NSPoint(
@@ -2043,7 +2240,7 @@ final class DiffStackViewTests: XCTestCase {
         )
         scrollView.reflectScrolledClipView(scrollView.contentView)
         scrollView.layoutSubtreeIfNeeded()
-        let compactSecondHunkRow = 8
+        let compactSecondHunkRow = 7
         let compactSecondHunk = try XCTUnwrap(
             tableView.view(
                 atColumn: 0,
@@ -2055,7 +2252,7 @@ final class DiffStackViewTests: XCTestCase {
 
         wholeFileButton.performClick(nil)
 
-        let expandedCodeRow = 12
+        let expandedCodeRow = 11
         XCTAssertLessThanOrEqual(
             abs(
                 tableView.rect(ofRow: expandedCodeRow).minY
@@ -2076,7 +2273,7 @@ final class DiffStackViewTests: XCTestCase {
         hideWholeFileButton.performClick(nil)
         XCTAssertLessThanOrEqual(
             abs(
-                tableView.rect(ofRow: 9).minY
+                tableView.rect(ofRow: 8).minY
                     - scrollView.contentView.bounds.minY
                     - (try XCTUnwrap(anchorViewportY))
             ),
@@ -2136,19 +2333,19 @@ final class DiffStackViewTests: XCTestCase {
         scrollView.contentView.scroll(
             to: NSPoint(
                 x: 0,
-                y: tableView.rect(ofRow: 9).minY - targetViewportY
+                y: tableView.rect(ofRow: 8).minY - targetViewportY
             )
         )
         scrollView.reflectScrolledClipView(scrollView.contentView)
         let secondHunk = try XCTUnwrap(
-            tableView.view(atColumn: 0, row: 8, makeIfNecessary: true)
+            tableView.view(atColumn: 0, row: 7, makeIfNecessary: true)
         )
         let expandButton = try revealHunkWholeFileButton(in: secondHunk)
 
         expandButton.performClick(nil)
 
         XCTAssertEqual(
-            tableView.rect(ofRow: 12).minY - scrollView.contentView.bounds.minY,
+            tableView.rect(ofRow: 11).minY - scrollView.contentView.bounds.minY,
             targetViewportY,
             accuracy: 0.5
         )
@@ -3295,6 +3492,122 @@ final class DiffStackViewTests: XCTestCase {
         }
         XCTFail("Unable to find code region containing expected text")
         throw TestSupportError.codeRegionMissing
+    }
+
+    func testOneSidedDiffFallsBackToUnifiedInSplitLayout() throws {
+        // 纯新增的文件在 split 下左栏永远是空的，等于白扔半个窗口宽度，所以要退回 unified。
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 400)
+        scrollView.display(
+            groups: [makeAdditionOnlyGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        XCTAssertFalse(
+            try hasSideBySideCodeRow(in: scrollView),
+            "A file with no deletions should not render split panes"
+        )
+
+        // 有增有删的文件仍然左右对照，否则 split 就等于没有了。
+        scrollView.display(
+            groups: [makeGroup()],
+            layout: .sideBySide,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+            try hasSideBySideCodeRow(in: scrollView),
+            "A file with both additions and deletions should still render split panes"
+        )
+    }
+
+    private func hasSideBySideCodeRow(in scrollView: DiffStackScrollView) throws -> Bool {
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        return (0..<tableView.numberOfRows).contains { row in
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+            ) else {
+                return false
+            }
+            return String(reflecting: type(of: cell))
+                .contains("DiffSideBySideCellView")
+        }
+    }
+
+    private func makeAdditionOnlyGroup() -> DiffStackGroup {
+        let change = GitFileChange(
+            path: "Sources/Added.swift",
+            originalPath: nil,
+            indexStatus: ".",
+            worktreeStatus: "A",
+            kind: .ordinary
+        )
+        let diff = GitFileDiff(
+            change: change,
+            scope: .working,
+            hunks: [
+                GitDiffHunk(
+                    id: 0,
+                    header: "@@ -0,0 +1,2 @@",
+                    sectionHeading: nil,
+                    oldStart: 0,
+                    oldCount: 0,
+                    newStart: 1,
+                    newCount: 2,
+                    lines: [
+                        GitDiffLine(
+                            id: 0,
+                            kind: .addition,
+                            oldLineNumber: nil,
+                            newLineNumber: 1,
+                            content: "let first = 1"
+                        ),
+                        GitDiffLine(
+                            id: 1,
+                            kind: .addition,
+                            oldLineNumber: nil,
+                            newLineNumber: 2,
+                            content: "let second = 2"
+                        )
+                    ]
+                )
+            ],
+            state: .textual
+        )
+        return DiffStackGroup(
+            id: "working",
+            title: "Working",
+            emptyMessage: "No changes",
+            isExpanded: true,
+            files: [
+                DiffStackFile(
+                    id: "added",
+                    path: change.path,
+                    originalPath: nil,
+                    status: .added,
+                    statusLabel: "A",
+                    isExpanded: true,
+                    isFocused: false,
+                    isReviewed: false,
+                    showsWholeFile: false,
+                    isLoadingWholeFile: false,
+                    canToggleWholeFile: false,
+                    canOpenWorkingFile: true,
+                    canOpenInVisualStudioCode: true,
+                    canApplyPrimaryAction: true,
+                    canDiscard: true,
+                    isMutationEnabled: true,
+                    mutationSnapshotID: DiffReviewSnapshotID(diff: diff),
+                    contextGaps: [],
+                    mutationMode: .working,
+                    diff: diff,
+                    imageDiff: nil
+                )
+            ]
+        )
     }
 
     private func makeGroup(

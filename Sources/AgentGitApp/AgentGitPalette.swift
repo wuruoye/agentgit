@@ -13,11 +13,22 @@ enum AgentGitTypography {
 }
 
 enum AgentGitPalette {
-    static let canvas = blended(
-        foreground: NSColor.controlBackgroundColor,
+    // 参照 Workboard 的层次：`windowBackgroundColor` 作页面底，`controlBackgroundColor` 作卡片，
+    // 卡片描边一律 `secondary.opacity(0.08)` 级别，圆角 11。AgentGit 原来把两者混成一个中间灰，
+    // 结果页面和卡片分不开，整体发闷。
+
+    /// 卡片和代码区之外的页面底色。
+    static let canvas = NSColor.windowBackgroundColor
+    /// 浮在页面底上的卡片。
+    static let card = NSColor.controlBackgroundColor
+    /// 卡片描边。
+    static let cardBorder = blended(
+        foreground: NSColor.secondaryLabelColor,
         background: NSColor.windowBackgroundColor,
-        fraction: 0.22
+        fraction: 0.08
     )
+    /// 卡片圆角。小控件用 7，色调竖条用 2。
+    static let cardCornerRadius: CGFloat = 11
     static let chrome = NSColor.controlBackgroundColor
     static let selectedChrome = NSColor.windowBackgroundColor
     static let inputBackground = blended(
@@ -160,10 +171,12 @@ enum AgentGitPalette {
         background: NSColor.textBackgroundColor,
         fraction: 0.56
     )
+    /// 展开的文件标题。原来是浅蓝，配上默认展开之后每个文件头都在跳蓝色；
+    /// 蓝色留给当前聚焦的那一个，其余用中性浅灰。
     static let fileHeader = blended(
-        foreground: NSColor.systemBlue,
+        foreground: NSColor.labelColor,
         background: NSColor.controlBackgroundColor,
-        fraction: 0.08
+        fraction: 0.055
     )
     static let fileHeaderFocused = blended(
         foreground: NSColor.systemBlue,
@@ -171,9 +184,9 @@ enum AgentGitPalette {
         fraction: 0.14
     )
     static let fileHeaderBoundary = blended(
-        foreground: NSColor.systemBlue,
+        foreground: NSColor.labelColor,
         background: NSColor.separatorColor,
-        fraction: 0.38
+        fraction: 0.22
     )
     static let fileContext = adaptive(
         light: srgb(251, 251, 252),
@@ -184,6 +197,10 @@ enum AgentGitPalette {
         background: NSColor.textBackgroundColor,
         fraction: 0.055
     )
+    /// 代码区底色。之前跟着窗口用 `canvas`（灰），整片 diff 看起来是脏的，绿红色带也被
+    /// 衬得过跳。代码应该坐在纯白/纯黑上，语法高亮和增删色带才有正常的对比。
+    static let codeBackground = NSColor.textBackgroundColor
+
     static let codeText = adaptive(
         light: srgb(51, 51, 51),
         dark: srgb(215, 215, 215)
@@ -200,6 +217,9 @@ enum AgentGitPalette {
         light: srgb(242, 243, 244),
         dark: srgb(41, 42, 45)
     )
+    /// 跨行选区底色。系统选中色直接铺满会盖掉增删色带，压一点透明度让行底色透出来。
+    static let codeSelection = NSColor.selectedTextBackgroundColor
+        .withAlphaComponent(0.7)
     static let separator = blended(
         foreground: NSColor.separatorColor,
         background: NSColor.textBackgroundColor,
@@ -261,6 +281,14 @@ enum AgentGitPalette {
     /// 侧栏里 worktree 相对上游领先或落后的计数。属于提示信息，不是警告，所以用蓝色。
     static let worktreeTracking = readableStatusColor(NSColor.systemBlue)
 
+    /// Split 视图左右两栏之间的中缝。系统 separator 压在代码底色上看不出来，这里用标签色
+    /// 淡淡混一层，浅色深色下都是一条能看见但不刺眼的灰线。
+    static let splitPaneDivider = blended(
+        foreground: NSColor.labelColor,
+        background: NSColor.textBackgroundColor,
+        fraction: 0.22
+    )
+
     static let commitEdge0 = adaptive(
         light: srgb(51, 153, 255),
         dark: srgb(93, 173, 255)
@@ -286,24 +314,26 @@ enum AgentGitPalette {
         dark: srgb(59, 205, 205)
     )
 
+    // 浅色这一套原来直接沿用了深色主题的粉紫、淡绿、浅橙，压在白底上全是低对比，代码看着一片糊。
+    // 字符串原来还是绿色，落在新增行的绿底上几乎读不出来，所以浅色下改成红棕，和增删底色错开。
     static let syntaxKeyword = adaptive(
-        light: srgb(198, 149, 198),
+        light: srgb(155, 35, 147),
         dark: srgb(198, 149, 198)
     )
     static let syntaxString = adaptive(
-        light: srgb(128, 185, 121),
+        light: srgb(184, 30, 26),
         dark: srgb(153, 204, 150)
     )
     static let syntaxNumber = adaptive(
-        light: srgb(249, 174, 88),
+        light: srgb(28, 60, 178),
         dark: srgb(249, 184, 113)
     )
     static let syntaxComment = adaptive(
-        light: srgb(153, 153, 153),
+        light: srgb(106, 115, 125),
         dark: srgb(142, 149, 155)
     )
     static let syntaxHeading = adaptive(
-        light: srgb(249, 123, 88),
+        light: srgb(178, 80, 26),
         dark: srgb(240, 126, 132)
     )
 

@@ -38,6 +38,7 @@ enum DiffStackMutationMode: Hashable {
 }
 
 enum DiffStackFileUtilityAction: Hashable {
+    case openInTab
     case openFile
     case openInVisualStudioCode
     case revealInFinder
@@ -476,7 +477,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         static let imageHeight: CGFloat = 360
         static let contextEdgeHeight: CGFloat = 22
         static let fileContextToggleHeight: CGFloat = 22
-        static let fileHeight: CGFloat = 26
+        static let fileHeight: CGFloat = 31
         static let folderHeight: CGFloat = 24
         static let groupHeight: CGFloat = 26
         static let noteHeight: CGFloat = 30
@@ -594,6 +595,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var appliedCommandID: UInt64?
     private var isApplyingPresentationUpdate = false
     private var inactiveScrollAnchor: (key: ReviewStateKey, offset: CGFloat)?
+    private var codeSelection: DiffCodeSelection?
 
     private struct PendingHunkAnchor {
         let anchorID: String
@@ -781,7 +783,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             displayedSummary = summary
             filePresentationToken = nextFilePresentationToken
             rebuildRows(summary: summary, groups: groups, layout: layout)
-            updateSummaryRowHeight(for: contentView.bounds.width)
+            updateSummaryRowHeight(
+                for: contentView.bounds.width,
+                notifiesTableView: false
+            )
             updateColumnWidth(force: true)
             tableView.reloadData()
             updateDocumentHeight()
@@ -829,6 +834,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
+        // AppKit 在行数变化的间隙里可能按旧行数回头要视图；返回 nil 而不是下标越界崩溃。
+        guard rows.indices.contains(row) else {
+            return nil
+        }
         switch rows[row] {
         case let .summary(summary):
             let cell = reusableCell(
@@ -879,6 +888,12 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             cell.update(
                 hunk: hunk,
                 mutationActionsEnabled: mutationActionsEnabled,
+                isLoadingContextGap: hunk.contextGap.map {
+                    loadingContextGapIDs.contains($0.id)
+                } ?? false,
+                contextExpandHandler: { [weak self] fileID, gap in
+                    self?.handleContextExpansion(fileID: fileID, gap: gap)
+                },
                 wholeFileHandler: { [weak self] fileID in
                     self?.handleWholeFileToggle(
                         fileID: fileID,
@@ -930,6 +945,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 horizontalOffset: codeHorizontalOffsetByHunkID[hunkID] ?? 0,
                 contentWidth: codeContentWidth(for: hunkID)
             )
+            applyCodeSelectionHighlight(to: cell, row: row)
             return cell
         case let .sideBySide(pair, language, _, hunkID, _):
             let cell = reusableCell(
@@ -941,6 +957,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 horizontalOffset: codeHorizontalOffsetByHunkID[hunkID] ?? 0,
                 contentWidth: codeContentWidth(for: hunkID)
             )
+            applyCodeSelectionHighlight(to: cell, row: row)
             return cell
         case let .image(imageDiff):
             let cell = reusableCell(
@@ -958,7 +975,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        switch rows[row] {
+        // 同 viewFor：行数变化的间隙里 AppKit 可能按旧行数来问，不能下标越界。
+        guard rows.indices.contains(row) else {
+            return Metrics.lineHeight
+        }
+        return switch rows[row] {
         case .summary: summaryRowHeight
         case .group: Metrics.groupHeight
         case .folder: Metrics.folderHeight
@@ -973,7 +994,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        switch rows[row] {
+        guard rows.indices.contains(row) else {
+            return false
+        }
+        return switch rows[row] {
         case .hunk, .line, .sideBySide: true
         case .summary, .group, .folder, .file, .fileContextToggle, .contextEdge,
              .image, .note:
@@ -996,6 +1020,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         layout: DiffLayoutMode
     ) {
         rowRebuildCount += 1
+        // 行序号全部换掉了，旧选区的行号不再指向同一行。
+        codeSelection = nil
         var built: [DiffStackRow] = []
         var builtGroupSections: [GroupSection] = []
         var builtFileSections: [FileSection] = []
@@ -1183,6 +1209,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     rows[rowIndex] = .hunk(
                         DiffStackHunkRow(
                             anchorID: hunk.anchorID,
+                            contextGap: hunk.contextGap,
                             title: hunk.title,
                             location: hunk.location,
                             rawHeader: hunk.rawHeader,
@@ -1277,6 +1304,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
 
         let language = GitSyntaxLanguage(path: file.path)
+        // 纯新增或纯删除的文件在 split 下有一整栏永远是空的，等于白扔半个窗口宽度。
+        // 这种文件按 unified 排，代码能用满宽度；有增有删的文件仍然左右对照。
+        let layout = Self.effectiveLayout(layout, for: diff)
         let granularMutationMode = file.status == .conflicted
             ? nil
             : file.mutationMode
@@ -1290,9 +1320,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             let anchorID = hunkAnchorID(fileID: file.id, hunkID: hunk.id)
             let gap = gapsByNextHunkAnchorID[anchorID]
             if let gap {
-                if gap.hiddenLineCount > 0 {
-                    rows.append(.contextEdge(gap, fileID: file.id))
-                }
                 appendContextLines(
                     gap.revealedLines,
                     language: language,
@@ -1316,6 +1343,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 .hunk(
                     DiffStackHunkRow(
                         anchorID: anchorID,
+                        contextGap: (gap?.hiddenLineCount ?? 0) > 0 ? gap : nil,
                         title: Self.hunkTitle(hunk),
                         location: Self.hunkLocation(hunk),
                         rawHeader: hunk.header,
@@ -1379,6 +1407,32 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 into: &rows
             )
         }
+    }
+
+    /// split 只有在两侧都有内容时才有意义。整份 diff 只有新增行（新文件）或只有删除行
+    /// （删除文件）时退回 unified。
+    private static func effectiveLayout(
+        _ layout: DiffLayoutMode,
+        for diff: GitFileDiff
+    ) -> DiffLayoutMode {
+        guard layout == .sideBySide else {
+            return layout
+        }
+        var hasAddition = false
+        var hasDeletion = false
+        for hunk in diff.hunks {
+            for line in hunk.lines {
+                switch line.kind {
+                case .addition: hasAddition = true
+                case .deletion: hasDeletion = true
+                case .context, .metadata: continue
+                }
+                if hasAddition, hasDeletion {
+                    return .sideBySide
+                }
+            }
+        }
+        return hasAddition && hasDeletion ? .sideBySide : .unified
     }
 
     private static func hunkTitle(_ hunk: GitDiffHunk) -> String {
@@ -1899,13 +1953,22 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         tableView.focusRingType = .default
         tableView.setAccessibilityLabel("Diff Review")
         tableView.setAccessibilityHelp(
-            "Drag across code to select characters. Use Tab and Shift-Tab to navigate hunks."
+            "Drag across code to select text across lines. Use Tab and Shift-Tab to navigate hunks."
         )
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = true
         tableView.selectionHighlightStyle = .regular
         tableView.copyTextProvider = { [weak self] selectedRows in
-            self?.copyText(for: selectedRows) ?? ""
+            self?.copyableText(for: selectedRows) ?? ""
+        }
+        tableView.codeSelectionHandler = { [weak self] event, textView in
+            self?.beginCodeSelection(with: event, textView: textView) ?? false
+        }
+        tableView.clearCodeSelectionHandler = { [weak self] in
+            self?.clearCodeSelection()
+        }
+        tableView.keepsCodeSelectionForMenu = { [weak self] row in
+            self?.codeSelectionRows(containing: row) != nil
         }
         tableView.rowClickHandler = { [weak self] row in
             self?.handleClick(onRow: row) ?? false
@@ -2232,10 +2295,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     func contextMenu(clickedRow: Int, selectedRows: IndexSet) -> NSMenu {
         focusFile(atRow: clickedRow)
+        // 拖出来的跨行选区没有走表格的行选中，右键时要按选区所在的行来出菜单。
+        let actionRows = codeSelectionRows(containing: clickedRow) ?? selectedRows
+        let hasCodeSelection = !codeSelectionText().isEmpty
         let menu = NSMenu()
-        if !copyText(for: selectedRows).isEmpty {
+        if hasCodeSelection || !copyText(for: selectedRows).isEmpty {
             let copyItem = NSMenuItem(
-                title: "Copy Selected Lines",
+                title: hasCodeSelection ? "Copy Selection" : "Copy Selected Lines",
                 action: #selector(DiffCopyingTableView.copy(_:)),
                 keyEquivalent: ""
             )
@@ -2249,6 +2315,14 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
         switch rows[clickedRow] {
         case let .file(file):
+            // Review 的文件标签原来只能从 Files 导航打开，Summary 里看到一个文件想单独摊开
+            // 没有入口。放在菜单第一项，和下面几条“用别的程序打开”区分开。
+            addMenuItem(
+                "Open in Tab",
+                command: .fileUtility(file.id, .openInTab),
+                to: menu
+            )
+            menu.addItem(.separator())
             addMenuItem(
                 "Open File",
                 command: .fileUtility(file.id, .openFile),
@@ -2346,7 +2420,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case .line, .sideBySide:
             guard let selection = selectedChangedLines(
                 clickedRow: clickedRow,
-                selectedRows: selectedRows
+                selectedRows: actionRows
             ) else {
                 return menu
             }
@@ -2532,7 +2606,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         updateVisibleCodeViewports()
     }
 
-    private func updateSummaryRowHeight(for width: CGFloat) {
+    /// `notifiesTableView` 为 false 时只更新高度值，不通知 AppKit。刚 `rebuildRows` 完、
+    /// 还没 `reloadData` 时行数和 `rows` 是对不上的，这时通知行高变化会让 AppKit 按旧行数
+    /// 回头问 `viewFor:row:`，直接下标越界崩溃。
+    private func updateSummaryRowHeight(
+        for width: CGFloat,
+        notifiesTableView: Bool = true
+    ) {
         guard let displayedSummary else {
             summaryRowHeight = 28
             return
@@ -2545,7 +2625,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         summaryRowHeight = nextHeight
-        guard tableView.numberOfRows > 0,
+        guard notifiesTableView,
+              tableView.numberOfRows > 0,
+              tableView.numberOfRows == rows.count,
               rows.first.map({
                   if case .summary = $0 { true } else { false }
               }) == true else {
@@ -2732,24 +2814,332 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         for row in visibleRows.location..<NSMaxRange(visibleRows) {
-            guard rows.indices.contains(row),
-                  case let .contextEdge(gap, fileID) = rows[row],
-                  let cell = tableView.view(
-                      atColumn: 0,
-                      row: row,
-                      makeIfNecessary: false
-                  ) as? DiffContextEdgeCellView else {
+            guard rows.indices.contains(row) else {
                 continue
             }
-            cell.update(
-                gap: gap,
-                fileID: fileID,
-                isLoading: loadingContextGapIDs.contains(gap.id),
-                expandHandler: { [weak self] fileID, gap in
-                    self?.handleContextExpansion(fileID: fileID, gap: gap)
+            let view = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+            switch rows[row] {
+            case let .contextEdge(gap, fileID):
+                guard let cell = view as? DiffContextEdgeCellView else {
+                    continue
                 }
+                cell.update(
+                    gap: gap,
+                    fileID: fileID,
+                    isLoading: loadingContextGapIDs.contains(gap.id),
+                    expandHandler: { [weak self] fileID, gap in
+                        self?.handleContextExpansion(fileID: fileID, gap: gap)
+                    }
+                )
+            case let .hunk(hunk):
+                // 展开入口现在挂在 hunk 标题条上，加载态也要刷到那里。
+                guard let gap = hunk.contextGap,
+                      let cell = view as? DiffHunkCellView else {
+                    continue
+                }
+                cell.update(
+                    hunk: hunk,
+                    mutationActionsEnabled: mutationActionsEnabled,
+                    isLoadingContextGap: loadingContextGapIDs.contains(gap.id),
+                    contextExpandHandler: { [weak self] fileID, gap in
+                        self?.handleContextExpansion(fileID: fileID, gap: gap)
+                    },
+                    wholeFileHandler: { [weak self] fileID in
+                        self?.handleWholeFileToggle(
+                            fileID: fileID,
+                            preferredHunkAnchorID: hunk.anchorID
+                        )
+                    },
+                    historyHandler: { [weak self] fileID, startLine, endLine in
+                        self?.focusFile(fileID)
+                        self?.onShowHunkHistory?(fileID, startLine, endLine)
+                    },
+                    actionHandler: { [weak self] fileID, lineIDs, action in
+                        self?.focusFile(fileID)
+                        self?.onSelectionAction?(fileID, lineIDs, action)
+                    }
+                )
+            default:
+                continue
+            }
+        }
+    }
+
+    // MARK: - 跨行代码选择
+
+    /// 按下即建立锚点，随后自己跟踪拖拽：鼠标走到哪一行，就把选区延伸到那一行的那个字符。
+    private func beginCodeSelection(
+        with event: NSEvent,
+        textView: DiffSelectableTextView
+    ) -> Bool {
+        let row = tableView.row(
+            at: tableView.convert(event.locationInWindow, from: nil)
+        )
+        guard rows.indices.contains(row),
+              let column = codeColumn(of: textView, atRow: row) else {
+            return false
+        }
+        focusFile(atRow: row)
+        window?.makeFirstResponder(tableView)
+        tableView.deselectAll(nil)
+        let index = textView.characterIndex(forWindowPoint: event.locationInWindow)
+        if event.modifierFlags.contains(.shift),
+           var selection = codeSelection,
+           selection.column == column {
+            selection.focusRow = row
+            selection.focusIndex = index
+            codeSelection = selection
+        } else if event.clickCount >= 3 {
+            codeSelection = DiffCodeSelection(
+                column: column,
+                anchorRow: row,
+                anchorIndex: 0,
+                focusRow: row,
+                focusIndex: textView.textLength
+            )
+        } else if event.clickCount == 2 {
+            let word = textView.wordRange(at: index)
+            codeSelection = DiffCodeSelection(
+                column: column,
+                anchorRow: row,
+                anchorIndex: word.location,
+                focusRow: row,
+                focusIndex: word.location + word.length
+            )
+        } else {
+            codeSelection = DiffCodeSelection(
+                column: column,
+                anchorRow: row,
+                anchorIndex: index,
+                focusRow: row,
+                focusIndex: index
             )
         }
+        applyCodeSelectionHighlights()
+        trackCodeSelectionDrag()
+        return true
+    }
+
+    private func trackCodeSelectionDrag() {
+        while let event = NSApp.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            guard event.type == .leftMouseDragged else {
+                break
+            }
+            tableView.autoscroll(with: event)
+            extendCodeSelection(toWindowPoint: event.locationInWindow)
+        }
+        if codeSelection?.isEmpty == true {
+            clearCodeSelection()
+        }
+    }
+
+    private func extendCodeSelection(toWindowPoint point: NSPoint) {
+        guard var selection = codeSelection,
+              let endpoint = codeSelectionEndpoint(
+                  at: point,
+                  column: selection.column
+              ),
+              endpoint.row != selection.focusRow
+                  || endpoint.index != selection.focusIndex else {
+            return
+        }
+        selection.focusRow = endpoint.row
+        selection.focusIndex = endpoint.index
+        codeSelection = selection
+        applyCodeSelectionHighlights()
+    }
+
+    /// 拖出视口时行还没有实体视图，先把落点夹回可见区域，再问那一行的字符位置。
+    private func codeSelectionEndpoint(
+        at windowPoint: NSPoint,
+        column: DiffCodeColumn
+    ) -> (row: Int, index: Int)? {
+        guard !rows.isEmpty else {
+            return nil
+        }
+        var point = tableView.convert(windowPoint, from: nil)
+        let visible = tableView.visibleRect
+        let lowerBound = visible.minY + 1
+        point.y = min(max(point.y, lowerBound), max(lowerBound, visible.maxY - 1))
+        var row = tableView.row(at: point)
+        if row < 0 {
+            row = point.y <= visible.minY ? 0 : rows.count - 1
+        }
+        guard rows.indices.contains(row) else {
+            return nil
+        }
+        guard let textView = codeTextView(atRow: row, column: column) else {
+            return (row, 0)
+        }
+        return (row, textView.characterIndex(forWindowPoint: windowPoint))
+    }
+
+    private func codeTextView(
+        atRow row: Int,
+        column: DiffCodeColumn
+    ) -> DiffSelectableTextView? {
+        codeSelectionCell(atRow: row)?.codeTextViewsByColumn[column]
+    }
+
+    private func codeColumn(
+        of textView: DiffSelectableTextView,
+        atRow row: Int
+    ) -> DiffCodeColumn? {
+        codeSelectionCell(atRow: row)?
+            .codeTextViewsByColumn
+            .first { $0.value === textView }?
+            .key
+    }
+
+    private func codeSelectionCell(atRow row: Int) -> DiffCodeSelectionCell? {
+        tableView.view(
+            atColumn: 0,
+            row: row,
+            makeIfNecessary: false
+        ) as? DiffCodeSelectionCell
+    }
+
+    private func applyCodeSelectionHighlights() {
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        guard visibleRows.location != NSNotFound else {
+            return
+        }
+        for row in visibleRows.location..<NSMaxRange(visibleRows) {
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+            ) else {
+                continue
+            }
+            applyCodeSelectionHighlight(to: cell, row: row)
+        }
+    }
+
+    /// 行视图会被复用，装载时必须重新下发选区，否则会把上一行的高亮带过来。
+    private func applyCodeSelectionHighlight(to view: NSView, row: Int) {
+        guard let cell = view as? DiffCodeSelectionCell else {
+            return
+        }
+        for (column, textView) in cell.codeTextViewsByColumn {
+            textView.mouseDownHandler = { [weak self] textView, event in
+                self?.beginCodeSelection(with: event, textView: textView) ?? false
+            }
+            textView.contextMenuHandler = { [weak self] _, event in
+                self?.codeContextMenu(for: event)
+            }
+            let range: NSRange = if let codeSelection,
+                                    codeSelection.column == column {
+                codeSelection.range(inRow: row, length: textView.textLength)
+            } else {
+                NSRange(location: 0, length: 0)
+            }
+            textView.setHighlightRange(range)
+        }
+    }
+
+    /// 右键同样直接落在文本视图上，这里换回 diff 自己的菜单。
+    private func codeContextMenu(for event: NSEvent) -> NSMenu? {
+        let row = tableView.row(
+            at: tableView.convert(event.locationInWindow, from: nil)
+        )
+        guard rows.indices.contains(row) else {
+            return nil
+        }
+        if codeSelectionRows(containing: row) == nil {
+            tableView.selectRowIndexes(
+                IndexSet(integer: row),
+                byExtendingSelection: false
+            )
+        }
+        return contextMenu(clickedRow: row, selectedRows: tableView.selectedRowIndexes)
+    }
+
+    private func clearCodeSelection() {
+        guard codeSelection != nil else {
+            return
+        }
+        codeSelection = nil
+        applyCodeSelectionHighlights()
+    }
+
+    func codeSelectionText() -> String {
+        guard let codeSelection, !codeSelection.isEmpty else {
+            return ""
+        }
+        var parts: [String] = []
+        for row in codeSelection.startRow...codeSelection.endRow {
+            guard let line = codeLine(atRow: row, column: codeSelection.column) else {
+                continue
+            }
+            let text = displayText(of: line) as NSString
+            parts.append(
+                text.substring(
+                    with: codeSelection.range(inRow: row, length: text.length)
+                )
+            )
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// 选区覆盖到的代码行，用于右键菜单里对这些行做暂存 / 撤销。
+    private func codeSelectionRows(containing row: Int) -> IndexSet? {
+        guard let indexes = codeSelectionRowIndexes(), indexes.contains(row) else {
+            return nil
+        }
+        return indexes
+    }
+
+    private func codeSelectionRowIndexes() -> IndexSet? {
+        guard let codeSelection, !codeSelection.isEmpty else {
+            return nil
+        }
+        var indexes = IndexSet()
+        for row in codeSelection.startRow...codeSelection.endRow {
+            guard let line = codeLine(atRow: row, column: codeSelection.column) else {
+                continue
+            }
+            let length = (displayText(of: line) as NSString).length
+            guard codeSelection.range(inRow: row, length: length).length > 0 else {
+                continue
+            }
+            indexes.insert(row)
+        }
+        return indexes.isEmpty ? nil : indexes
+    }
+
+    private func codeLine(atRow row: Int, column: DiffCodeColumn) -> GitDiffLine? {
+        guard rows.indices.contains(row) else {
+            return nil
+        }
+        switch rows[row] {
+        case let .line(line, _, _, _, _):
+            return column == .unified ? line : nil
+        case let .sideBySide(pair, _, _, _, _):
+            return switch column {
+            case .old: pair.old
+            case .new: pair.new
+            case .unified: nil
+            }
+        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+             .contextEdge, .image, .note:
+            return nil
+        }
+    }
+
+    /// 空行显示成一个占位空格，复制时要还原成空行。
+    private func displayText(of line: GitDiffLine) -> String {
+        line.content.isEmpty ? "" : DiffLineCellView.displayString(for: line)
+    }
+
+    private func copyableText(for selectedRows: IndexSet) -> String {
+        let selectionText = codeSelectionText()
+        return selectionText.isEmpty ? copyText(for: selectedRows) : selectionText
     }
 
     private func copyText(for selectedRows: IndexSet) -> String {
@@ -2943,6 +3333,9 @@ private struct DiffStackFilePresentationToken: Equatable {
 
 private struct DiffStackHunkRow {
     let anchorID: String
+    /// 这个 hunk 上方被折叠掉的上下文。Sublime Merge 把展开入口做在 hunk 标题条左端，
+    /// 而不是额外占一行，这里跟着对齐。
+    let contextGap: DiffStackContextGap?
     let title: String
     let location: String
     let rawHeader: String
@@ -2985,6 +3378,62 @@ private enum DiffStackRow {
     case note(String)
 }
 
+/// 跨行选区所在的代码列：unified 只有一列，side-by-side 分左右两列，选区不跨列。
+private enum DiffCodeColumn: Hashable {
+    case unified
+    case old
+    case new
+}
+
+@MainActor
+private protocol DiffCodeSelectionCell: AnyObject {
+    var codeTextViewsByColumn: [DiffCodeColumn: DiffSelectableTextView] { get }
+}
+
+/// 一次跨行选择：锚点是按下的位置，焦点跟着拖动走，按行切成各自的字符区间。
+private struct DiffCodeSelection {
+    let column: DiffCodeColumn
+    var anchorRow: Int
+    var anchorIndex: Int
+    var focusRow: Int
+    var focusIndex: Int
+
+    var isEmpty: Bool {
+        anchorRow == focusRow && anchorIndex == focusIndex
+    }
+
+    var startRow: Int {
+        min(anchorRow, focusRow)
+    }
+
+    var endRow: Int {
+        max(anchorRow, focusRow)
+    }
+
+    var startIndex: Int {
+        if anchorRow == focusRow {
+            return min(anchorIndex, focusIndex)
+        }
+        return anchorRow < focusRow ? anchorIndex : focusIndex
+    }
+
+    var endIndex: Int {
+        if anchorRow == focusRow {
+            return max(anchorIndex, focusIndex)
+        }
+        return anchorRow < focusRow ? focusIndex : anchorIndex
+    }
+
+    func range(inRow row: Int, length: Int) -> NSRange {
+        guard row >= startRow, row <= endRow, length > 0 else {
+            return NSRange(location: 0, length: 0)
+        }
+        let lower = row == startRow ? min(startIndex, length) : 0
+        let upper = row == endRow ? min(endIndex, length) : length
+        return NSRange(location: lower, length: max(0, upper - lower))
+    }
+}
+
 @MainActor
 func shouldToggleDiffRow(for hitView: NSView?) -> Bool {
     guard !(hitView is NSButton) else {
@@ -3005,11 +3454,24 @@ private final class DiffCopyingTableView: NSTableView {
     var dynamicMenuProvider: ((Int, IndexSet) -> NSMenu?)?
     var hunkNavigationHandler: ((Int) -> Bool)?
     var cancelPendingActionHandler: (() -> Bool)?
+    var codeSelectionHandler: ((NSEvent, DiffSelectableTextView) -> Bool)?
+    var clearCodeSelectionHandler: (() -> Void)?
+    var keepsCodeSelectionForMenu: ((Int) -> Bool)?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let hitView = hitTest(point)
         let clickedRow = row(at: point)
+        // 代码行各自是一个 NSTextView，交给它自己处理只能选中一行；这里改由表格接管，
+        // 拖过多行时按行下发选区。
+        if let codeView = hitView as? DiffSelectableTextView {
+            if codeSelectionHandler?(event, codeView) == true {
+                return
+            }
+            codeView.mouseDown(with: event)
+            return
+        }
+        clearCodeSelectionHandler?()
         if let textField = hitView as? NSTextField, textField.isSelectable {
             if clickedRow >= 0 {
                 _ = rowClickHandler?(clickedRow)
@@ -3070,7 +3532,8 @@ private final class DiffCopyingTableView: NSTableView {
         guard clickedRow >= 0 else {
             return super.menu(for: event)
         }
-        if !selectedRowIndexes.contains(clickedRow) {
+        if !selectedRowIndexes.contains(clickedRow),
+           keepsCodeSelectionForMenu?(clickedRow) != true {
             selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
         }
         return dynamicMenuProvider?(clickedRow, selectedRowIndexes) ?? super.menu(for: event)
@@ -3649,13 +4112,13 @@ private final class DiffFileCellView: NSTableCellView {
         let statsX = wholeFileX - statsWidth - 6
         chevron.frame = NSRect(
             x: 29,
-            y: max(0, (bounds.height - 13) / 2),
+            y: headerCenterY(13),
             width: 13,
             height: 13
         )
         let statusFrame = NSRect(
             x: 48,
-            y: max(0, (bounds.height - 18) / 2),
+            y: headerCenterY(18),
             width: 18,
             height: 18
         )
@@ -3664,46 +4127,56 @@ private final class DiffFileCellView: NSTableCellView {
         let titleX: CGFloat = 72
         title.frame = NSRect(
             x: titleX,
-            y: max(0, (bounds.height - 17) / 2),
+            y: headerCenterY(17),
             width: max(0, statsX - titleX - 6),
             height: 17
         )
         stats.frame = NSRect(
             x: statsX,
-            y: max(0, (bounds.height - 17) / 2),
+            y: headerCenterY(17),
             width: statsWidth,
             height: 17
         )
         menuButton.frame = NSRect(
             x: menuX,
-            y: max(0, (bounds.height - 23) / 2),
+            y: headerCenterY(23),
             width: menuWidth,
             height: 23
         )
         wholeFileButton.frame = NSRect(
             x: wholeFileX,
-            y: max(0, (bounds.height - 24) / 2),
+            y: headerCenterY(24),
             width: wholeFileWidth,
             height: 24
         )
         reviewButton.frame = NSRect(
             x: reviewX,
-            y: max(0, (bounds.height - 18) / 2),
+            y: headerCenterY(18),
             width: reviewWidth,
             height: 18
         )
         primaryButton.frame = NSRect(
             x: actionX,
-            y: max(0, (bounds.height - 23) / 2),
+            y: headerCenterY(23),
             width: primaryWidth,
             height: 23
         )
         discardButton.frame = NSRect(
             x: actionX + primaryWidth + actionSpacing,
-            y: max(0, (bounds.height - 23) / 2),
+            y: headerCenterY(23),
             width: discardWidth,
             height: 23
         )
+    }
+
+    /// 文件标题上方留出的间隔。上一个文件的代码原来直接顶到下一个文件的标题上，
+    /// 一屏里几个文件糊成一片，看不出边界在哪。
+    static let leadingGapHeight: CGFloat = 5
+
+    /// 顶部留了 `leadingGapHeight` 的间隔带，标题内容要在剩下的标题区里居中，不能按整格算。
+    private func headerCenterY(_ height: CGFloat) -> CGFloat {
+        let headerHeight = bounds.height - Self.leadingGapHeight
+        return Self.leadingGapHeight + max(0, (headerHeight - height) / 2)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -3715,14 +4188,28 @@ private final class DiffFileCellView: NSTableCellView {
         } else {
             background = AgentGitPalette.fileListRow
         }
-        background.setFill()
+        AgentGitPalette.canvas.setFill()
         dirtyRect.fill()
+        let headerRect = NSRect(
+            x: 0,
+            y: Self.leadingGapHeight,
+            width: bounds.width,
+            height: bounds.height - Self.leadingGapHeight
+        )
+        background.setFill()
+        headerRect.intersection(dirtyRect).fill()
         if isReviewed {
             AgentGitPalette.additionBackground.withAlphaComponent(0.32).setFill()
-            dirtyRect.fill()
+            headerRect.intersection(dirtyRect).fill()
         }
         AgentGitPalette.separator.withAlphaComponent(0.3).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        NSRect(
+            x: 0,
+            y: Self.leadingGapHeight,
+            width: bounds.width,
+            height: 1
+        ).fill()
         super.draw(dirtyRect)
     }
 
@@ -4641,14 +5128,38 @@ private final class DiffContextEdgeCellView: NSTableCellView {
             width: labelSize.width,
             height: 16
         )
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        AgentGitPalette.reviewContextGap.setFill()
-        dirtyRect.fill()
-        AgentGitPalette.separator.withAlphaComponent(0.65).setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
-        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        // 平时只画一条被文字断开的细线，diff 读起来是连续的；鼠标移上来才铺成一条可点的带子。
+        // 原来无论如何都铺满整行灰底加上下两条边，每两个 hunk 之间就横着一条重色带，
+        // 把一个文件的 diff 视觉上切得很碎。
+        if isHovered {
+            AgentGitPalette.reviewContextGap.setFill()
+            dirtyRect.fill()
+            AgentGitPalette.separator.withAlphaComponent(0.65).setFill()
+            NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+            NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        } else {
+            AgentGitPalette.codeBackground.setFill()
+            dirtyRect.fill()
+            AgentGitPalette.separator.withAlphaComponent(0.5).setFill()
+            let ruleY = floor(bounds.height / 2)
+            let contentRect = icon.frame.union(label.frame).insetBy(dx: -8, dy: 0)
+            NSRect(
+                x: 0,
+                y: ruleY,
+                width: max(0, contentRect.minX),
+                height: 1
+            ).fill()
+            NSRect(
+                x: contentRect.maxX,
+                y: ruleY,
+                width: max(0, bounds.width - contentRect.maxX),
+                height: 1
+            ).fill()
+        }
         super.draw(dirtyRect)
     }
 
@@ -4700,9 +5211,10 @@ private final class DiffContextEdgeCellView: NSTableCellView {
     }
 
     private func updateHoverAppearance() {
-        button.alphaValue = isHovered ? 1 : 0.82
+        button.alphaValue = isHovered ? 1 : 0.72
         icon.alphaValue = button.alphaValue
         label.alphaValue = button.alphaValue
+        needsDisplay = true
     }
 }
 
@@ -4738,6 +5250,10 @@ private final class DiffNoteCellView: NSTableCellView {
 }
 
 private final class DiffHunkCellView: NSTableCellView {
+    /// 和 `DiffStackScrollView.Metrics.unifiedCodeLeading` 一致：unified 下代码列的起点，
+    /// hunk 标题跟它对齐才不会比代码更靠左。
+    static let unifiedCodeLeading: CGFloat = 80
+
     private static let discardConfirmationDuration: TimeInterval = 3
     static let identifier = NSUserInterfaceItemIdentifier("diff-hunk")
 
@@ -4772,6 +5288,10 @@ private final class DiffHunkCellView: NSTableCellView {
         selectable: false
     )
     private let paneDivider = NSBox()
+    /// hunk 上方那段被折叠的上下文的展开入口。Sublime Merge 把它做在标题条左端，
+    /// 不额外占一行，这里跟着对齐。
+    private let contextExpandButton = NSButton(title: "", target: nil, action: nil)
+    private let contextProgress = NSProgressIndicator()
     private let wholeFileButton = NSButton(title: "", target: nil, action: nil)
     private let historyButton = ReviewActionButton(
         title: "Hunk History",
@@ -4802,6 +5322,9 @@ private final class DiffHunkCellView: NSTableCellView {
     private var canShowHistory = false
     private var isHovered = false
     private var layoutMode: DiffLayoutMode = .unified
+    private var contextGap: DiffStackContextGap?
+    private var isLoadingContextGap = false
+    private var contextExpandHandler: ((String, DiffStackContextGap) -> Void)?
     private var wholeFileHandler: ((String) -> Void)?
     private var historyHandler: ((String, Int, Int) -> Void)?
     private var actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
@@ -4822,8 +5345,29 @@ private final class DiffHunkCellView: NSTableCellView {
         addSubview(newTitle)
         location.identifier = NSUserInterfaceItemIdentifier("hunk-location")
         addSubview(location)
-        paneDivider.boxType = .separator
+        paneDivider.boxType = .custom
+        paneDivider.borderWidth = 0
+        paneDivider.fillColor = AgentGitPalette.splitPaneDivider
         addSubview(paneDivider)
+        contextExpandButton.identifier = NSUserInterfaceItemIdentifier("hunk-context-expand")
+        contextExpandButton.target = self
+        contextExpandButton.action = #selector(expandContextGap)
+        contextExpandButton.bezelStyle = .inline
+        contextExpandButton.isBordered = false
+        contextExpandButton.imagePosition = .imageOnly
+        contextExpandButton.imageScaling = .scaleNone
+        contextExpandButton.image = NSImage(
+            systemSymbolName: "arrow.up.and.down",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
+        )
+        contextExpandButton.contentTintColor = .secondaryLabelColor
+        addSubview(contextExpandButton)
+        contextProgress.style = .spinning
+        contextProgress.controlSize = .small
+        contextProgress.isDisplayedWhenStopped = false
+        addSubview(contextProgress)
         addSubview(wholeFileButton)
         addSubview(historyButton)
         addSubview(menuButton)
@@ -4899,38 +5443,65 @@ private final class DiffHunkCellView: NSTableCellView {
         let historySpacing: CGFloat = historyWidth > 0 ? 4 : 0
         let actionSpacing: CGFloat = actionsWidth > 0 && historyWidth > 0 ? 4 : 0
         let wholeFileWidth: CGFloat = canToggleWholeFile ? 24 : 0
-        wholeFileButton.frame = NSRect(
-            x: 7,
-            y: 2.5,
-            width: wholeFileWidth,
-            height: 24
-        )
         marker.frame = .zero
-        let unifiedLabelX: CGFloat = canToggleWholeFile ? 37 : 13
+        // 展开入口占标题条最左边一格，正好落在行号列上方；整个文件的展开按钮排在它右边。
+        let expandWidth: CGFloat = contextExpandButton.isHidden ? 0 : 22
+        let wholeFileX: CGFloat = (contextExpandButton.isHidden ? 0 : expandWidth + 2) + 7
+        let wholeFileHeight = min(24, bounds.height)
+        wholeFileButton.frame = NSRect(
+            x: wholeFileX,
+            y: max(0, (bounds.height - wholeFileHeight) / 2),
+            width: wholeFileWidth,
+            height: wholeFileHeight
+        )
+        // unified 下标题起点对齐代码列，和 split 的行为一致；split 里 sideLabelInset 已经
+        // 等于行号加符号列的宽度。
+        let unifiedLabelX: CGFloat = canToggleWholeFile
+            ? max(Self.unifiedCodeLeading, wholeFileButton.frame.maxX + 6)
+            : Self.unifiedCodeLeading
         let sideLabelInset: CGFloat = 47
         let menuX = bounds.width - menuWidth - 9
         let historyX = menuX - historyWidth - historySpacing
         let actionX = historyX - actionsWidth - actionSpacing
+        let actionHeight = min(23, bounds.height)
+        let actionY = max(0, (bounds.height - actionHeight) / 2)
         location.isHidden = true
         location.frame = .zero
-        primaryButton.frame = NSRect(x: actionX, y: 3, width: primaryWidth, height: 23)
+        contextExpandButton.frame = NSRect(
+            x: 2,
+            y: 0,
+            width: expandWidth,
+            height: bounds.height
+        )
+        contextProgress.frame = NSRect(
+            x: 5,
+            y: max(0, (bounds.height - 12) / 2),
+            width: 12,
+            height: 12
+        )
+        primaryButton.frame = NSRect(
+            x: actionX,
+            y: actionY,
+            width: primaryWidth,
+            height: actionHeight
+        )
         discardButton.frame = NSRect(
             x: actionX + primaryWidth + spacing,
-            y: 3,
+            y: actionY,
             width: discardWidth,
-            height: 23
+            height: actionHeight
         )
         historyButton.frame = NSRect(
             x: historyX,
             y: 0,
             width: historyWidth,
-            height: 27
+            height: bounds.height
         )
         menuButton.frame = NSRect(
             x: menuX,
             y: 0,
             width: menuWidth,
-            height: 27
+            height: bounds.height
         )
         if layoutMode == .sideBySide {
             let paneWidth = floor(bounds.width / 2)
@@ -4942,13 +5513,13 @@ private final class DiffHunkCellView: NSTableCellView {
             unifiedTitle.frame = .zero
             oldTitle.frame = NSRect(
                 x: oldTitleX,
-                y: 6,
+                y: max(0, (bounds.height - 16) / 2),
                 width: max(0, paneWidth - oldTitleX - 8),
                 height: 16
             )
             newTitle.frame = NSRect(
                 x: newTitleX,
-                y: 6,
+                y: max(0, (bounds.height - 16) / 2),
                 width: max(0, actionX - newTitleX - 8),
                 height: 16
             )
@@ -4961,7 +5532,7 @@ private final class DiffHunkCellView: NSTableCellView {
         } else {
             unifiedTitle.frame = NSRect(
                 x: unifiedLabelX,
-                y: 6,
+                y: max(0, (bounds.height - 16) / 2),
                 width: max(0, actionX - unifiedLabelX - 8),
                 height: 16
             )
@@ -4992,10 +5563,16 @@ private final class DiffHunkCellView: NSTableCellView {
     func update(
         hunk: DiffStackHunkRow,
         mutationActionsEnabled: Bool = true,
+        isLoadingContextGap: Bool = false,
+        contextExpandHandler: ((String, DiffStackContextGap) -> Void)? = nil,
         wholeFileHandler: ((String) -> Void)?,
         historyHandler: ((String, Int, Int) -> Void)?,
         actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
     ) {
+        contextGap = hunk.contextGap
+        self.isLoadingContextGap = isLoadingContextGap
+        self.contextExpandHandler = contextExpandHandler
+        updateContextExpansion()
         if fileID != hunk.fileID {
             isHovered = false
         }
@@ -5109,6 +5686,42 @@ private final class DiffHunkCellView: NSTableCellView {
         }
         resetDiscardConfirmation()
         actionHandler?(fileID, lineIDs, action)
+    }
+
+    private func updateContextExpansion() {
+        guard let contextGap else {
+            contextExpandButton.isHidden = true
+            contextProgress.stopAnimation(nil)
+            return
+        }
+        // 加载时按钮留在原位只是禁用，位置不动；转圈叠在图标上。
+        contextExpandButton.isHidden = false
+        contextExpandButton.isEnabled = !isLoadingContextGap
+        contextExpandButton.contentTintColor = isLoadingContextGap
+            ? .clear
+            : .secondaryLabelColor
+        if isLoadingContextGap {
+            contextProgress.startAnimation(nil)
+        } else {
+            contextProgress.stopAnimation(nil)
+        }
+        let shownLineCount = min(20, contextGap.hiddenLineCount)
+        let title = isLoadingContextGap
+            ? "Loading hidden lines…"
+            : (contextGap.hiddenLineCount == shownLineCount
+                ? "Show \(shownLineCount) hidden lines"
+                : "Show \(shownLineCount) of \(contextGap.hiddenLineCount) hidden lines")
+        contextExpandButton.toolTip = title
+        contextExpandButton.setAccessibilityLabel(title)
+        contextProgress.setAccessibilityLabel("Loading hidden lines…")
+        needsLayout = true
+    }
+
+    @objc private func expandContextGap() {
+        guard let contextGap, !isLoadingContextGap else {
+            return
+        }
+        contextExpandHandler?(fileID, contextGap)
     }
 
     @objc private func toggleWholeFile() {
@@ -5232,8 +5845,12 @@ private protocol DiffCodeViewport: AnyObject {
     func updateCodeViewport(horizontalOffset: CGFloat, contentWidth: CGFloat)
 }
 
-private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
+private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCodeSelectionCell {
     static let identifier = NSUserInterfaceItemIdentifier("diff-line")
+
+    var codeTextViewsByColumn: [DiffCodeColumn: DiffSelectableTextView] {
+        [.unified: content]
+    }
 
     private let oldLineNumber = DiffTextField.lineNumber()
     private let newLineNumber = DiffTextField.lineNumber()
@@ -5307,16 +5924,8 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
     override func draw(_ dirtyRect: NSRect) {
         backgroundColor.setFill()
         dirtyRect.fill()
-        // 增删行不铺行号灰底：灰色横穿过去会把整条绿红色带切断，一眼看不出改动是连续的哪几行。
-        if kind == .context {
-            AgentGitPalette.codeGutter.setFill()
-            NSRect(
-                x: 0,
-                y: dirtyRect.minY,
-                width: 66,
-                height: dirtyRect.height
-            ).fill()
-        }
+        // 行号列不再铺灰底。代码区改成纯白之后这条灰带反而成了最显眼的东西，而且横穿增删行时
+        // 会把绿红色带切断。行号靠字色区分就够了，整行底色保持连续。
         super.draw(dirtyRect)
     }
 
@@ -5359,13 +5968,13 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
 
         guard line.content.utf8.count <= maximumDisplayedColumns else {
             return NSAttributedString(
-                string: String(line.content.prefix(maximumDisplayedColumns)) + " …",
+                string: displayString(for: line),
                 attributes: attributes
             )
         }
 
         let text = NSMutableAttributedString(
-            string: line.content.isEmpty ? " " : line.content,
+            string: displayString(for: line),
             attributes: attributes
         )
         applySyntaxHighlighting(to: text, line: line, language: language)
@@ -5385,6 +5994,14 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
             text.addAttribute(.backgroundColor, value: highlight, range: clamped)
         }
         return text
+    }
+
+    /// 屏幕上这行实际显示的字符。跨行选区按显示字符计位置，复制也照这个取。
+    fileprivate static func displayString(for line: GitDiffLine) -> String {
+        guard line.content.utf8.count <= maximumDisplayedColumns else {
+            return String(line.content.prefix(maximumDisplayedColumns)) + " …"
+        }
+        return line.content.isEmpty ? " " : line.content
     }
 
     private static func applySyntaxHighlighting(
@@ -5458,13 +6075,17 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport {
         case .addition: AgentGitPalette.additionBackground
         case .deletion: AgentGitPalette.deletionBackground
         case .metadata: AgentGitPalette.metadataBackground
-        case .context: AgentGitPalette.canvas
+        case .context: AgentGitPalette.codeBackground
         }
     }
 }
 
-private final class DiffSideBySideCellView: NSTableCellView, DiffCodeViewport {
+private final class DiffSideBySideCellView: NSTableCellView, DiffCodeViewport, DiffCodeSelectionCell {
     static let identifier = NSUserInterfaceItemIdentifier("diff-side-by-side")
+
+    var codeTextViewsByColumn: [DiffCodeColumn: DiffSelectableTextView] {
+        [.old: oldPane.codeTextView, .new: newPane.codeTextView]
+    }
 
     private let oldPane = DiffSideLinePane(side: .old)
     private let newPane = DiffSideLinePane(side: .new)
@@ -5478,7 +6099,10 @@ private final class DiffSideBySideCellView: NSTableCellView, DiffCodeViewport {
         super.init(frame: frameRect)
         addSubview(oldPane)
         addSubview(newPane)
-        divider.boxType = .separator
+        // 系统 separator 压在代码底色上几乎看不见，左右两栏会糊成一栏。
+        divider.boxType = .custom
+        divider.borderWidth = 0
+        divider.fillColor = AgentGitPalette.splitPaneDivider
         addSubview(divider)
     }
 
@@ -5532,6 +6156,10 @@ private final class DiffSideLinePane: NSView {
     enum Side {
         case old
         case new
+    }
+
+    var codeTextView: DiffSelectableTextView {
+        content
     }
 
     private let side: Side
@@ -5603,13 +6231,6 @@ private final class DiffSideLinePane: NSView {
         let fillRect = bounds.intersection(dirtyRect)
         backgroundColor.setFill()
         fillRect.fill()
-        // 同 unified：只有上下文行铺行号灰底，增删行的色带保持连续。
-        if kind == nil || kind == .context {
-            AgentGitPalette.codeGutter.setFill()
-            NSRect(x: 0, y: fillRect.minY, width: 33, height: fillRect.height)
-                .intersection(bounds)
-                .fill()
-        }
         super.draw(dirtyRect)
     }
 
@@ -5682,7 +6303,7 @@ private final class DiffSideLinePane: NSView {
         case .addition: AgentGitPalette.additionBackground
         case .deletion: AgentGitPalette.deletionBackground
         case .metadata: AgentGitPalette.metadataBackground
-        case .context: AgentGitPalette.canvas
+        case .context: AgentGitPalette.codeBackground
         }
     }
 }
@@ -5701,6 +6322,13 @@ private extension GitDiffLine {
 }
 
 private final class DiffSelectableTextView: NSTextView {
+    /// AppKit 把点击直接派给命中的这个文本视图，表格的 mouseDown 根本不会跑，
+    /// 所以跨行选择只能从这里交回给表格统一处理。
+    var mouseDownHandler: ((DiffSelectableTextView, NSEvent) -> Bool)?
+    var contextMenuHandler: ((DiffSelectableTextView, NSEvent) -> NSMenu?)?
+
+    private var highlightRange = NSRange(location: 0, length: 0)
+
     init(font: NSFont, textColor: NSColor) {
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
@@ -5748,12 +6376,97 @@ private final class DiffSelectableTextView: NSTextView {
         nil
     }
 
+    var textLength: Int {
+        textStorage?.length ?? 0
+    }
+
     func setAttributedString(_ value: NSAttributedString) {
         guard textStorage?.isEqual(to: value) != true else {
             return
         }
         textStorage?.setAttributedString(value)
         setSelectedRange(NSRange(location: 0, length: 0))
+        highlightRange = NSRange(location: 0, length: 0)
+        needsDisplay = true
+    }
+
+    /// 选区由表格统一维护：每行只按下发的区间画底色，自己不再处理鼠标。
+    func setHighlightRange(_ range: NSRange) {
+        let limit = textLength
+        let location = min(max(0, range.location), limit)
+        let clamped = NSRange(
+            location: location,
+            length: min(max(0, range.length), limit - location)
+        )
+        guard clamped != highlightRange else {
+            return
+        }
+        highlightRange = clamped
+        needsDisplay = true
+    }
+
+    func characterIndex(forWindowPoint point: NSPoint) -> Int {
+        let local = convert(point, from: nil)
+        return characterIndexForInsertion(
+            at: NSPoint(x: local.x, y: bounds.midY)
+        )
+    }
+
+    func wordRange(at index: Int) -> NSRange {
+        let limit = textLength
+        guard limit > 0 else {
+            return NSRange(location: 0, length: 0)
+        }
+        return selectionRange(
+            forProposedRange: NSRange(
+                location: min(max(0, index), limit - 1),
+                length: 0
+            ),
+            granularity: .selectByWord
+        )
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard mouseDownHandler?(self, event) != true else {
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuHandler?(self, event) ?? super.menu(for: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawHighlight()
+        super.draw(dirtyRect)
+    }
+
+    /// 选中底色铺满整行高，跨行选区在行与行之间才不会断成一节一节。
+    private func drawHighlight() {
+        guard highlightRange.length > 0,
+              let layoutManager,
+              let textContainer else {
+            return
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: highlightRange,
+            actualCharacterRange: nil
+        )
+        AgentGitPalette.codeSelection.setFill()
+        layoutManager.enumerateEnclosingRects(
+            forGlyphRange: glyphRange,
+            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+            in: textContainer
+        ) { [bounds, textContainerInset] rect, _ in
+            NSRect(
+                x: rect.minX + textContainerInset.width,
+                y: 0,
+                width: rect.width,
+                height: bounds.height
+            ).fill()
+        }
     }
 }
 
