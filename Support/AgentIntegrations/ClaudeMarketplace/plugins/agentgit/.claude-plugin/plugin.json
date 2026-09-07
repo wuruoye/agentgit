@@ -1,6 +1,6 @@
 {
   "name": "agentgit",
-  "version": "0.1.0+codex.20260828074603",
+  "version": "0.1.0+codex.20260904144822",
   "description": "Link Claude sessions to the Git worktrees they modify.",
   "author": {
     "name": "AgentGit"

@@ -1,6 +1,6 @@
 ---
 name: agentgit-register
-description: Link the current Claude session to AgentGit before the first operation that changes files or Git state in a worktree. Use for edits, generated files, deletes, moves, formatting, staging, commits, merges, rebases, and similar repository writes. Stay silent outside Git repositories or when the session is already linked.
+description: Run before the first file write or Git command in any Git repository — before editing, creating, deleting, or moving files, fixing a bug, adding a feature, refactoring, applying a patch, running a formatter or code generator, or staging, committing, amending, merging, rebasing, or cherry-picking. Checks whether the current Claude session is already linked to the AgentGit worktree and links it when it is not, then the requested work continues unchanged. Not needed outside Git repositories.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/status.sh *), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/register.sh *)
 ---
 
