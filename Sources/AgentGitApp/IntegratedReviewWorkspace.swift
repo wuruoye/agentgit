@@ -4,6 +4,7 @@ import SwiftUI
 
 struct IntegratedReviewWorkspace: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.isReviewVisible) private var isReviewVisible
 
     /// 文件数不超过这个值时，新 Review 直接展开全部 diff；超过就保持折叠，避免一次铺开
     /// 上百个文件，让用户先滚过一屏文件名才看到代码。
@@ -41,6 +42,8 @@ struct IntegratedReviewWorkspace: View {
     ] = [:]
     @State private var pane: ReviewPane = .commits
     @State private var selectedReviewDocument: ReviewDocumentSelection = .summary
+    /// 空表示跟随上下文默认值：看 commit 时展开，看工作区改动时没有这块。
+    @State private var contextMessageExpansionOverride: Bool?
     @State private var openReviewFileIDs: [String] = []
     @State private var review = ReviewState()
     @State private var navigatorSelection: NavigatorSelection?
@@ -97,7 +100,12 @@ struct IntegratedReviewWorkspace: View {
     @State private var collapsedDiffGroupIDs: Set<String> = []
     @State private var diffCommandSequence: UInt64 = 0
     @State private var diffCommand: DiffStackCommand?
-    @FocusState private var isFilterFocused: Bool
+    @Binding private var isReviewFocused: Bool
+    @State private var isHistoryVisible = true
+    @State private var historyBeforeFocus = true
+    @FocusState private var isCommitsNavigatorFocused: Bool
+    @FocusState private var isCommitFilterFocused: Bool
+    @FocusState private var isFileFilterFocused: Bool
     @FocusState private var isFilesNavigatorFocused: Bool
 
     init(
@@ -107,9 +115,11 @@ struct IntegratedReviewWorkspace: View {
         initialSelectedCommitIDs: Set<GitCommit.ID> = [],
         initialPane: ReviewPane = .commits,
         initialHistoryFilter: String = "",
+        focusMode: Binding<Bool> = .constant(false),
         initialReviewState: ReviewState = ReviewState()
     ) {
         self.snapshot = snapshot
+        _isReviewFocused = focusMode
         self.initialContext = initialContext
         self.initialSelectedCommitIDs = initialSelectedCommitIDs
         self.initialPane = initialPane
@@ -261,6 +271,8 @@ struct IntegratedReviewWorkspace: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            workspaceHeader
+            Divider()
             if let remoteOperationError {
                 remoteOperationErrorBar(remoteOperationError)
             }
@@ -285,77 +297,6 @@ struct IntegratedReviewWorkspace: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 workspaceSplitView
-            }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button(action: navigateBack) {
-                    Label("Navigate Back", systemImage: "chevron.left")
-                }
-                .labelStyle(.iconOnly)
-                .disabled(!canNavigateReviewBack)
-                .help("Navigate Back (⌘←)")
-
-                Button(action: navigateForward) {
-                    Label("Navigate Forward", systemImage: "chevron.right")
-                }
-                .labelStyle(.iconOnly)
-                .disabled(!navigationHistory.canNavigateForward)
-                .help("Navigate Forward (⌘→)")
-            }
-
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 0) {
-                    Text(workspaceHeaderTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    Text(snapshot.worktree.rootURL.path)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: 420)
-                .help(snapshot.worktree.rootURL.path)
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                AgentSessionsButton(worktree: snapshot.worktree)
-
-                if isRefreshingSnapshot {
-                    ProgressView()
-                        .controlSize(.small)
-                        .help("Updating repository status")
-                }
-
-                if let runningRemoteAction {
-                    ProgressView()
-                        .controlSize(.small)
-                        .help("\(runningRemoteAction.title) in progress")
-                    Button(action: cancelRemoteOperation) {
-                        Label("Cancel", systemImage: "xmark.circle")
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(isCancellingRemoteOperation)
-                } else if let remoteOperationFeedback {
-                    RemoteOperationFeedbackView(feedback: remoteOperationFeedback)
-                }
-
-                RemoteActionButton(
-                    title: pullActionTitle,
-                    systemImage: "arrow.down",
-                    action: { performRemoteAction(.pull) }
-                )
-                .disabled(!canRunRemoteOperation(.pull))
-                .help(remoteActionHelp(.pull))
-
-                RemoteActionButton(
-                    title: pushActionTitle,
-                    systemImage: "arrow.up",
-                    action: { performRemoteAction(.push) }
-                )
-                .disabled(!canRunRemoteOperation(.push))
-                .help(remoteActionHelp(.push))
             }
         }
         .onChange(of: snapshot.id) {
@@ -394,6 +335,7 @@ struct IntegratedReviewWorkspace: View {
             isLoadingContextDetail = false
             isLoadingDiffs = false
             selectedReviewDocument = .summary
+            contextMessageExpansionOverride = nil
             openReviewFileIDs = []
             collapsedDiffGroupIDs = newKey.context == .pending ? ["staged"] : []
             diffCommand = nil
@@ -480,34 +422,156 @@ struct IntegratedReviewWorkspace: View {
         }
         .focusedSceneValue(
             \.reviewCommandActions,
-            ReviewCommandActions(
+            isReviewVisible ? ReviewCommandActions(
                 navigateBack: navigateBack,
                 navigateForward: navigateForward,
                 canNavigateBack: canNavigateReviewBack
-                    && !isFilterFocused,
+                    && !isAnyFilterFocused,
                 canNavigateForward: navigationHistory.canNavigateForward
-                    && !isFilterFocused,
+                    && !isAnyFilterFocused,
                 selectNext: { moveFileFocus(by: 1) },
                 selectPrevious: { moveFileFocus(by: -1) },
-                focusFilter: { isFilterFocused = true },
-                showCommits: {
-                    pane = .commits
-                },
-                showFiles: {
-                    pane = .files
-                },
+                focusFilter: focusNavigatorFilter,
+                showCommits: { focusNavigator(.commits) },
+                showFiles: { focusNavigator(.files) },
                 navigatorDefaultActionTitle: navigatorDefaultActionTitle,
                 performNavigatorDefaultAction: performNavigatorDefaultAction,
                 canDiscardFocusedFile: focusedFileDiscardCommand != nil,
-                requestFocusedFileDiscard: requestFocusedFileDiscard
-            )
+                requestFocusedFileDiscard: requestFocusedFileDiscard,
+                collapseAllFiles: { setEntireFileListExpanded(false) },
+                expandAllFiles: { setEntireFileListExpanded(true) }
+            ) : nil
         )
-        .onChange(of: pane) { _, pane in
-            guard pane == .files else {
-                return
+        .onChange(of: isReviewVisible) { _, visible in
+            if !visible {
+                isCommitFilterFocused = false
+                isFileFilterFocused = false
+                isCommitsNavigatorFocused = false
+                isFilesNavigatorFocused = false
             }
+        }
+        .onChange(of: isCommitFilterFocused) { _, focused in
+            if focused { pane = .commits }
+        }
+        .onChange(of: isFileFilterFocused) { _, focused in
+            if focused { pane = .files }
+        }
+        .onChange(of: isCommitsNavigatorFocused) { _, focused in
+            if focused { pane = .commits }
+        }
+        .onChange(of: isFilesNavigatorFocused) { _, focused in
+            if focused { pane = .files }
+        }
+        .onChange(of: isReviewFocused) { _, focused in
+            if focused {
+                historyBeforeFocus = isHistoryVisible
+                isHistoryVisible = false
+                focusNavigator(.files)
+            } else {
+                isHistoryVisible = historyBeforeFocus
+            }
+        }
+    }
+
+    private func focusNavigatorFilter() {
+        if pane == .commits && isHistoryVisible {
+            isCommitFilterFocused = true
+        } else {
+            isFileFilterFocused = true
+        }
+    }
+
+    private func focusNavigator(_ target: ReviewPane) {
+        pane = target
+        isCommitFilterFocused = false
+        isFileFilterFocused = false
+        if target == .commits {
+            isHistoryVisible = true
+            Task { @MainActor in
+                await Task.yield()
+                guard pane == .commits, isHistoryVisible else { return }
+                isCommitsNavigatorFocused = true
+            }
+        } else {
             isFilesNavigatorFocused = true
         }
+    }
+
+    private var workspaceHeader: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 1) {
+                Button(action: navigateBack) { Image(systemName: "chevron.left") }
+                    .disabled(!canNavigateReviewBack)
+                    .help("Navigate Back (⌘←)")
+                    .accessibilityLabel("Navigate Back")
+                Button(action: navigateForward) { Image(systemName: "chevron.right") }
+                    .disabled(!navigationHistory.canNavigateForward)
+                    .help("Navigate Forward (⌘→)")
+                    .accessibilityLabel("Navigate Forward")
+            }
+            .buttonStyle(WorkspaceIconButtonStyle())
+            Button {
+                isHistoryVisible.toggle()
+                if !isHistoryVisible { focusNavigator(.files) }
+            } label: {
+                Label { Text("History") } icon: { ReviewIconView(icon: .history) }
+            }
+            .buttonStyle(ReviewToolbarButtonStyle(kind: isHistoryVisible ? .selected : .normal))
+            .help(isHistoryVisible ? "Hide commit history" : "Show commit history")
+            .accessibilityLabel("Toggle Commit History")
+            .accessibilityValue(isHistoryVisible ? "Shown" : "Hidden")
+            Button {
+                isReviewFocused.toggle()
+            } label: {
+                Label { Text(isReviewFocused ? "Exit Focus" : "Focus") } icon: { ReviewIconView(icon: .focus) }
+            }
+            .buttonStyle(ReviewToolbarButtonStyle(kind: isReviewFocused ? .selected : .normal))
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .help("Focus Review (⇧⌘F)")
+            .accessibilityLabel("Toggle Review Focus")
+            .accessibilityValue(isReviewFocused ? "On" : "Off")
+            if let toolbarActivityLabel {
+                Text(toolbarActivityLabel)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            AgentSessionsButton(worktree: snapshot.worktree)
+            Button {
+                Task { await model.refreshSelectedWorktree() }
+            } label: { ReviewIconView(icon: .refresh) }
+                .buttonStyle(WorkspaceIconButtonStyle())
+                .help("Refresh Current Worktree (⌘R)")
+                .accessibilityLabel("Refresh Current Worktree")
+            if runningRemoteAction != nil {
+                Button(action: cancelRemoteOperation) { Image(systemName: "xmark.circle") }
+                    .buttonStyle(WorkspaceIconButtonStyle())
+                    .disabled(isCancellingRemoteOperation)
+                    .accessibilityLabel("Cancel Git Operation")
+            } else if let remoteOperationFeedback {
+                RemoteOperationFeedbackView(feedback: remoteOperationFeedback)
+            }
+            HStack(spacing: 8) {
+                Button { performRemoteAction(.pull) } label: {
+                    Label { Text(pullActionTitle) } icon: { ReviewIconView(icon: .stage) }
+                }
+                .buttonStyle(ReviewToolbarButtonStyle())
+                .disabled(!canRunRemoteOperation(.pull))
+                .help(remoteActionHelp(.pull))
+                Button { performRemoteAction(.push) } label: {
+                    Label { Text(pushActionTitle) } icon: { ReviewIconView(icon: .unstage) }
+                }
+                .buttonStyle(ReviewToolbarButtonStyle(kind: .primary))
+                .disabled(!canRunRemoteOperation(.push))
+                .help(remoteActionHelp(.push))
+            }
+            .controlSize(.regular)
+            .font(.system(size: 12, weight: .medium))
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 44)
+        .background(Color(nsColor: AgentGitPalette.card))
     }
 
     private var workspaceSplitView: some View {
@@ -520,65 +584,72 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private var workspaceHeaderTitle: String {
-        guard let branch = snapshot.status.branch else {
-            return snapshot.worktree.displayName
+    private var toolbarActivityLabel: String? {
+        if let runningRemoteAction {
+            return isCancellingRemoteOperation
+                ? "Cancelling \(runningRemoteAction.title)…"
+                : "\(runningRemoteAction.title)…"
         }
-        let status: String
-        if branch.aheadCount > 0, branch.behindCount > 0 {
-            status = "\(branch.aheadCount) ahead, \(branch.behindCount) behind"
-        } else if branch.aheadCount > 0 {
-            status = "\(branch.aheadCount) ahead"
-        } else if branch.behindCount > 0 {
-            status = "\(branch.behindCount) behind"
-        } else {
-            return snapshot.worktree.displayName
+        if isRefreshingSnapshot {
+            return "Updating…"
         }
-        return "\(snapshot.worktree.displayName) (\(status))"
+        if isLoadingDiffs {
+            return "Loading diff…"
+        }
+        return nil
     }
 
     // MARK: - Navigation
 
     private var navigationPane: some View {
-        VStack(spacing: 0) {
-            ReviewPaneTabBar(selection: $pane)
-
-            if let hunkHistoryFilter {
-                Divider()
-                HunkHistoryFilterBar(
-                    filter: hunkHistoryFilter,
-                    clear: clearHunkHistory
-                )
+        VSplitView {
+            if isHistoryVisible {
+                historySection.frame(minHeight: 150, idealHeight: 260)
             }
-
-            if isFilterFocused || !activeNavigatorFilterText.isEmpty {
-                Divider()
-                IntegratedFilterField(
-                    placeholder: pane == .commits ? "Search commits" : "Filter files",
-                    text: pane == .commits ? $commitFilterText : $review.filterText,
-                    isFocused: $isFilterFocused
-                )
-                .help(
-                    pane == .commits
-                        ? "Search commit messages, authors, hashes, and references"
-                        : "Filter changed files by name or path"
-                )
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-            }
-
-            Divider()
-
-            switch pane {
-            case .commits: commitsList
-            case .files: filesList
-            }
+            filesSection.frame(minHeight: 140)
         }
         .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
     }
 
-    private var activeNavigatorFilterText: String {
-        pane == .commits ? commitFilterText : review.filterText
+    private var historySection: some View {
+        VStack(spacing: 0) {
+            NavigatorSectionHeader(title: ReviewPane.commits.title, count: nil, isFocusedSection: pane == .commits)
+            IntegratedFilterField(
+                placeholder: "Search commits",
+                text: $commitFilterText,
+                isFocused: $isCommitFilterFocused
+            )
+            .help("Search commit messages, authors, hashes, and references")
+            .padding(.horizontal, 9)
+            .padding(.bottom, 7)
+            if let hunkHistoryFilter {
+                HunkHistoryFilterBar(filter: hunkHistoryFilter, clear: clearHunkHistory)
+            }
+            commitsList
+        }
+    }
+
+    private var filesSection: some View {
+        VStack(spacing: 0) {
+            NavigatorSectionHeader(
+                title: ReviewPane.files.title,
+                count: currentFileItems.isEmpty ? nil : currentFileItems.count,
+                isFocusedSection: pane == .files
+            )
+            IntegratedFilterField(
+                placeholder: "Filter files",
+                text: $review.filterText,
+                isFocused: $isFileFilterFocused
+            )
+            .help("Filter changed files by name or path")
+            .padding(.horizontal, 9)
+            .padding(.bottom, 7)
+            filesList
+        }
+    }
+
+    private var isAnyFilterFocused: Bool {
+        isCommitFilterFocused || isFileFilterFocused
     }
 
     private var commitsList: some View {
@@ -782,6 +853,8 @@ struct IntegratedReviewWorkspace: View {
                 }
             }
             .listStyle(.plain)
+            .focusable()
+            .focused($isCommitsNavigatorFocused)
             .scrollContentBackground(.hidden)
             .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
             .id(snapshot.id)
@@ -1024,6 +1097,8 @@ struct IntegratedReviewWorkspace: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
         .focusable()
         .focused($isFilesNavigatorFocused)
         .onKeyPress(.space) {
@@ -1232,37 +1307,213 @@ struct IntegratedReviewWorkspace: View {
                 reviewDocumentTabBar
                 Divider()
             }
-            if selectedReviewDocument == .summary {
-                if case let .commit(commitID) = activeContext {
-                    if let commit = commit(withID: commitID),
-                       currentFileItems.isEmpty {
-                        CommitSummaryHeader(
-                            commit: commit,
-                            metadata: contextCommitMetadata,
-                            message: contextMessage.isEmpty ? commit.subject : contextMessage,
-                            fileCount: reviewDocumentFileItems.count,
-                            addedLineCount: totalAddedLineCount,
-                            deletedLineCount: totalDeletedLineCount,
-                            isLoading: isLoadingContextDetail
-                        )
-                        Divider()
-                    } else if commit(withID: commitID) == nil {
-                        reviewContextHeader
-                        Divider()
-                    }
-                } else if case .range = activeContext {
-                    reviewContextHeader
-                    Divider()
-                    reviewToolbar
-                    Divider()
-                }
-            } else {
-                reviewToolbar
+            reviewToolbar
+            Divider()
+            if selectedReviewDocument == .summary, isContextMessageExpanded {
+                contextSummaryHeader
                 Divider()
             }
             reviewBody
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            reviewComparisonBar
         }
+    }
+
+    /// commit 的说明原来固定占着 diff 顶部，现在由比较条上的开关收放。
+    @ViewBuilder
+    private var contextSummaryHeader: some View {
+        switch activeContext {
+        case .pending:
+            EmptyView()
+        case let .commit(commitID):
+            if let commit = commit(withID: commitID) {
+                CommitSummaryHeader(
+                    commit: commit,
+                    metadata: contextCommitMetadata,
+                    message: contextMessage.isEmpty ? commit.subject : contextMessage,
+                    // 文件清单还在读时先用 commit 行里已有的文件数，否则会先显示
+                    // “0 files changed”，看起来像这条 commit 什么都没改。
+                    fileCount: reviewDocumentFileItems.isEmpty
+                        ? (commit.changedFileCount ?? 0)
+                        : reviewDocumentFileItems.count,
+                    addedLineCount: totalAddedLineCount,
+                    deletedLineCount: totalDeletedLineCount,
+                    isLoading: isLoadingContextDetail
+                )
+            } else {
+                reviewContextHeader
+            }
+        case .range:
+            reviewContextHeader
+        }
+    }
+
+    private var reviewToolbar: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(reviewToolbarTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 8) {
+                    Text(countedLabel(reviewDocumentFileItems.count, singular: "file"))
+                    DiffCountLabel(added: totalAddedLineCount, deleted: totalDeletedLineCount)
+                    Text("·")
+                    Text(activeContext == .pending ? "Working tree & index" : comparisonEndpointsLabel)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+            }
+            Spacer(minLength: 4)
+            ReviewLayoutControls(
+                diffLayout: Binding(get: { model.diffLayout }, set: { model.diffLayout = $0 }),
+                ignoresWhitespace: Binding(get: { model.diffOptions.ignoresWhitespace }, set: { model.diffOptions.ignoresWhitespace = $0 })
+            )
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 62)
+        .background(Color(nsColor: AgentGitPalette.card))
+    }
+
+    private var reviewToolbarTitle: String {
+        if case let .file(fileID) = selectedReviewDocument,
+           let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
+            return (item.change.path as NSString).lastPathComponent
+        }
+        switch activeContext {
+        case .pending: return "Uncommitted Changes"
+        case .commit: return "Commit Review"
+        case .range: return "Commit Range"
+        }
+    }
+
+    private var reviewComparisonBar: some View {
+        ViewThatFits(in: .horizontal) {
+            reviewComparisonControls(compact: false)
+            reviewComparisonControls(compact: true)
+        }
+        .buttonStyle(WorkspaceIconButtonStyle())
+        .font(.system(size: 11).monospacedDigit())
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(Color(nsColor: AgentGitPalette.card))
+    }
+
+    private func reviewComparisonControls(compact: Bool) -> some View {
+        HStack(spacing: compact ? 6 : 9) {
+            ReviewIconView(icon: reviewedFileCount == reviewDocumentFileItems.count && reviewedFileCount > 0 ? .reviewed : .review)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
+            Text("\(reviewedFileCount) / \(reviewDocumentFileItems.count) reviewed")
+                .lineLimit(1)
+                .help("Files reviewed in the current comparison")
+            if !compact {
+                ProgressView(value: Double(reviewedFileCount), total: Double(max(1, reviewDocumentFileItems.count)))
+                    .progressViewStyle(.linear)
+                    .tint(Color(nsColor: AgentGitPalette.statusAdded))
+                    .frame(width: 44)
+                    .accessibilityLabel("Review progress")
+            }
+            Spacer(minLength: 4)
+            if isApplyingMutation || (isLoadingDiffs && !isRefreshingSnapshot) {
+                ProgressView().controlSize(.small)
+            }
+            if contextMessageSubject != nil {
+                Button {
+                    contextMessageExpansionOverride = !isContextMessageExpanded
+                } label: { Image(systemName: "text.bubble") }
+                .help(isContextMessageExpanded ? "Hide commit message" : "Show commit message")
+                .accessibilityLabel("Toggle Commit Message")
+            }
+            Button { setEntireFileListExpanded(false) } label: {
+                Label { Text(compact ? "Collapse" : "Collapse All").fixedSize() } icon: { ReviewIconView(icon: .collapse) }
+            }
+            .buttonStyle(ReviewToolbarButtonStyle())
+            .help("Collapse all file diffs in this review")
+            .accessibilityLabel("Collapse All Files")
+            .disabled(!reviewDocumentStackGroups.contains { $0.files.contains(where: \.isExpanded) })
+            Button { setEntireFileListExpanded(true) } label: {
+                ReviewIconView(icon: .expand)
+            }
+            .help("Expand all file diffs in this review")
+            .accessibilityLabel("Expand All Files")
+            .disabled(isEntireFileListExpanded || reviewDocumentFileItems.isEmpty)
+            Divider().frame(height: 12)
+            Button { moveHunk(by: -1) } label: { ReviewIconView(icon: .previous) }
+                .help("Previous hunk (Shift-Tab)")
+                .accessibilityLabel("Previous hunk")
+                .disabled(visibleHunkCount == 0)
+            if !compact {
+                Text(countedLabel(visibleHunkCount, singular: "hunk"))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Button { moveHunk(by: 1) } label: { ReviewIconView(icon: .next) }
+                .help("Next hunk (Tab)")
+                .accessibilityLabel("Next hunk")
+                .disabled(visibleHunkCount == 0)
+        }
+
+    }
+
+    /// commit message 原来占着 diff 顶部一大块，现在收在比较条里按需展开。
+    private var contextMessageSubject: String? {
+        switch activeContext {
+        case .pending:
+            return nil
+        case let .commit(commitID):
+            // 历史还没读回来时也要有说明，否则这块会整个消失。
+            let fallback = commit(withID: commitID)?.subject
+                ?? "Commit \(String(commitID.prefix(7)))"
+            let subject = messageSubject(fallback: fallback)
+            return subject.isEmpty ? fallback : subject
+        case .range:
+            let subjects = selectedCommits.prefix(2).map(\.subject)
+            return subjects.isEmpty ? nil : subjects.joined(separator: " · ")
+        }
+    }
+
+    private var isContextMessageExpanded: Bool {
+        contextMessageExpansionOverride ?? (contextMessageSubject != nil)
+    }
+
+    private var comparisonEndpointsLabel: String {
+        switch activeContext {
+        case .pending:
+            return "working tree ⇄ HEAD"
+        case let .commit(commitID):
+            return "\(String(commitID.prefix(7))) ⇄ parent"
+        case let .range(base, head):
+            return "\(String(base.prefix(7))) ⇄ \(String(head.prefix(7)))"
+        }
+    }
+
+    /// 只数当前展开的文件：收起的文件在 diff 里没有 hunk 行，导航也跳不过去，
+    /// 计数必须和实际能跳的目标一致。
+    private var visibleHunkCount: Int {
+        guard !isPreparingReviewDiffs else {
+            return 0
+        }
+        return reviewDocumentFileItems.reduce(0) { total, item in
+            let isExpanded = selectedReviewDocument == .summary
+                ? isReviewFileExpanded(item.id.stackID, in: review)
+                : true
+            guard isExpanded else {
+                return total
+            }
+            return total + (diffsByFileID[item.id]?.hunks.count ?? 0)
+        }
+    }
+
+    private func moveHunk(by offset: Int) {
+        diffCommandSequence &+= 1
+        diffCommand = DiffStackCommand(
+            id: diffCommandSequence,
+            action: .moveHunk(offset)
+        )
     }
 
     private var reviewDocumentTabBar: some View {
@@ -1284,15 +1535,7 @@ struct IntegratedReviewWorkspace: View {
                 selectedReviewDocument = .file(fileID)
                 focusFileFromNavigator(fileID)
             },
-            closeFile: closeReviewDocument,
-            diffLayout: Binding(
-                get: { model.diffLayout },
-                set: { model.diffLayout = $0 }
-            ),
-            ignoresWhitespace: Binding(
-                get: { model.diffOptions.ignoresWhitespace },
-                set: { model.diffOptions.ignoresWhitespace = $0 }
-            )
+            closeFile: closeReviewDocument
         )
     }
 
@@ -1336,33 +1579,6 @@ struct IntegratedReviewWorkspace: View {
                 message: selectedCommits.prefix(4).map(\.subject).joined(separator: "\n")
             )
         }
-    }
-
-    private var reviewToolbar: some View {
-        HStack(spacing: 12) {
-            Text(countedLabel(reviewDocumentFileItems.count, singular: "file"))
-                .font(.caption.monospacedDigit().weight(.medium))
-            DiffCountLabel(added: totalAddedLineCount, deleted: totalDeletedLineCount)
-            if reviewedFileCount > 0 {
-                Text(
-                    countedLabel(reviewedFileCount, singular: "file")
-                        + " reviewed"
-                )
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            if isApplyingMutation || (isLoadingDiffs && !isRefreshingSnapshot) {
-                ProgressView()
-                    .controlSize(.small)
-            }
-        }
-        .controlSize(.small)
-        .font(.caption)
-        .padding(.horizontal, 12)
-        .frame(height: 30)
-        .background(.bar)
     }
 
     private func canRunRemoteOperation(_ action: GitRemoteAction) -> Bool {
@@ -1504,34 +1720,34 @@ struct IntegratedReviewWorkspace: View {
                     }
                 }
             }
-        } else if currentFileItems.isEmpty {
+        } else if currentFileItems.isEmpty, isContextDetailSettled {
             ContentUnavailableView {
-                Label(
-                    isContextDetailSettled ? "No File Changes" : "Loading Files…",
-                    systemImage: isContextDetailSettled ? "checkmark.circle" : "clock"
-                )
+                Label("No File Changes", systemImage: "checkmark.circle")
             } description: {
-                if isContextDetailSettled {
-                    Text(
-                        activeContext == .pending
-                            ? "The working tree has no staged or unstaged changes."
-                            : "This commit selection contains no file changes."
-                    )
+                Text(
+                    activeContext == .pending
+                        ? "The working tree has no staged or unstaged changes."
+                        : "This commit selection contains no file changes."
+                )
+            }
+        } else if currentFileItems.isEmpty {
+            // 读文件清单是很短的一步，用整块居中的空态会让人以为这条 commit 是空的。
+            // 顶部一行提示，位置和随后出现的文件列表对齐。
+            VStack(spacing: 0) {
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading files…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+                Spacer(minLength: 0)
             }
-        } else if isPreparingReviewDiffs {
-            VStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Preparing Review…")
-                    .font(.headline)
-                Text("Loading all changed files before showing the review.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("review-diff-preparing")
+            .accessibilityLabel("Loading changed files")
         } else if selectedReviewDocument == .summary, visibleFileItems.isEmpty {
             ContentUnavailableView {
                 Label("No Matching Files", systemImage: "line.3.horizontal.decrease.circle")
@@ -1549,7 +1765,9 @@ struct IntegratedReviewWorkspace: View {
                     Divider()
                 }
                 DiffStackView(
-                    summary: reviewStackSummary,
+                    // 规模、进度和 commit message 都由底部比较条承担，
+                    // diff 从窗口上沿就是代码。
+                    summary: nil,
                     groups: reviewDocumentStackGroups,
                     layout: model.diffLayout,
                     scrollTarget: reviewScrollTarget,
@@ -1660,9 +1878,9 @@ struct IntegratedReviewWorkspace: View {
             : "\(first.0): \(first.1)"
     }
 
-    /// 只有一屏可显示内容都没有时才挡住整个 Review。已经渲染出来的上一份 diff 在重新加载
-    /// 期间继续留着：文件列表每变一次就把整块内容换成 “Preparing Review…” 会让刷新、
-    /// stage 和切换看起来像整页闪烁，而且任何一次提前返回的加载都会把界面永久留在这一屏。
+    /// 这次 Review 的全部 diff 是否都已经就绪。没就绪时文件先保持收起，界面照常显示摘要和
+    /// 文件列表；就绪后一次性展开，避免分批写入正在滚动的列表引起重排。
+    /// 已经有 diff 时不再判定为“准备中”，否则刷新、stage 和切文件都会把已展开的内容收回去。
     private var isPreparingReviewDiffs: Bool {
         guard diffsByFileID.isEmpty else {
             return false
@@ -1676,39 +1894,6 @@ struct IntegratedReviewWorkspace: View {
 
     // MARK: - Stack composition
 
-    private var reviewStackSummary: DiffStackSummary? {
-        guard selectedReviewDocument == .summary else {
-            return nil
-        }
-        switch activeContext {
-        case let .commit(commitID):
-            guard let commit = commit(withID: commitID) else {
-                return nil
-            }
-            return DiffStackSummary(
-                commit: commit,
-                metadata: contextCommitMetadata,
-                message: contextMessage.isEmpty ? commit.subject : contextMessage,
-                fileCount: reviewDocumentFileItems.count,
-                addedLineCount: totalAddedLineCount,
-                deletedLineCount: totalDeletedLineCount,
-                isLoading: isLoadingContextDetail,
-                isFileListExpanded: isEntireFileListExpanded
-            )
-        case .pending:
-            return DiffStackSummary(
-                fileCount: reviewDocumentFileItems.count,
-                addedLineCount: totalAddedLineCount,
-                deletedLineCount: totalDeletedLineCount,
-                isLoading: isApplyingMutation
-                    || (isLoadingDiffs && !isRefreshingSnapshot),
-                isPending: true,
-                isFileListExpanded: isEntireFileListExpanded
-            )
-        case .range:
-            return nil
-        }
-    }
 
     private var stackGroups: [DiffStackGroup] {
         let groups = switch activeContext {
@@ -1792,7 +1977,11 @@ struct IntegratedReviewWorkspace: View {
             originalPath: item.change.originalPath,
             status: item.stackStatus,
             statusLabel: item.statusLabel,
-            isExpanded: isReviewFileExpanded(item.id.stackID, in: review),
+            // diff 还没到齐时所有文件保持收起：这样点一条 commit 立刻就能看到摘要和文件列表，
+            // 而不是整块白屏转圈；等全部 diff 就绪再一次性展开，中途不会边滚边重排。
+            isExpanded: isPreparingReviewDiffs
+                ? false
+                : isReviewFileExpanded(item.id.stackID, in: review),
             isFocused: item.id.stackID == review.focusedFileID,
             isReviewed: isReviewed(item),
             showsWholeFile: showsWholeFile(item),
@@ -1825,11 +2014,22 @@ struct IntegratedReviewWorkspace: View {
         fileID: String,
         action: DiffStackFileUtilityAction
     ) {
+        // 开标签不需要工作区里真的存在这个文件，删除的文件也应该能单独摊开来看，
+        // 所以放在下面那道 workingFileURL 判断之前。
+        if action == .openInTab {
+            guard currentFileItems.contains(where: { $0.id.stackID == fileID }) else {
+                return
+            }
+            openReviewDocument(fileID)
+            return
+        }
         guard let item = currentFileItems.first(where: { $0.id.stackID == fileID }),
               let fileURL = workingFileURL(for: item) else {
             return
         }
         switch action {
+        case .openInTab:
+            return
         case .openFile:
             guard existingWorkingFileURL(for: item) != nil else {
                 return
@@ -1916,15 +2116,16 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private var focusedFilePrimaryCommand: PendingFilePrimaryCommand? {
-        guard allowsPendingMutations else {
-            return nil
-        }
-        return pendingFilePrimaryCommand(
+    private var selectedFilePrimaryCommand: PendingFilePrimaryCommand? {
+        pendingFilePrimaryCommand(
             context: activeContext,
             focusedFileID: review.focusedFileID,
             items: currentFileItems
         )
+    }
+
+    private var focusedFilePrimaryCommand: PendingFilePrimaryCommand? {
+        allowsPendingMutations ? selectedFilePrimaryCommand : nil
     }
 
     private var focusedFileDiscardCommand: PendingFilePrimaryCommand? {
@@ -2312,7 +2513,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     /// Diff 的加载键。`loadDiffs` 在目标 commit 还没进入 `commits` 时会直接返回，而 `diffLoadKey`
-    /// 只看 worktree、上下文和文件列表，历史到位后不会变，于是 Review 永远停在 “Preparing Review…”。
+    /// 只看 worktree、上下文和文件列表，历史到位后不会变，于是 Review 的 diff 永远不会就绪。
     /// 把 commit 是否可解析一起放进 id，历史加载完成后再跑一次。
     private var diffLoadRetryKey: DiffLoadRetryKey {
         DiffLoadRetryKey(
@@ -3129,7 +3330,8 @@ struct IntegratedReviewWorkspace: View {
             head
         }
         pane = .commits
-        isFilterFocused = false
+        isCommitFilterFocused = false
+        isFileFilterFocused = false
         hunkHistoryCommits = []
         hunkHistoryError = nil
         hunkHistoryFilter = HunkHistoryFilter(
@@ -5891,11 +6093,11 @@ struct ContextDetailLoadKey: Hashable {
 }
 
 enum ReviewSplitLayoutMetrics {
-    static let widthDefaultsKey = "agentgit.review-navigation-width"
-    static let minimumNavigationWidth: CGFloat = 180
-    static let idealNavigationWidth: CGFloat = 400
+    static let widthDefaultsKey = "agentgit.review-navigation-width.v2"
+    static let minimumNavigationWidth: CGFloat = 200
+    static let idealNavigationWidth: CGFloat = 290
     static let maximumNavigationWidth: CGFloat = 520
-    static let minimumReviewWidth: CGFloat = 560
+    static let minimumReviewWidth: CGFloat = 490
 
     static func clampedNavigationWidth(
         _ proposedWidth: CGFloat,
@@ -6184,7 +6386,7 @@ struct HunkHistoryFilterBar: View {
     }
 }
 
-private struct DiffCountLabel: View {
+struct DiffCountLabel: View {
     let added: Int
     let deleted: Int
 
@@ -6199,30 +6401,85 @@ private struct DiffCountLabel: View {
     }
 }
 
-struct ReviewPaneTabBar: View {
-    @Binding var selection: ReviewPane
+/// 段头只说明这一段是什么、有多少条，焦点段用强调色的小圆点标出来。
+struct NavigatorSectionHeader: View {
+    let title: String
+    let count: Int?
+    let isFocusedSection: Bool
 
     var body: some View {
-        Picker("Review Navigation", selection: $selection) {
-            ForEach(ReviewPane.allCases, id: \.self) { pane in
-                Label(
-                    pane.title,
-                    systemImage: pane == .commits
-                        ? "clock.arrow.circlepath"
-                        : "folder"
-                )
-                .tag(pane)
+        HStack(spacing: 6) {
+            Image(systemName: title == ReviewPane.commits.title ? "clock.arrow.circlepath" : "folder")
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+            if let count {
+                Text(count.formatted())
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+            if isFocusedSection {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 5, height: 5)
+                    .accessibilityHidden(true)
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.small)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 11)
         .frame(height: 38)
-        .background(Color(nsColor: AgentGitPalette.reviewTabBarBackground))
-        .accessibilityLabel("Review Navigation")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            count.map { "\(title), \($0) items" } ?? title
+        )
+    }
+}
+
+private struct ReviewLayoutControls: View {
+    @Binding var diffLayout: DiffLayoutMode
+    @Binding var ignoresWhitespace: Bool
+    @State private var isDisplayHovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Toggle("Ignore Whitespace Changes", isOn: $ignoresWhitespace)
+            } label: {
+                Label { Text("Display") } icon: { ReviewIconView(icon: .display) }
+                    .padding(.horizontal, 9)
+                    .frame(height: 30)
+                    .background(Color(nsColor: isDisplayHovered ? AgentGitPalette.reviewHover : AgentGitPalette.card), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay { RoundedRectangle(cornerRadius: 7).stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 0.7) }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .onHover { isDisplayHovered = $0 }
+            .foregroundStyle(ignoresWhitespace ? Color.accentColor : Color.primary)
+            .help(ignoresWhitespace ? "Display options — whitespace changes hidden" : "Display options — all whitespace changes shown")
+            .accessibilityLabel("Diff Display Options")
+            .accessibilityValue(ignoresWhitespace ? "Ignoring whitespace" : "Showing whitespace")
+
+            HStack(spacing: 2) {
+                ForEach(DiffLayoutMode.allCases) { mode in
+                    Button { diffLayout = mode } label: {
+                        Label { Text(mode.title) } icon: {
+                            ReviewIconView(icon: mode == .sideBySide ? .split : .unified)
+                        }
+                    }
+                    .buttonStyle(ReviewToolbarButtonStyle(kind: diffLayout == mode ? .selected : .normal))
+                    .accessibilityLabel(mode.title)
+                    .accessibilityAddTraits(diffLayout == mode ? .isSelected : [])
+                    .help("Show \(mode.title.lowercased()) diff")
+                }
+            }
+            .padding(2)
+            .background(Color(nsColor: AgentGitPalette.inputBackground), in: RoundedRectangle(cornerRadius: 9))
+            .fixedSize()
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Diff Layout")
+        }
+        .font(.system(size: 11.5, weight: .medium))
     }
 }
 
@@ -6232,8 +6489,6 @@ private struct ReviewDocumentTabBar: View {
     let selectSummary: () -> Void
     let selectFile: (String) -> Void
     let closeFile: (String) -> Void
-    @Binding var diffLayout: DiffLayoutMode
-    @Binding var ignoresWhitespace: Bool
     @State private var hoveredFileID: String?
 
     var body: some View {
@@ -6308,49 +6563,9 @@ private struct ReviewDocumentTabBar: View {
             }
 
             Spacer(minLength: 8)
-
-            reviewLayoutControls
-                .padding(.trailing, 9)
         }
         .frame(height: 32)
         .background(Color(nsColor: AgentGitPalette.reviewTabBarBackground))
-    }
-
-    /// Unified/Split 和忽略空白原来只在 Settings 里，但它们是读 diff 时随时要切的。
-    /// 标签栏右侧本来就是空的，放这里既省一次进设置的往返，也把这条空带用起来。
-    private var reviewLayoutControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                ignoresWhitespace.toggle()
-            } label: {
-                Image(systemName: "textformat.size")
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 22, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(
-                ignoresWhitespace ? Color.accentColor : Color.secondary
-            )
-            .help(
-                ignoresWhitespace
-                    ? "Ignoring whitespace changes"
-                    : "Ignore whitespace changes"
-            )
-            .accessibilityLabel("Ignore Whitespace Changes")
-            .accessibilityAddTraits(ignoresWhitespace ? .isSelected : [])
-
-            Picker("Diff Layout", selection: $diffLayout) {
-                ForEach(DiffLayoutMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .fixedSize()
-            .help("Switch between unified and split diff")
-        }
     }
 
     private func tabBackground(isSelected: Bool) -> Color {
@@ -6724,7 +6939,7 @@ struct CommitMessageSummary: View {
                                 .padding(16)
                         }
                     }
-                    .frame(width: 520, height: 360)
+                    .scaledFontPresentation(width: 520, height: 360)
                 }
             }
         }
@@ -6964,8 +7179,7 @@ struct PendingOverviewRow: View {
                     .lineLimit(1)
                 Group {
                     if totalCount == 0 {
-                        Text("Commit Changes")
-                            .italic()
+                        Text("Working tree clean")
                     } else {
                         HStack(spacing: 6) {
                             Text("Working \(workingCount)")

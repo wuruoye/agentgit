@@ -1,8 +1,8 @@
 import AppKit
 
 enum AgentGitTypography {
-    static let interfaceSize: CGFloat = 12
-    static let codeSize: CGFloat = 12
+    static let interfaceSize: CGFloat = 13
+    static let codeSize: CGFloat = 13
     static var code: NSFont {
         NSFont(name: "Menlo", size: codeSize)
             ?? NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
@@ -13,193 +13,52 @@ enum AgentGitTypography {
 }
 
 enum AgentGitPalette {
-    // 参照 Workboard 的层次：`windowBackgroundColor` 作页面底，`controlBackgroundColor` 作卡片，
-    // 卡片描边一律 `secondary.opacity(0.08)` 级别，圆角 11。AgentGit 原来把两者混成一个中间灰，
-    // 结果页面和卡片分不开，整体发闷。
-
-    /// 卡片和代码区之外的页面底色。
-    static let canvas = NSColor.windowBackgroundColor
-    /// 浮在页面底上的卡片。
-    static let card = NSColor.controlBackgroundColor
-    /// 卡片描边。
-    static let cardBorder = blended(
-        foreground: NSColor.secondaryLabelColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.08
-    )
-    /// 卡片圆角。小控件用 7，色调竖条用 2。
-    static let cardCornerRadius: CGFloat = 11
-    static let chrome = NSColor.controlBackgroundColor
-    static let selectedChrome = NSColor.windowBackgroundColor
-    static let inputBackground = blended(
-        foreground: NSColor.textBackgroundColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.62
-    )
-    static let imagePanel = NSColor.controlBackgroundColor
-    static let imageChecker = blended(
-        foreground: NSColor.quaternaryLabelColor,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.08
-    )
+    static let cardCornerRadius: CGFloat = 10
+    static let canvas = adaptive(light: srgb(244, 246, 249), dark: srgb(24, 27, 33))
+    static let card = adaptive(light: srgb(255, 255, 255), dark: srgb(31, 35, 43))
+    static let cardBorder = adaptive(light: srgb(224, 229, 236), dark: srgb(48, 54, 65))
+    static let sidebarBackground = adaptive(light: srgb(239, 242, 247), dark: srgb(22, 25, 31))
+    static let inputBackground = adaptive(light: srgb(232, 237, 244), dark: srgb(37, 42, 52))
+    static let sidebarHover = adaptive(light: srgb(228, 234, 243), dark: srgb(37, 43, 54))
+    static let codeBackground = adaptive(light: srgb(255, 255, 255), dark: srgb(27, 31, 38))
+    static let reviewContextGap = adaptive(light: srgb(245, 247, 251), dark: srgb(30, 35, 43))
+    static let reviewContextGapText = adaptive(light: srgb(114, 126, 145), dark: srgb(141, 154, 175))
+    static let fileHeader = adaptive(light: srgb(248, 250, 253), dark: srgb(33, 38, 47))
+    static let fileContext = adaptive(light: srgb(249, 250, 253), dark: srgb(29, 33, 41))
+    static let hunkHeader = adaptive(light: srgb(244, 247, 251), dark: srgb(30, 35, 43))
+    static let reviewActionConfirmationBackground = adaptive(light: srgb(255, 234, 234), dark: srgb(76, 41, 40))
+    static let reviewActionConfirmationText = adaptive(light: srgb(181, 46, 44), dark: srgb(255, 133, 130))
+    static let commitPrimaryText = adaptive(light: srgb(32, 40, 53), dark: srgb(231, 236, 245))
+    static let commitSecondaryText = adaptive(light: srgb(88, 102, 121), dark: srgb(172, 183, 201))
+    static let chrome = card
+    static let selectedChrome = canvas
+    static let imagePanel = card
+    static let imageChecker = inputBackground
     static let activeControl = NSColor.labelColor
-    static let sidebarBackground = NSColor.windowBackgroundColor
-    static let sidebarCardBackground = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.74
-    )
-    static let sidebarCardBorder = blended(
-        foreground: NSColor.separatorColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.58
-    )
-    static let sidebarChrome = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.7
-    )
-    static let sidebarInputBackground = blended(
-        foreground: NSColor.textBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.82
-    )
-    static let sidebarHover = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.055
-    )
-    static let sidebarGroupHeader = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.58
-    )
-    static let sidebarSelection = blended(
-        foreground: NSColor.systemBlue,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.075
-    )
-    static let sidebarSelectionBorder = NSColor.systemBlue
-    static let sidebarMetadata = NSColor.secondaryLabelColor
-    static let sidebarDivider = blended(
-        foreground: NSColor.separatorColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.62
-    )
-    static let reviewChrome = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.82
-    )
-    static let reviewNavigationBackground = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.62
-    )
-    static let reviewTabBarBackground = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.76
-    )
-    static let reviewHeaderBorder = blended(
-        foreground: NSColor.separatorColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.64
-    )
-    static let reviewControlBackground = blended(
-        foreground: NSColor.textBackgroundColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.58
-    )
-    static let reviewControlBorder = blended(
-        foreground: NSColor.separatorColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.62
-    )
-    static let reviewHover = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.065
-    )
-    static let reviewHunkText = NSColor.labelColor
-    static let reviewContextGap = adaptive(
-        light: srgb(247, 250, 252),
-        dark: srgb(35, 40, 45)
-    )
-    static let reviewContextGapText = adaptive(
-        light: srgb(117, 124, 131),
-        dark: srgb(139, 146, 153)
-    )
-    static let reviewActionBackground = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.095
-    )
-    static let reviewActionConfirmationBackground = adaptive(
-        light: srgb(255, 233, 231),
-        dark: srgb(76, 41, 40)
-    )
-    static let reviewActionConfirmationText = adaptive(
-        light: srgb(181, 46, 44),
-        dark: srgb(255, 133, 130)
-    )
-    static let commitCountBackground = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.075
-    )
-    static let commitPrimaryText = adaptive(
-        light: srgb(4, 4, 4),
-        dark: srgb(232, 232, 232)
-    )
-    static let commitSecondaryText = adaptive(
-        light: srgb(112, 112, 112),
-        dark: srgb(166, 166, 166)
-    )
-    static let groupHeader = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.68
-    )
-    static let folderHeader = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.windowBackgroundColor,
-        fraction: 0.78
-    )
-    static let fileListRow = blended(
-        foreground: NSColor.controlBackgroundColor,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.56
-    )
-    /// 展开的文件标题。原来是浅蓝，配上默认展开之后每个文件头都在跳蓝色；
-    /// 蓝色留给当前聚焦的那一个，其余用中性浅灰。
-    static let fileHeader = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.055
-    )
-    static let fileHeaderFocused = blended(
-        foreground: NSColor.systemBlue,
-        background: NSColor.controlBackgroundColor,
-        fraction: 0.14
-    )
-    static let fileHeaderBoundary = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.separatorColor,
-        fraction: 0.22
-    )
-    static let fileContext = adaptive(
-        light: srgb(251, 251, 252),
-        dark: srgb(34, 34, 37)
-    )
-    static let hunkHeader = blended(
-        foreground: NSColor.systemBlue,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.055
-    )
-    /// 代码区底色。之前跟着窗口用 `canvas`（灰），整片 diff 看起来是脏的，绿红色带也被
-    /// 衬得过跳。代码应该坐在纯白/纯黑上，语法高亮和增删色带才有正常的对比。
-    static let codeBackground = NSColor.textBackgroundColor
+    static let sidebarCardBackground = sidebarBackground
+    static let sidebarCardBorder = cardBorder
+    static let sidebarChrome = sidebarBackground
+    static let sidebarInputBackground = card
+    static let sidebarGroupHeader = sidebarBackground
+    static let sidebarSelectionBorder = NSColor.controlAccentColor
+    static let sidebarMetadata = commitSecondaryText
+    static let sidebarDivider = cardBorder
+    static let reviewChrome = card
+    static let reviewNavigationBackground = card
+    static let reviewTabBarBackground = canvas
+    static let reviewHeaderBorder = cardBorder
+    static let reviewControlBackground = card
+    static let reviewControlBorder = cardBorder
+    static let reviewHover = sidebarHover
+    static let reviewHunkText = commitPrimaryText
+    static let reviewActionBackground = inputBackground
+    static let commitCountBackground = inputBackground
+    static let groupHeader = canvas
+    static let folderHeader = canvas
+    static let fileListRow = card
+    static let fileHeaderBoundary = cardBorder
+    static let sidebarSelection = blended(foreground: .controlAccentColor, background: sidebarBackground, fraction: 0.12)
+    static let fileHeaderFocused = blended(foreground: .controlAccentColor, background: card, fraction: 0.055)
 
     static let codeText = adaptive(
         light: srgb(51, 51, 51),
@@ -214,8 +73,8 @@ enum AgentGitPalette {
         dark: srgb(38, 39, 42)
     )
     static let codeFiller = adaptive(
-        light: srgb(242, 243, 244),
-        dark: srgb(41, 42, 45)
+        light: srgb(247, 248, 250),
+        dark: srgb(29, 33, 40)
     )
     /// 跨行选区底色。系统选中色直接铺满会盖掉增删色带，压一点透明度让行底色透出来。
     static let codeSelection = NSColor.selectedTextBackgroundColor
@@ -228,7 +87,7 @@ enum AgentGitPalette {
 
     static let additionBackground = blended(
         foreground: adaptive(
-            light: srgb(229, 248, 226),
+            light: srgb(234, 247, 239),
             dark: srgb(38, 59, 41)
         ),
         background: NSColor.textBackgroundColor,
@@ -236,7 +95,7 @@ enum AgentGitPalette {
     )
     static let deletionBackground = blended(
         foreground: adaptive(
-            light: srgb(248, 226, 226),
+            light: srgb(253, 237, 239),
             dark: srgb(66, 40, 40)
         ),
         background: NSColor.textBackgroundColor,
@@ -249,7 +108,7 @@ enum AgentGitPalette {
     )
     static let additionInline = blended(
         foreground: adaptive(
-            light: srgb(196, 240, 194),
+            light: srgb(190, 229, 207),
             dark: srgb(48, 82, 51)
         ),
         background: NSColor.textBackgroundColor,
@@ -257,18 +116,18 @@ enum AgentGitPalette {
     )
     static let deletionInline = blended(
         foreground: adaptive(
-            light: srgb(240, 194, 194),
+            light: srgb(245, 202, 211),
             dark: srgb(91, 49, 49)
         ),
         background: NSColor.textBackgroundColor,
         fraction: 1
     )
     static let additionText = adaptive(
-        light: srgb(61, 153, 51),
+        light: srgb(35, 132, 87),
         dark: srgb(111, 208, 101)
     )
     static let deletionText = adaptive(
-        light: srgb(255, 0, 0),
+        light: srgb(192, 65, 78),
         dark: srgb(255, 110, 110)
     )
 

@@ -201,7 +201,7 @@ enum CommitGraphVerticalPosition: CGFloat, Equatable, Sendable {
 
 enum CommitGraphMetrics {
     /// Commit 行高。图谱 Canvas、Pending 标记和 Commit 行共用它，改一处三处一起变。
-    static let rowHeight: CGFloat = 42
+    static let rowHeight: CGFloat = 50
     static let horizontalPadding: CGFloat = 7
     static let maximumNodeExtent: CGFloat = 6.5
 }

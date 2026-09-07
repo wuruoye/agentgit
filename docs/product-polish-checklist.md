@@ -31,7 +31,7 @@
 ## P1：窗口与系统体验
 
 - [x] 复审 Settings、错误条、空态、加载态和恢复操作的视觉层级与文案。
-- [x] 最小窗口支持 `980×600`；侧栏、导航与 Review 同时保持可见，文件操作不越界；Review
+- [x] 最小窗口支持 `1040×680`；侧栏、导航与 Review 同时保持可见，文件操作不越界；Review
   分栏支持鼠标拖动和 VoiceOver 增减调节，并通过深色与高对比度渲染检查。
 - [x] 使用真实后台窗口复审 VoiceOver 阅读顺序；Pending Changes 文件依次暴露 File Actions、
   Review、Stage、Unstage 或 Discard，确认操作与 Trash 恢复说明可读，Diff 表格、分隔栏和筛选

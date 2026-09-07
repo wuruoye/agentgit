@@ -65,12 +65,14 @@ func adjacentWorktreeSwitcherSelection(
 struct WorktreeSwitcherView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    private let onOpen: ((String) -> Void)?
     @State private var query = ""
     @State private var selection: GitWorktreeSnapshot.ID?
     @FocusState private var isSearchFocused: Bool
 
-    init(initialQuery: String = "") {
+    init(initialQuery: String = "", onOpen: ((String) -> Void)? = nil) {
         _query = State(initialValue: initialQuery)
+        self.onOpen = onOpen
     }
 
     var body: some View {
@@ -111,7 +113,7 @@ struct WorktreeSwitcherView: View {
 
                                 ForEach(project.worktrees) { worktree in
                                         Button {
-                                            selection = worktree.id
+                                            open(worktree.id)
                                         } label: {
                                             WorktreeSwitcherRow(
                                                 snapshot: worktree,
@@ -121,11 +123,7 @@ struct WorktreeSwitcherView: View {
                                         .buttonStyle(.plain)
                                         .padding(.horizontal, 4)
                                         .id(worktree.id)
-                                        .simultaneousGesture(
-                                            TapGesture(count: 2).onEnded {
-                                                open(worktree.id)
-                                            }
-                                        )
+
                                     }
                                 }
                                 .padding(.bottom, 4)
@@ -157,7 +155,7 @@ struct WorktreeSwitcherView: View {
             }
             Divider()
             HStack(spacing: 10) {
-                Text("Type to filter · Return to open")
+                Text("↑ ↓ to navigate · Return to open · Esc to close")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -219,8 +217,8 @@ struct WorktreeSwitcherView: View {
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text("Switch Worktree")
-                    .font(.system(size: 14, weight: .semibold))
-                Text("Search registered projects and open an existing worktree.")
+                    .font(.system(size: 20, weight: .semibold))
+                Text("Jump to any branch across your projects.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -241,6 +239,7 @@ struct WorktreeSwitcherView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.tertiary)
             TextField("Search projects and worktrees", text: $query)
+                .font(.system(size: 15))
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
                 .onMoveCommand { direction in
@@ -299,6 +298,11 @@ struct WorktreeSwitcherView: View {
     }
 
     private func open(_ worktreeID: GitWorktreeSnapshot.ID) {
+        if let onOpen {
+            onOpen(worktreeID)
+            dismiss()
+            return
+        }
         let requiresRefresh = model.selectWorktree(id: worktreeID)
         dismiss()
         guard requiresRefresh else {

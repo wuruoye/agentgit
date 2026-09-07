@@ -232,7 +232,11 @@ final class ContentViewLayoutTests: XCTestCase {
         let graph = CommitGraphLayout(commits: commits)
         let selectedCommit = IntegratedOverviewSelection.commit(commits[1].id)
         let content = VStack(spacing: 0) {
-            ReviewPaneTabBar(selection: .constant(.commits))
+            NavigatorSectionHeader(
+                title: "Commits",
+                count: nil,
+                isFocusedSection: true
+            )
             Divider()
             List(selection: .constant(Set([selectedCommit]))) {
                 PendingOverviewRow(
@@ -492,6 +496,26 @@ final class ContentViewLayoutTests: XCTestCase {
         XCTAssertFalse(model.isRefreshing(worktreeID: snapshot.worktrees[0].id))
         model.setApplicationActive(false)
         XCTAssertFalse(model.isRefreshing(worktreeID: snapshot.worktrees[0].id))
+
+        var focusedReview = ReviewState()
+        focusedReview.focusedFileID = IntegratedFileID.pending(
+            scope: .working,
+            changeID: selectedChange.id
+        ).stackID
+        model.reviewStates.save(
+            focusedReview,
+            for: ReviewStateKey(worktreeID: selectedSnapshot.id, context: .pending)
+        )
+
+        let fontScale = FontScaleSettings(defaults: defaults)
+        for _ in 0..<5 { fontScale.perform(.increase) }
+        try await render(
+            ContentView().environment(model).environment(\.fontScaleSettings, fontScale),
+            size: NSSize(width: AgentGitWindowMetrics.minimumWidth, height: AgentGitWindowMetrics.minimumHeight),
+            fileName: "AgentGitContent-font-150.png",
+            requiresPendingActions: false
+        )
+        fontScale.perform(.reset)
 
         try await render(
             ContentView().environment(model),
@@ -1244,7 +1268,8 @@ final class ContentViewLayoutTests: XCTestCase {
         let visibleButtons = descendants(of: hostingView).compactMap {
             $0 as? NSButton
         }.filter { button in
-            guard !button.isHidden,
+            guard !button.isHiddenOrHasHiddenAncestor,
+                  !button.visibleRect.isEmpty,
                   button.alphaValue > 0,
                   button.bounds.width > 0,
                   button.bounds.height > 0 else {
@@ -1287,7 +1312,7 @@ final class ContentViewLayoutTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(
                 frame.minX,
                 hostingView.bounds.minX - 0.5,
-                "\(button.title) extends past the leading window edge"
+                "\(fileName): \(button.title) extends past the leading window edge"
             )
             XCTAssertLessThanOrEqual(
                 frame.maxX,

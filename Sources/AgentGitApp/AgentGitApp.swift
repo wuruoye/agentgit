@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 enum AgentGitWindowMetrics {
-    static let minimumWidth: CGFloat = 980
-    static let minimumHeight: CGFloat = 600
+    static let minimumWidth: CGFloat = 1_040
+    static let minimumHeight: CGFloat = 680
     static let defaultWidth: CGFloat = 1_440
     static let defaultHeight: CGFloat = 840
 }
@@ -33,8 +33,11 @@ struct AgentGitApp: App {
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             AgentGitReviewCommands()
+            FontScaleCommands()
 
-            CommandGroup(replacing: .newItem) {
+            // 不能替换掉 newItem：那会连系统的 New Window 一起删掉，
+            // 窗口一旦关闭就再也开不回来，App 只剩一个没有界面的进程。
+            CommandGroup(after: .newItem) {
                 Button("Add Git Project…", action: model.chooseProject)
                     .keyboardShortcut("o", modifiers: .command)
             }
@@ -84,6 +87,10 @@ final class AgentGitApplicationDelegate: NSObject, NSApplicationDelegate {
             return
         }
         NSApp.appearance = NSAppearance(named: appearanceName)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        FontScaleSettings.shared.installKeyboardShortcuts()
     }
 
     func attach(_ model: AppModel) {

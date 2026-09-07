@@ -447,7 +447,8 @@ final class DiffStackViewTests: XCTestCase {
             .compactMap { ($0 as? NSTextField)?.stringValue }
 
         XCTAssertTrue(
-            labels.contains("Legacy/OldName.swift  →  Sources/NewName.swift")
+            labels.contains("OldName.swift  →  NewName.swift")
+                && labels.contains("Legacy  →  Sources")
         )
         XCTAssertEqual(fileCell.toolTip, "Legacy/OldName.swift → Sources/NewName.swift")
     }
@@ -839,7 +840,7 @@ final class DiffStackViewTests: XCTestCase {
 
     func testNarrowFileHeaderKeepsMutationButtonsInsideViewport() throws {
         let scrollView = makeScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 300)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 490, height: 300)
         scrollView.display(
             groups: [
                 makeGroup(
@@ -867,12 +868,14 @@ final class DiffStackViewTests: XCTestCase {
             }
         )
 
-        XCTAssertTrue(stage.isHidden)
+        XCTAssertFalse(stage.isHidden)
+        let titleFrameBeforeHover = title.frame
         XCTAssertTrue(discard.isHidden)
         fileCell.mouseEntered(with: try makeMouseMoveEvent())
         fileCell.layoutSubtreeIfNeeded()
         XCTAssertFalse(stage.isHidden)
         XCTAssertFalse(discard.isHidden)
+        XCTAssertEqual(title.frame, titleFrameBeforeHover)
         XCTAssertGreaterThanOrEqual(stage.frame.minX, fileCell.bounds.minX)
         XCTAssertLessThanOrEqual(stage.frame.maxX, fileCell.bounds.maxX)
         XCTAssertGreaterThanOrEqual(discard.frame.minX, fileCell.bounds.minX)
@@ -885,7 +888,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(title.lineBreakMode, .byTruncatingMiddle)
     }
 
-    func testDeletedFileHeaderUsesSublimeStatusAndStatisticsStructure() throws {
+    func testDeletedFileHeaderShowsStatusAndStatistics() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 160)
         scrollView.display(
@@ -928,7 +931,7 @@ final class DiffStackViewTests: XCTestCase {
         )
     }
 
-    func testRendersSublimeAlignedCollapsedFileListOffscreen() throws {
+    func testRendersCollapsedFileListOffscreen() throws {
         let files = try [
             makeGroup(
                 id: "readme",
@@ -969,7 +972,7 @@ final class DiffStackViewTests: XCTestCase {
             try XCTUnwrap(group.files.first)
         }
         let scrollView = makeScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 180)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_200, height: 300)
         let window = NSWindow(
             contentRect: scrollView.frame,
             styleMask: [.borderless],
@@ -1009,7 +1012,7 @@ final class DiffStackViewTests: XCTestCase {
             isDirectory: true
         )
         .appendingPathComponent(".build/verification", isDirectory: true)
-        .appendingPathComponent("AgentGitChanged-files-sublime.png")
+        .appendingPathComponent("AgentGitChanged-files.png")
         try FileManager.default.createDirectory(
             at: output.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -1802,7 +1805,10 @@ final class DiffStackViewTests: XCTestCase {
         )
         XCTAssertFalse(sticky.isHidden)
         XCTAssertTrue(sticky.isOpaque)
-        XCTAssertEqual(sticky.frame.height, 57, accuracy: 0.5)
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let groupHeight = tableView.rect(ofRow: 0).height
+        let fileHeight = tableView.rect(ofRow: 1).height
+        XCTAssertEqual(sticky.frame.height, groupHeight + fileHeight, accuracy: 0.5)
 
         let visibleHeaders = sticky.subviews
             .filter { !$0.isHidden }
@@ -1810,9 +1816,9 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(visibleHeaders.count, 2)
         XCTAssertTrue(visibleHeaders.allSatisfy(\.clipsToBounds))
         XCTAssertEqual(visibleHeaders[0].frame.minY, 0, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[0].frame.height, 26, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.minY, 26, accuracy: 0.5)
-        XCTAssertEqual(visibleHeaders[1].frame.height, 31, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[0].frame.height, groupHeight, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.minY, groupHeight, accuracy: 0.5)
+        XCTAssertEqual(visibleHeaders[1].frame.height, fileHeight, accuracy: 0.5)
 
         sticky.displayIfNeeded()
         let bitmap = try XCTUnwrap(
@@ -1826,6 +1832,27 @@ final class DiffStackViewTests: XCTestCase {
             .compactMap { ($0 as? NSTextField)?.stringValue }
         XCTAssertTrue(labels.contains("Working · 1"))
         XCTAssertTrue(labels.contains { $0.contains("Sample.swift") })
+    }
+
+    func testHunkNavigationCommandMovesTheSameWayAsTab() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 100)
+        scrollView.display(
+            groups: [makeGroup(includesSecondHunk: true)],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+
+        scrollView.perform(DiffStackCommand(id: 1, action: .moveHunk(1)))
+        XCTAssertEqual(tableView.selectedRow, 2)
+
+        scrollView.perform(DiffStackCommand(id: 2, action: .moveHunk(1)))
+        XCTAssertEqual(tableView.selectedRow, 7)
+
+        scrollView.perform(DiffStackCommand(id: 3, action: .moveHunk(-1)))
+        XCTAssertEqual(tableView.selectedRow, 2)
     }
 
     func testTabAndShiftTabNavigateHunksBelowStickyHeaders() throws {
@@ -1846,7 +1873,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 7)
         XCTAssertEqual(
             tableView.rect(ofRow: 7).minY - scrollView.contentView.bounds.minY,
-            57,
+            tableView.rect(ofRow: 0).height + tableView.rect(ofRow: 1).height,
             accuracy: 0.5
         )
 
@@ -1854,7 +1881,7 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(tableView.selectedRow, 2)
         XCTAssertEqual(
             tableView.rect(ofRow: 2).minY - scrollView.contentView.bounds.minY,
-            57,
+            tableView.rect(ofRow: 0).height + tableView.rect(ofRow: 1).height,
             accuracy: 0.5
         )
     }
@@ -2038,29 +2065,18 @@ final class DiffStackViewTests: XCTestCase {
         )
         hunkCell.layoutSubtreeIfNeeded()
         let fields = hunkCell.subviews.compactMap { $0 as? NSTextField }
-        let oldTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-old"
-        })
-        let newTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-new"
-        })
-        let unifiedTitle = try XCTUnwrap(fields.first {
+        let title = try XCTUnwrap(fields.first {
             $0.identifier?.rawValue == "hunk-title-unified"
         })
-        XCTAssertEqual(oldTitle.stringValue, "Sample.value")
-        XCTAssertEqual(newTitle.stringValue, "Sample.value")
-        XCTAssertEqual(oldTitle.lineBreakMode, .byTruncatingTail)
-        XCTAssertEqual(newTitle.lineBreakMode, .byTruncatingTail)
-        XCTAssertTrue(oldTitle.toolTip?.contains("@@") == true)
-        XCTAssertTrue(newTitle.toolTip?.contains("@@") == true)
-        XCTAssertTrue(unifiedTitle.isHidden)
-        XCTAssertFalse(oldTitle.isHidden)
-        XCTAssertFalse(newTitle.isHidden)
-        XCTAssertEqual(oldTitle.frame.minX, 47, accuracy: 0.5)
-        XCTAssertEqual(
-            newTitle.frame.minX,
-            floor(hunkCell.bounds.width / 2) + 47,
-            accuracy: 0.5
+        XCTAssertEqual(title.stringValue, "Sample.value")
+        XCTAssertEqual(title.lineBreakMode, .byTruncatingTail)
+        XCTAssertTrue(title.toolTip?.contains("@@") == true)
+        XCTAssertFalse(title.isHidden)
+        XCTAssertEqual(title.frame.minX, 47, accuracy: 0.5)
+        // 左右两栏的 section 相同，标题横跨整行只画一次。
+        XCTAssertGreaterThan(
+            title.frame.maxX,
+            floor(hunkCell.bounds.width / 2)
         )
         let location = try XCTUnwrap(
             hunkCell.subviews.compactMap { $0 as? NSTextField }.first {
@@ -2068,7 +2084,7 @@ final class DiffStackViewTests: XCTestCase {
             }
         )
         XCTAssertEqual(location.stringValue, "−1–3  +1–2")
-        XCTAssertTrue(location.isHidden)
+        XCTAssertFalse(location.isHidden)
     }
 
     func testNarrowSideBySideHunkHeaderPreservesSectionHeading() throws {
@@ -2086,25 +2102,19 @@ final class DiffStackViewTests: XCTestCase {
         )
         hunkCell.layoutSubtreeIfNeeded()
         let fields = hunkCell.subviews.compactMap { $0 as? NSTextField }
-        let oldTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-old"
-        })
-        let newTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-new"
+        let title = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-unified"
         })
         let location = try XCTUnwrap(fields.first {
             $0.identifier?.rawValue == "hunk-location"
         })
 
-        XCTAssertGreaterThan(oldTitle.frame.width, 40)
-        XCTAssertGreaterThan(newTitle.frame.width, 40)
-        XCTAssertEqual(oldTitle.stringValue, "Sample.value")
-        XCTAssertEqual(newTitle.stringValue, "Sample.value")
-        XCTAssertTrue(location.isHidden)
-        XCTAssertEqual(tableView.rect(ofRow: 2).height, 23, accuracy: 0.5)
+        XCTAssertGreaterThan(title.frame.width, 40)
+        XCTAssertEqual(title.stringValue, "Sample.value")
+        XCTAssertFalse(location.isHidden)
     }
 
-    func testHunkWithoutSectionKeepsSublimeBlankHeaderRow() throws {
+    func testHunkWithoutSectionKeepsRawHeaderAvailable() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 160)
         scrollView.display(
@@ -2119,18 +2129,12 @@ final class DiffStackViewTests: XCTestCase {
         )
         hunkCell.layoutSubtreeIfNeeded()
         let fields = hunkCell.subviews.compactMap { $0 as? NSTextField }
-        let oldTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-old"
-        })
-        let newTitle = try XCTUnwrap(fields.first {
-            $0.identifier?.rawValue == "hunk-title-new"
+        let title = try XCTUnwrap(fields.first {
+            $0.identifier?.rawValue == "hunk-title-unified"
         })
 
-        XCTAssertEqual(oldTitle.stringValue, "")
-        XCTAssertEqual(newTitle.stringValue, "")
-        XCTAssertEqual(tableView.rect(ofRow: 2).height, 23, accuracy: 0.5)
-        XCTAssertTrue(oldTitle.toolTip?.contains("@@") == true)
-        XCTAssertTrue(newTitle.toolTip?.contains("@@") == true)
+        XCTAssertEqual(title.stringValue, "")
+        XCTAssertTrue(title.toolTip?.contains("@@") == true)
     }
 
     func testExpandingContextKeepsNextHunkAtSameViewportPosition() throws {
@@ -2901,7 +2905,7 @@ final class DiffStackViewTests: XCTestCase {
             fileCell.subviews.compactMap { $0 as? NSButton }
                 .first { $0.identifier?.rawValue == "review-toggle" }
         )
-        XCTAssertTrue(reviewButton.isHidden)
+        XCTAssertFalse(reviewButton.isHidden)
         XCTAssertEqual(reviewButton.toolTip, "Mark as Reviewed")
         reviewButton.performClick(nil)
         XCTAssertEqual(reviewedFileID, "sample")
@@ -2958,7 +2962,7 @@ final class DiffStackViewTests: XCTestCase {
                 $0.accessibilityLabel() == "Mark as Unreviewed"
             }
         )
-        XCTAssertTrue(reviewButton.isHidden)
+        XCTAssertFalse(reviewButton.isHidden)
     }
 
     func testIndexedPresentationUpdateChangesOnlyRequestedFileHeader() throws {

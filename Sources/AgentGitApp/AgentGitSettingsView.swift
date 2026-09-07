@@ -138,7 +138,7 @@ private struct AgentGitSettingsCard<Content: View>: View {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(accent.opacity(0.16), lineWidth: 1)
+                    .stroke(Color(nsColor: AgentGitPalette.cardBorder), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.025), radius: 8, y: 2)
     }
@@ -185,11 +185,11 @@ struct AgentGitSettingsView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(
+        .scaledFontPresentation(
             width: 820,
             height: fixedContentHeight ?? selectedSection.preferredContentHeight
         )
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: AgentGitPalette.canvas))
         .task(id: model.isApplicationActive && selectedSection == .agents) {
             guard model.isApplicationActive, selectedSection == .agents else {
                 return
@@ -267,14 +267,14 @@ struct AgentGitSettingsView: View {
         .padding(16)
         .frame(width: 210)
         .frame(maxHeight: .infinity, alignment: .topLeading)
-        .background(.ultraThinMaterial)
+        .background(Color(nsColor: AgentGitPalette.sidebarBackground))
     }
 
     private var settingsHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedSection.title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 26, weight: .semibold))
                 Text(selectedSection.subtitle)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)

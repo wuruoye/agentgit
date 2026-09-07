@@ -112,7 +112,7 @@ final class AppModel {
     private var pendingRepositoryEventID: FSEventStreamEventId?
     private var snapshotCacheSaveTask: Task<Void, Never>?
 
-    /// Diff 呈现口径是全局偏好：换个提交不该又要重设一遍上下文行数。
+    /// Diff 设置在 worktree 和提交之间共用。
     var diffOptions: GitDiffOptions {
         didSet { persistDiffPreferences() }
     }

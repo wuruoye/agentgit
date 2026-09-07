@@ -129,13 +129,6 @@ final class IntegratedReviewWorkspaceTests: XCTestCase {
         )
     }
 
-    func testNativeReviewSplitUsesBoundedNavigationAndReviewWidths() {
-        XCTAssertEqual(ReviewSplitLayoutMetrics.minimumNavigationWidth, 180)
-        XCTAssertEqual(ReviewSplitLayoutMetrics.idealNavigationWidth, 400)
-        XCTAssertEqual(ReviewSplitLayoutMetrics.maximumNavigationWidth, 520)
-        XCTAssertEqual(ReviewSplitLayoutMetrics.minimumReviewWidth, 560)
-    }
-
     func testLongCommitMessagesOfferFullReader() {
         XCTAssertFalse(commitMessageNeedsFullReader("Short body"))
         XCTAssertFalse(commitMessageNeedsFullReader("One\nTwo\nThree"))

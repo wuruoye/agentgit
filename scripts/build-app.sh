@@ -35,6 +35,7 @@ install -m 755 "${BIN_DIR}/AgentGitApp" "${CONTENTS_DIR}/MacOS/AgentGitApp"
 install -m 755 "${BIN_DIR}/AgentGitSkillBridge" "${HELPERS_DIR}/AgentGitSkillBridge"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
 install -m 644 "${ICON_PATH}" "${RESOURCES_DIR}/AgentGit.icns"
+/usr/bin/ditto "${BIN_DIR}/AgentGit_AgentGitApp.bundle" "${RESOURCES_DIR}/AgentGit_AgentGitApp.bundle"
 /usr/bin/ditto "${PROJECT_DIR}/Support/AgentIntegrations" "${INTEGRATIONS_DIR}"
 for marketplace in CodexMarketplace ClaudeMarketplace; do
     plugin_bin="${INTEGRATIONS_DIR}/${marketplace}/plugins/agentgit/bin"

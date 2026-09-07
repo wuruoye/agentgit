@@ -18,7 +18,8 @@ let package = Package(
         .target(name: "AgentGitIntegrationShared"),
         .executableTarget(
             name: "AgentGitApp",
-            dependencies: ["AgentGitCore", "AgentGitIntegrationShared"]
+            dependencies: ["AgentGitCore", "AgentGitIntegrationShared"],
+            resources: [.copy("Resources/ReviewIcons")]
         ),
         .executableTarget(
             name: "AgentGitSkillBridge",

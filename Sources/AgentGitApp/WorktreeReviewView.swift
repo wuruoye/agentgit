@@ -1,10 +1,33 @@
 import AgentGitCore
 import SwiftUI
 
+private struct ReviewVisibilityKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var isReviewVisible: Bool {
+        get { self[ReviewVisibilityKey.self] }
+        set { self[ReviewVisibilityKey.self] = newValue }
+    }
+}
+
+private struct WorkspaceSearchActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var workspaceSearchAction: (() -> Void)? {
+        get { self[WorkspaceSearchActionKey.self] }
+        set { self[WorkspaceSearchActionKey.self] = newValue }
+    }
+}
+
 struct WorktreeReviewView: View {
     @Environment(AppModel.self) private var model
 
     let snapshot: GitWorktreeSnapshot
+    var focusMode: Binding<Bool> = .constant(false)
 
     var body: some View {
         let initialNavigationState = model.reviewStates.lastContext(
@@ -18,6 +41,7 @@ struct WorktreeReviewView: View {
             initialSelectedCommitIDs: initialNavigationState.selectedCommitIDs,
             initialPane: initialNavigationState.pane,
             initialHistoryFilter: initialNavigationState.historyFilter,
+            focusMode: focusMode,
             initialReviewState: model.reviewStates.state(
                 for: ReviewStateKey(
                     worktreeID: snapshot.id,
@@ -42,6 +66,8 @@ struct ReviewCommandActions {
     let performNavigatorDefaultAction: () -> Void
     let canDiscardFocusedFile: Bool
     let requestFocusedFileDiscard: () -> Void
+    let collapseAllFiles: () -> Void
+    let expandAllFiles: () -> Void
 }
 
 private struct ReviewCommandActionsKey: FocusedValueKey {
@@ -57,9 +83,15 @@ extension FocusedValues {
 
 struct AgentGitReviewCommands: Commands {
     @FocusedValue(\.reviewCommandActions) private var actions
+    @FocusedValue(\.workspaceSearchAction) private var workspaceSearchAction
 
     var body: some Commands {
         CommandMenu("Review") {
+            Button("Collapse All Files") { actions?.collapseAllFiles() }
+                .disabled(actions == nil)
+            Button("Expand All Files") { actions?.expandAllFiles() }
+                .disabled(actions == nil)
+            Divider()
             Button("Navigate Back") {
                 actions?.navigateBack()
             }
@@ -103,19 +135,21 @@ struct AgentGitReviewCommands: Commands {
             Divider()
 
             Button("Focus Filter") {
-                actions?.focusFilter()
+                if let workspaceSearchAction { workspaceSearchAction() }
+                else { actions?.focusFilter() }
             }
                 .keyboardShortcut("f", modifiers: .command)
-                .disabled(actions == nil)
+                .disabled(actions == nil && workspaceSearchAction == nil)
 
             Divider()
 
-            Button("Show Commits") {
+            // 聚焦历史时同时展开被收起的历史区域。
+            Button("Focus Commits") {
                 actions?.showCommits()
             }
                 .keyboardShortcut("1", modifiers: .command)
                 .disabled(actions == nil)
-            Button("Show Files") {
+            Button("Focus Files") {
                 actions?.showFiles()
             }
                 .keyboardShortcut("2", modifiers: .command)
