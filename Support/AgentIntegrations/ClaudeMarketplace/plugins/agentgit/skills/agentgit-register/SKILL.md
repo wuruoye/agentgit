@@ -1,11 +1,12 @@
 ---
 name: agentgit-register
-description: Manually link a session to a Git worktree or diagnose missing AgentGit associations when the user requests it. Automatic registration is handled by plugin hooks; routine repository work does not require this skill.
+description: Manually link a session to a Git worktree or diagnose missing AgentGit associations when the user requests it or a hook reports a failure. Automatic registration is handled by plugin hooks; routine repository work does not require this skill.
 ---
 
 # AgentGit Session Link
 
-Automatic registration runs through host hooks, without agent tool calls or generated metadata.
+Normal automatic registration runs through host hooks without agent tool calls or generated metadata.
+A failing hook sends a bounded diagnostic request to the current model.
 
 For an explicit manual registration request:
 
@@ -16,6 +17,14 @@ For an explicit manual registration request:
    An optional second argument supplies a title. No title or summary is required.
 3. Check that the response has the intended provider, session, worktree and
    `state: registered`. Errors do not block the original development task.
+
+When a hook reports failure, inspect the local audit and plugin runtime, identify the
+verified cause, and fix it within the existing authorization. Keep the original task
+moving and preserve unrelated changes. Do not repeatedly invoke a broken hook or
+rewrite plugin caches as a permanent fix. If blocked on host trust, missing identity,
+or another required user action, explain that specific blocker. A diagnostic request
+is suppressed while pending; successful automatic registration or a new plugin
+version permits a later request.
 
 For missing automatic associations, check AgentGit Settings → Agents for the last
 hook receipt or failure. Plugin installation alone does not establish that hooks

@@ -3,6 +3,68 @@ import XCTest
 @testable import AgentGitIntegrationShared
 
 final class AgentHookRegistrationTests: XCTestCase {
+    func testFailureRequestsDiagnosisOnceAndRearmsAfterSuccessfulRegistration() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let storage = fixture.data.appendingPathComponent("associations.json")
+        let input: [String: Any] = ["file_path": fixture.repository.appendingPathComponent("tracked.txt").path]
+        try Data("corrupt".utf8).write(to: storage)
+        let feedback = try XCTUnwrap(fixture.event("PreToolUse", tool: "Write", input: input))
+        XCTAssertEqual(feedback.hookSpecificOutput.hookEventName, "PreToolUse")
+        XCTAssertLessThan(feedback.hookSpecificOutput.additionalContext.count, 2_000)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(feedback)) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["hookSpecificOutput"])
+        XCTAssertNil(try fixture.event("PostToolUse", tool: "Write", input: input))
+
+        _ = try fixture.associations.recoverCorruptFile()
+        XCTAssertNil(try fixture.event("PreToolUse", tool: "Write", input: input, call: "recovered"))
+        try Data("repaired".utf8).write(to: fixture.repository.appendingPathComponent("tracked.txt"))
+        XCTAssertNil(try fixture.event("PostToolUse", tool: "Write", input: input, call: "recovered"))
+        XCTAssertEqual(try fixture.associations.list().count, 1)
+        try Data("corrupt again".utf8).write(to: storage)
+        XCTAssertNotNil(try fixture.event("PreToolUse", tool: "Write", input: input, call: "next-failure"))
+    }
+
+    func testDiagnosticStillReachesModelWhenPrimaryStorageCannotBeCreated() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let blocked = fixture.container.appendingPathComponent("file-instead-of-directory")
+        try Data().write(to: blocked)
+        let diagnostic = AgentHookDiagnostic(rootURL: blocked, provider: .codex, pluginVersion: "test")
+        defer { diagnostic.resolved(session: fixture.sessionID) }
+        XCTAssertNotNil(diagnostic.feedback(event: "PreToolUse", session: fixture.sessionID, message: "storage unavailable"))
+        XCTAssertNil(diagnostic.feedback(event: "PostToolUse", session: fixture.sessionID, message: "storage unavailable"))
+    }
+
+    func testExistingAssociationNeverProbesAgainUntilRemoved() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let registeredAt = Date(timeIntervalSince1970: 10)
+        let old = AgentAssociation(
+            provider: .codex, sessionID: fixture.sessionID,
+            worktreePath: fixture.repository.standardizedFileURL.path,
+            title: "Existing task", updatedAt: registeredAt
+        )
+        _ = try fixture.associations.upsert(old)
+        let input: [String: Any] = ["command": "./generate.sh"]
+        try fixture.event("PreToolUse", input: input)
+        XCTAssertEqual(try fixture.pendingCount(), 0)
+        try Data("changed".utf8).write(to: fixture.repository.appendingPathComponent("tracked.txt"))
+        try fixture.event("PostToolUse", input: input)
+        XCTAssertEqual(try fixture.associations.list(), [old])
+        XCTAssertTrue(try fixture.audit.list().isEmpty)
+
+        _ = try fixture.associations.remove(
+            provider: .codex, sessionID: fixture.sessionID, worktreePath: old.worktreePath
+        )
+        try fixture.event("PreToolUse", input: input, call: "after-removal")
+        XCTAssertEqual(try fixture.pendingCount(), 1)
+        try Data("changed again".utf8).write(to: fixture.repository.appendingPathComponent("tracked.txt"))
+        try fixture.event("PostToolUse", input: input, call: "after-removal")
+        XCTAssertEqual(try fixture.associations.list().map(\.id), [old.id])
+        XCTAssertEqual(try fixture.pendingCount(), 0)
+    }
+
     func testPatchLinksActualTargetsAcrossWorktreesWithoutMovingOriginalAssociation() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -133,7 +195,8 @@ final class AgentHookRegistrationTests: XCTestCase {
             try git(["-c", "user.name=AgentGit Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-m", "Fixture"])
         }
 
-        func event(_ name: String, tool: String = "Bash", input: [String: Any] = [:], call: String = "call", response: [String: Any] = [:]) throws {
+        @discardableResult
+        func event(_ name: String, tool: String = "Bash", input: [String: Any] = [:], call: String = "call", response: [String: Any] = [:]) throws -> AgentHookFeedback? {
             handler.handle(try JSONSerialization.data(withJSONObject: [
                 "hook_event_name": name, "session_id": sessionID, "cwd": repository.path,
                 "tool_name": tool, "tool_input": input, "tool_use_id": call, "tool_response": response

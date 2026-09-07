@@ -415,7 +415,8 @@ Skill、执行登记命令或生成标题摘要。
 `SessionStart` 只记录宿主事件回执。`PreToolUse` 保存操作前的有界状态，
 `PostToolUse` 在观察到目标发生变化后登记；Claude 的 `PostToolUseFailure` 也会检查
 部分失败的写入。Hook 从宿主 JSON 读取 `session_id` 和 `tool_use_id`，不推测身份，
-不扫描 transcript，不执行输入中的命令，也不向模型返回上下文或权限决定。
+不扫描 transcript，不执行输入中的命令。正常执行没有模型输出；脚本故障会通过
+`additionalContext` 请求当前会话的 LLM 排查，不返回阻断或权限决定。
 
 文件编辑按实际目标路径定位 worktree，支持 `apply_patch` 的新增、修改、删除和移动，
 以及 Write / Edit / MultiEdit / NotebookEdit。Shell 检查工具提供的执行目录、字面量
@@ -426,9 +427,11 @@ Skill、执行登记命令或生成标题摘要。
 可使用手动补登记。探测不遍历所有 worktree，不展开 shell 变量，不读取代码正文来判断命令意图。
 
 每个 Git 探测最多 500 毫秒，总探测预算 1.5 秒，输出最多 1 MB，状态项最多 2,000，
-单次最多涉及四个仓库。已有会话关联在 60 秒内不重复探测或刷新；status 查询只读。
+单次最多涉及四个仓库。同一 worktree 与 session 的关联只要存在，就不再探测或自动刷新；status 查询只读。
 前置 Hook 同步保存基线，后置 Hook 使用宿主异步执行。存储锁等待最多 250 毫秒，失败记录在
-AgentGit，原任务继续；下次符合条件的写入重新尝试。基线按 provider/session/tool-call 隔离，
+AgentGit，原任务继续；首次故障向当前模型返回排障上下文，同一会话和插件版本在排障
+待处理期间不重复发送；自动登记成功后解除抑制，新版本也可重新上报。异步 Hook 的上下文
+由宿主在下一次模型请求送达，不另起 LLM 会话。helper 无法启动时脚本也会返回一次诊断。基线按 provider/session/tool-call 隔离，
 完成后删除，未完成基线保留最多 24 小时、最多 1,024 份；不持久化命令、代码或工具输出正文。
 自动登记允许空标题，界面用 provider 和短会话 ID 显示，手动设置的标题继续保留。
 
@@ -439,8 +442,9 @@ Codex 插件安装并不自动授予 Hook 信任，需要在宿主审阅当前 H
 定义依据：[Codex Hooks](https://learn.chatgpt.com/docs/hooks) 和
 [Claude Hooks](https://code.claude.com/docs/en/hooks)，于 2026-09-07 核对。
 
-关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。观察到新的仓库修改时更新
-最近使用时间；新增会话超过上限后淘汰最久未使用的关联。主 App 通过分布式
+关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。首次观察到仓库修改时建立
+关联；已有配对不再自动刷新时间，移除或淘汰后可在下一次修改时重新登记。新增会话超过
+上限后按保存的更新时间淘汰旧关联。主 App 通过分布式
 通知即时更新，只在选中 worktree 的标题栏显示三个会话按钮，侧栏项目列表保持纯 Git 信息。
 点击按钮直接打开对应会话，悬停显示会话详情。Hook 回执、跳过与失败、登记成功和移除结果
 保存在 `~/Library/Application Support/AgentGit/registration-events.json`，最多保留最近

@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// Consumes host events, never evaluates their command text or returns model instructions.
+/// Consumes host events without evaluating command text. Failures request bounded LLM diagnosis.
 /// PreToolUse saves a bounded baseline; PostToolUse links only roots that changed.
 public struct AgentHookRegistration {
     private let rootURL: URL
@@ -16,20 +16,27 @@ public struct AgentHookRegistration {
         self.pluginVersion = pluginVersion
     }
 
-    public func handle(_ data: Data, now: Date = Date()) {
+    @discardableResult
+    public func handle(_ data: Data, now: Date = Date()) -> AgentHookFeedback? {
         var sessionID: String?
+        var eventName: String?
+        var diagnosticEvent: [String: Any] = [:]
         do {
             guard data.count <= 2_000_000,
                   let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let session = event["session_id"] as? String,
-                  !session.isEmpty, session.utf8.count <= 256,
                   let name = event["hook_event_name"] as? String else {
+                throw HookError.invalidEvent
+            }
+            eventName = name
+            diagnosticEvent = event
+            guard let session = event["session_id"] as? String,
+                  !session.isEmpty, session.utf8.count <= 256 else {
                 throw HookError.invalidEvent
             }
             sessionID = session
             if name == "SessionStart" {
                 record(.succeeded, session, "Hook received; waiting for a repository change.", now)
-                return
+                return nil
             }
             guard name == "PreToolUse" || name == "PostToolUse" || name == "PostToolUseFailure",
                   let callID = event["tool_use_id"] as? String,
@@ -41,25 +48,21 @@ public struct AgentHookRegistration {
                 digest(Data("\(provider.rawValue)\u{0}\(session)\u{0}\(callID)".utf8)) + ".json"
             )
             if name == "PreToolUse" {
-                try fileManager.createDirectory(
-                    at: pendingRoot, withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700]
-                )
-                try? fileManager.removeItem(at: pendingURL)
-                try prune(pendingRoot, now: now)
                 let existing = try AgentAssociationStore(
                     storeURL: rootURL.appendingPathComponent("associations.json")
                 ).list()
                 let targets = try targets(event).filter { target in
                     !existing.contains {
                         $0.provider == provider && $0.sessionID == session && $0.worktreePath == target.worktree
-                            && now.timeIntervalSince($0.updatedAt) < 60
                     }
                 }
-                guard !targets.isEmpty else {
-                    record(.skipped, session, "No new repository target; existing links refresh at most once per minute.", now)
-                    return
-                }
+                guard !targets.isEmpty else { return nil }
+                try fileManager.createDirectory(
+                    at: pendingRoot, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try? fileManager.removeItem(at: pendingURL)
+                try prune(pendingRoot, now: now)
                 let deadline = ProcessInfo.processInfo.systemUptime + 1.5
                 let snapshots = try targets.map { target in
                     Baseline(target: target, fingerprint: try fingerprint(target, deadline: deadline))
@@ -67,7 +70,7 @@ public struct AgentHookRegistration {
                 let pending = Pending(createdAt: now, baselines: snapshots)
                 try JSONEncoder().encode(pending).write(to: pendingURL, options: .atomic)
                 try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pendingURL.path)
-                return
+                return nil
             }
             guard fileManager.fileExists(atPath: pendingURL.path) else {
                 let candidates = try targets(event)
@@ -77,14 +80,21 @@ public struct AgentHookRegistration {
                 if candidates.allSatisfy({ target in
                     existing.contains {
                         $0.provider == provider && $0.sessionID == session && $0.worktreePath == target.worktree
-                            && now.timeIntervalSince($0.updatedAt) < 60
                     }
-                }) { return }
-                record(.failed, session, "No baseline for this tool call; retry on the next change.", now)
-                return
+                }) { return nil }
+                throw HookError.missingBaseline
             }
             defer { try? fileManager.removeItem(at: pendingURL) }
             let pending = try JSONDecoder().decode(Pending.self, from: Data(contentsOf: pendingURL))
+            let existing = try AgentAssociationStore(
+                storeURL: rootURL.appendingPathComponent("associations.json")
+            ).list()
+            let baselines = pending.baselines.filter { baseline in
+                !existing.contains {
+                    $0.provider == provider && $0.sessionID == session && $0.worktreePath == baseline.target.worktree
+                }
+            }
+            guard !baselines.isEmpty else { return nil }
             guard now.timeIntervalSince(pending.createdAt) < 24 * 60 * 60 else {
                 throw HookError.expiredBaseline
             }
@@ -94,7 +104,7 @@ public struct AgentHookRegistration {
                 associationStore: AgentAssociationStore(storeURL: rootURL.appendingPathComponent("associations.json")),
                 auditStore: auditStore
             )
-            for baseline in pending.baselines {
+            for baseline in baselines {
                 guard try fingerprint(baseline.target, deadline: deadline) != baseline.fingerprint else { continue }
                 // A nonzero shell exit can still have changed files. Use the observed state,
                 // not the exit status, to decide whether this worktree needs an association.
@@ -104,14 +114,26 @@ public struct AgentHookRegistration {
                 )
                 changed = true
             }
+            if changed { diagnostic.resolved(session: session) }
             record(
                 changed ? .succeeded : .skipped, session,
                 changed ? "Repository change observed; session linked." : "No repository change observed.", now
             )
         } catch {
-            // Errors belong in AgentGit, not in the model context or the tool's result.
             record(.failed, sessionID, "Automatic registration failed: \(error.localizedDescription)", now)
+            return diagnostic.feedback(
+                event: eventName, session: sessionID, message: error.localizedDescription,
+                toolCallID: diagnosticEvent["tool_use_id"] as? String,
+                toolName: diagnosticEvent["tool_name"] as? String,
+                cwd: diagnosticEvent["cwd"] as? String,
+                now: now
+            )
         }
+        return nil
+    }
+
+    private var diagnostic: AgentHookDiagnostic {
+        AgentHookDiagnostic(rootURL: rootURL, provider: provider, pluginVersion: pluginVersion)
     }
 
     private var auditStore: AgentRegistrationAuditStore {
@@ -359,6 +381,7 @@ public struct AgentHookRegistration {
         case limitExceeded = "Repository probe exceeded its time, size, or pending-call limit."
         case invalidRepository = "Git could not read the target worktree."
         case unreadableTarget = "Target metadata or local storage is unavailable."
+        case missingBaseline = "No baseline for this tool call; check the matching PreToolUse event."
         case expiredBaseline = "The tool baseline expired; retry on the next change."
         var errorDescription: String? { rawValue }
     }

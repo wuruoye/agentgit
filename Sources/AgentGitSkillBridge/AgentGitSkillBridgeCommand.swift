@@ -33,10 +33,26 @@ private struct AgentGitSkillBridgeEntryPoint {
                 if chunk.isEmpty { break }
                 data.append(chunk)
             }
-            AgentHookRegistration(
-                rootURL: try dataDirectory(), provider: provider,
-                pluginVersion: pluginVersion(provider)
-            ).handle(data)
+            let version = pluginVersion(provider)
+            let root: URL
+            do {
+                root = try dataDirectory()
+            } catch {
+                let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let fallback = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Application Support/AgentGit")
+                if let feedback = AgentHookDiagnostic(rootURL: fallback, provider: provider, pluginVersion: version)
+                    .feedback(event: event?["hook_event_name"] as? String, session: event?["session_id"] as? String,
+                              message: error.localizedDescription) {
+                    try writeJSON(feedback)
+                }
+                return
+            }
+            if let feedback = AgentHookRegistration(
+                rootURL: root, provider: provider, pluginVersion: version
+            ).handle(data) {
+                try writeJSON(feedback)
+            }
             return
         }
         guard let sessionID = options["session"],

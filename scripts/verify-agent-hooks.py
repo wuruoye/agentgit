@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import time
 
@@ -36,12 +37,19 @@ def main():
                  "tool_input": {"file_path": str(repo / "created.txt")}}
         durations = []
 
-        def run(payload):
+        def run(payload, feedback=False, executable=hook):
             started = time.monotonic()
-            result = subprocess.run([str(hook)], cwd=repo, env=env, input=json.dumps(payload).encode(),
+            result = subprocess.run([str(executable)], cwd=repo, env=env, input=json.dumps(payload).encode(),
                                     capture_output=True, timeout=5)
             durations.append(time.monotonic() - started)
-            assert (result.returncode, result.stdout, result.stderr) == (0, b"", b""), result
+            assert result.returncode == 0 and result.stderr == b"", result
+            if feedback:
+                parsed = json.loads(result.stdout)
+                assert set(parsed) == {"hookSpecificOutput"}
+                assert parsed["hookSpecificOutput"]["hookEventName"] == payload["hook_event_name"]
+                assert 0 < len(parsed["hookSpecificOutput"]["additionalContext"]) < 3000
+            else:
+                assert result.stdout == b"", result
 
         # Large input spans multiple pipe reads. No model-visible text is permitted.
         run(dict(event, hook_event_name="SessionStart", unused_padding="x" * 100_000))
@@ -54,20 +62,29 @@ def main():
         rows = json.loads((data / "associations.json").read_text())
         assert len(rows) == 1 and rows[0]["sessionID"] == session and Path(rows[0]["worktreePath"]).samefile(repo), rows
         assert not list((data / "hook-pending").iterdir())
+        rows[0]["updatedAt"] = "2000-01-01T00:00:00.000Z"
+        (data / "associations.json").write_text(json.dumps(rows))
         run(dict(event, hook_event_name="PreToolUse", tool_use_id="already-linked"))
-        assert not list((data / "hook-pending").iterdir()), "A fresh association should skip another probe, including through path aliases"
+        assert not list((data / "hook-pending").iterdir()), "An existing association should skip another probe regardless of its age, including through path aliases"
         run(dict(event, hook_event_name="PostToolUse", tool_use_id="already-linked"))
+        assert json.loads((data / "associations.json").read_text()) == rows
 
         # Another process owns the association lock. The shim must return promptly,
         # preserve the original operation, and record a local failure when possible.
         with (data / "associations.json.lock").open("r+") as lock:
             fcntl.lockf(lock, fcntl.LOCK_EX)
-            run(dict(event, hook_event_name="PreToolUse", tool_use_id="locked"))
+            run(dict(event, hook_event_name="PreToolUse", tool_use_id="locked"), feedback=True)
+            run(dict(event, hook_event_name="PreToolUse", tool_use_id="locked-repeat"))
             (repo / "created.txt").write_text("operation continued\n")
             assert durations[-1] < 2.0
         assert any(row["outcome"] == "failed" for row in json.loads((data / "registration-events.json").read_text()))
         assert (repo / "created.txt").read_text() == "operation continued\n"
-        run({"hook_event_name": "SessionStart"})
+        run({"hook_event_name": "SessionStart"}, feedback=True)
+        broken = root / "broken-plugin/scripts/hook.sh"
+        broken.parent.mkdir(parents=True)
+        shutil.copy2(hook, broken)
+        run(dict(event, hook_event_name="SessionStart"), feedback=True, executable=broken)
+        run(dict(event, hook_event_name="SessionStart"), executable=broken)
         print(json.dumps({"provider": args.provider, "version": version, "result": "passed",
                           "hook_invocations": len(durations), "max_duration_ms": round(max(durations) * 1000, 1),
                           "storage": "isolated", "host_dispatch_verified": False}))
