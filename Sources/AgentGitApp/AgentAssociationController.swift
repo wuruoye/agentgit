@@ -215,7 +215,8 @@ final class AgentAssociationController {
         do {
             associations = try store.remove(
                 provider: association.provider,
-                sessionID: association.sessionID
+                sessionID: association.sessionID,
+                worktreePath: association.worktreePath
             )
             navigationResolutions[association.id] = nil
             associationPersistenceError = nil

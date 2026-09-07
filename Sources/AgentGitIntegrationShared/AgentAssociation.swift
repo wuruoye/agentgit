@@ -32,6 +32,11 @@ public struct AgentAssociation: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var id: String {
+        "\(provider.rawValue):\(sessionID):\(worktreePath)"
+    }
+
+    /// 同一会话在不同 worktree 上的关联互相独立，这个 key 用来数「一个会话占了几个 worktree」。
+    var sessionKey: String {
         "\(provider.rawValue):\(sessionID)"
     }
 
@@ -116,6 +121,7 @@ public enum AgentPersistenceStoreError: LocalizedError, CustomStringConvertible,
 
 public final class AgentAssociationStore: @unchecked Sendable {
     public static let maximumAssociationsPerWorktree = 3
+    public static let maximumWorktreesPerSession = 3
     private static let processLock = NSLock()
 
     private let storeURL: URL
@@ -141,7 +147,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
     public func upsert(_ association: AgentAssociation) throws -> [AgentAssociation] {
         try validate(association)
         return try withLock {
-            var associations = Self.limitPerWorktree(try loadLocked())
+            var associations = Self.applyLimits(try loadLocked())
             let retainedTitle = association.title.isEmpty
                 ? associations.first(where: { $0.id == association.id })?.title ?? ""
                 : association.title
@@ -154,7 +160,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
             )
             associations.removeAll { $0.id == association.id }
             associations.append(storedAssociation)
-            associations = Self.limitPerWorktree(associations)
+            associations = Self.applyLimits(associations)
             try saveLocked(associations)
             postChangedNotification()
             return associations
@@ -163,12 +169,17 @@ public final class AgentAssociationStore: @unchecked Sendable {
 
     public func remove(
         provider: AgentProvider,
-        sessionID: String
+        sessionID: String,
+        worktreePath: String
     ) throws -> [AgentAssociation] {
-        try withLock {
-            var associations = Self.limitPerWorktree(try loadLocked())
+        let standardizedPath = URL(fileURLWithPath: worktreePath)
+            .standardizedFileURL.path
+        return try withLock {
+            var associations = Self.applyLimits(try loadLocked())
             associations.removeAll {
-                $0.provider == provider && $0.sessionID == sessionID
+                $0.provider == provider
+                    && $0.sessionID == sessionID
+                    && $0.worktreePath == standardizedPath
             }
             try saveLocked(associations)
             postChangedNotification()
@@ -179,7 +190,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
     public func list() throws -> [AgentAssociation] {
         try withLock {
             let stored = try loadLocked()
-            let limited = Self.limitPerWorktree(stored)
+            let limited = Self.applyLimits(stored)
             if stored != limited {
                 try saveLocked(limited)
             }
@@ -335,16 +346,23 @@ public final class AgentAssociationStore: @unchecked Sendable {
         return lhs.id < rhs.id
     }
 
-    private static func limitPerWorktree(
+    /// 两个方向各自限量：一个 worktree 最多挂几个会话，一个会话最多挂几个 worktree。
+    /// 后者是 id 带上 worktreePath 之后才需要的 —— 以前会话换 worktree 会顶掉旧关联，
+    /// 现在旧关联会留下，没有上限就会越积越多。
+    private static func applyLimits(
         _ associations: [AgentAssociation]
     ) -> [AgentAssociation] {
-        var retainedCounts: [String: Int] = [:]
+        var worktreeCounts: [String: Int] = [:]
+        var sessionCounts: [String: Int] = [:]
         return associations.sorted(by: compare).filter { association in
-            let count = retainedCounts[association.worktreePath, default: 0]
-            guard count < maximumAssociationsPerWorktree else {
+            let worktreeCount = worktreeCounts[association.worktreePath, default: 0]
+            let sessionCount = sessionCounts[association.sessionKey, default: 0]
+            guard worktreeCount < maximumAssociationsPerWorktree,
+                  sessionCount < maximumWorktreesPerSession else {
                 return false
             }
-            retainedCounts[association.worktreePath] = count + 1
+            worktreeCounts[association.worktreePath] = worktreeCount + 1
+            sessionCounts[association.sessionKey] = sessionCount + 1
             return true
         }
     }

@@ -4,7 +4,7 @@ import XCTest
 
 final class AgentAssociationStoreTests: XCTestCase {
 
-    func testStoresMultipleSessionsAndMovesOneSessionBetweenWorktrees() throws {
+    func testStoresMultipleSessionsAndKeepsBothWorktreesOfOneSession() throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-associations-\(UUID().uuidString)")
         defer {
@@ -40,11 +40,50 @@ final class AgentAssociationStoreTests: XCTestCase {
         )
         _ = try store.upsert(moved)
         let restored = try AgentAssociationStore(storeURL: storeURL).list()
-        XCTAssertEqual(restored.count, 2)
-        XCTAssertEqual(restored.first { $0.id == codex.id }?.worktreePath, "/worktrees/second")
+        // 同一会话在第二个 worktree 上注册，不会顶掉它在第一个 worktree 上的关联。
+        XCTAssertEqual(restored.count, 3)
+        XCTAssertEqual(restored.first { $0.id == codex.id }?.worktreePath, "/worktrees/first")
+        XCTAssertEqual(restored.first { $0.id == moved.id }?.worktreePath, "/worktrees/second")
+
+        let afterRemoval = try store.remove(
+            provider: codex.provider,
+            sessionID: codex.sessionID,
+            worktreePath: "/worktrees/second"
+        )
+        // 删一条只删这条：同会话在第一个 worktree 上的关联要留下。
+        XCTAssertEqual(
+            afterRemoval.map(\.id).sorted(),
+            [claude.id, codex.id].sorted()
+        )
 
         let attributes = try FileManager.default.attributesOfItem(atPath: storeURL.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testFourthWorktreeOfOneSessionEvictsItsLeastRecentAssociation() throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-session-limit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: container) }
+        let store = AgentAssociationStore(
+            storeURL: container.appendingPathComponent("associations.json")
+        )
+        for index in 1...4 {
+            _ = try store.upsert(
+                AgentAssociation(
+                    provider: .codex,
+                    sessionID: "one-session",
+                    worktreePath: "/worktrees/w\(index)",
+                    title: "Task \(index)",
+                    updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+                )
+            )
+        }
+
+        // 会话换 worktree 不再顶掉旧关联，所以要有上限兜住无限增长；淘汰的是最久没动的那条。
+        XCTAssertEqual(
+            try store.list().map(\.worktreePath),
+            ["/worktrees/w4", "/worktrees/w3", "/worktrees/w2"]
+        )
     }
 
     func testConcurrentStoreInstancesPreserveThreeMostRecentSessions() throws {

@@ -52,7 +52,7 @@ final class AgentSkillRegistrationTests: XCTestCase {
         )
     }
 
-    func testRegisteringSameSessionMovesItToCurrentWorktree() throws {
+    func testRegisteringSameSessionKeepsBothWorktrees() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.containerURL) }
         let secondRepositoryURL = fixture.containerURL.appendingPathComponent(
@@ -75,14 +75,31 @@ final class AgentSkillRegistrationTests: XCTestCase {
             sessionID: sessionID,
             candidateURL: secondRepositoryURL,
             title: "Second worktree",
-            summary: "Move the active session association.",
+            summary: "Register a second worktree for the same session.",
             now: Date(timeIntervalSince1970: 20)
         )
 
+        // 同一会话在第二个 worktree 上注册，第一个 worktree 的关联要留下。
         let associations = try fixture.associations.list()
-        XCTAssertEqual(associations.count, 1)
-        XCTAssertEqual(associations.first?.worktreePath, secondRepositoryURL.path)
-        XCTAssertEqual(associations.first?.title, "Second worktree")
+        XCTAssertEqual(associations.count, 2)
+        XCTAssertEqual(
+            associations.first { $0.worktreePath == secondRepositoryURL.path }?.title,
+            "Second worktree"
+        )
+        XCTAssertEqual(
+            associations.first { $0.worktreePath == fixture.repositoryURL.path }?.title,
+            "First worktree"
+        )
+
+        // 回到第一个 worktree 时 status 认得出它已注册，不会要求重新登记。
+        let firstWorktreeStatus = try fixture.service.status(
+            provider: .claude,
+            sessionID: sessionID,
+            candidateURL: fixture.repositoryURL,
+            now: Date(timeIntervalSince1970: 30)
+        )
+        XCTAssertEqual(firstWorktreeStatus.state, .registered)
+        XCTAssertEqual(firstWorktreeStatus.title, "First worktree")
     }
 
     func testSkillRegistrationRejectsInvalidIdentityRepositoryAndMetadata() throws {
