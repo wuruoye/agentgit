@@ -10,7 +10,9 @@ final class AgentGitSettingsViewTests: XCTestCase {
         let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(["/Projects/AgentGit", "/Projects/WeChat"], forKey: "agentgit.project-paths")
         let model = AppModel(defaults: defaults)
+        model.setProjectCleanupExcluded(true, id: "/Projects/WeChat")
         model.setApplicationActive(false)
 
         try await render(

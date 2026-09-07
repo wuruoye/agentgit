@@ -526,6 +526,11 @@ struct ContentView: View {
             copyToPasteboard(projectState.project.rootURL.path)
         }
         Divider()
+        Toggle("Exclude from Automatic Cleanup", isOn: Binding(
+            get: { model.isProjectExcludedFromCleanup(id: projectState.id) },
+            set: { model.setProjectCleanupExcluded($0, id: projectState.id) }
+        ))
+        Divider()
         Button("Move Up") {
             guard let projectIndex, projectIndex > 0 else {
                 return

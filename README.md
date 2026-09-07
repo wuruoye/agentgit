@@ -131,12 +131,23 @@ Settings → Worktrees 提供自动清理开关，默认关闭。开启后默认
 至少 7 天的干净 linked worktree；可选择每 1 / 6 / 24 小时检查、闲置 3 / 7 / 14 / 30 天。
 应用保持运行时在后台也会检查，退出后停止；最近检查时间跨启动保存，到期后自动补查。
 设置页面显示最近一次清理的数量、已删除路径和错误。
+Clean Up Now 按钮立即检查并清理符合条件的 worktree，跳过等待周期；自动清理关闭时也可
+执行一次，且不会打开自动清理。手动执行同样遵守闲置天数、项目排除与全部删除保护，运行中
+禁用按钮，完成后更新最近检查结果与下一次自动检查的计时。
 
-主 checkout、置顶、当前选中、锁定、正在执行 Git 操作，以及近期在 AgentGit 中使用或登记
-Agent 会话的 worktree 会保留。删除前重新检查 Git 成员、状态、HEAD 与文件时间，包含
-staged / unstaged / untracked / ignored 文件、submodule、隐藏本地改动的 index 标记，
-或无法确认状态的目录都跳过。闲置时间同时检查工作副本创建时间、tracked 文件时间和 HEAD
-及其 reflog 时间，因此新建在旧提交上的 worktree 和修改后恢复干净的文件也会受到保护。
+可在 Settings → Worktrees → Excluded Projects 勾选不参与自动清理的项目，也可通过
+项目右键菜单的 Exclude from Automatic Cleanup 切换。排除设置按项目保存，重启以及移除后
+重新添加同一项目仍保留，覆盖该项目已有和后续新增的全部 worktree；其他项目继续使用全局
+清理设置。检查开始前和删除前都会复核排除设置，已经开始执行的删除会完成。
+
+闲置时间与列表显示的 `lastActivityAt` 使用同一计算方式，并在删除前重新读取。查看 worktree、
+Agent 会话登记、目录创建时间、干净文件和忽略文件的时间均不额外阻止清理。Git 忽略的文件
+和构建产物会随符合条件的 worktree 一起删除。
+
+主 checkout、置顶、当前选中、锁定以及正在执行 Git 操作的 worktree 会保留。主 worktree
+是强制保护项，自动和手动清理均不可删除，项目配置不会解除该保护。删除前重新检查 Git
+成员、状态、HEAD 与列表活动时间；包含 staged / unstaged / untracked 文件、submodule、
+隐藏本地改动的 index 标记，或无法确认状态的目录都跳过。
 
 清理使用不带 `--force` 的 `git worktree remove`，保留本地分支（包括尚未推送的提交）；
 detached HEAD 仅在提交仍被本地分支、远端跟踪分支或标签引用时允许清理。清理完成后立即

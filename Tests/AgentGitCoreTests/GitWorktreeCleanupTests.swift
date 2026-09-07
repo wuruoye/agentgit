@@ -18,15 +18,14 @@ final class GitWorktreeCleanupTests: XCTestCase {
         XCTAssertEqual(members.map(\.id), [fixture.repository.path])
     }
 
-    func testPreservesDirtyUntrackedIgnoredAndHiddenIndexChanges() async throws {
+    func testPreservesDirtyUntrackedAndHiddenIndexChanges() async throws {
         let fixture = try await CleanupFixture.make()
         defer { fixture.dispose() }
-        for kind in ["tracked", "staged", "untracked", "ignored", "assume-unchanged", "skip-worktree"] {
+        for kind in ["tracked", "staged", "untracked", "assume-unchanged", "skip-worktree"] {
             let worktree = try await fixture.addWorktree(kind)
             let path: String
             switch kind {
             case "untracked": path = "new.txt"
-            case "ignored": path = "secret.local"
             default: path = "file.txt"
             }
             if kind == "assume-unchanged" || kind == "skip-worktree" {
@@ -61,17 +60,31 @@ final class GitWorktreeCleanupTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: merging.id))
     }
 
-    func testPreservesRecentlyCreatedWorktreeWithOldCommitAndNoReflog() async throws {
+    func testUsesListActivityDespiteRecentCheckoutCleanFileAndIgnoredFiles() async throws {
         let fixture = try await CleanupFixture.make()
         defer { fixture.dispose() }
         _ = try await fixture.git(["config", "core.logAllRefUpdates", "false"])
         let worktree = try await fixture.addWorktree("recent")
-        let result = try await GitWorktreeCleanupService().removeIfInactive(
-            worktree, project: fixture.project,
-            inactiveSince: Date().addingTimeInterval(-7 * 86_400)
+        let gitDirectory = try await fixture.gitDirectory(worktree)
+        let reflog = gitDirectory.appendingPathComponent("logs/HEAD")
+        if FileManager.default.fileExists(atPath: reflog.path) {
+            try FileManager.default.removeItem(at: reflog)
+        }
+        try Data("ignored build output".utf8).write(to: worktree.rootURL.appendingPathComponent("build.local"))
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: worktree.rootURL.appendingPathComponent("file.txt").path
         )
-        XCTAssertNotEqual(result, .removed)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.id))
+        let cutoff = Date().addingTimeInterval(-7 * 86_400)
+        let snapshot = await fixture.service.loadWorktree(worktree)
+        let cleanupActivity = try await fixture.service.loadActivityDate(for: worktree)
+        XCTAssertEqual(cleanupActivity, snapshot.lastActivityAt)
+        XCTAssertLessThan(snapshot.lastActivityAt, cutoff)
+        let result = try await GitWorktreeCleanupService().removeIfInactive(
+            worktree, project: fixture.project, inactiveSince: cutoff
+        )
+        XCTAssertEqual(result, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.id))
     }
 
     func testDetachedHeadRequiresAnotherRef() async throws {
@@ -88,13 +101,14 @@ final class GitWorktreeCleanupTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: unique.id))
     }
 
-    func testPreservesRecentlyTouchedCleanFileAndCleanSubmodule() async throws {
+    func testPreservesRecentGitActivityAndCleanSubmodule() async throws {
         let fixture = try await CleanupFixture.make()
         defer { fixture.dispose() }
         let touched = try await fixture.addWorktree("touched")
+        let gitDirectory = try await fixture.gitDirectory(touched)
         try FileManager.default.setAttributes(
             [.modificationDate: fixture.cutoff.addingTimeInterval(60)],
-            ofItemAtPath: touched.rootURL.appendingPathComponent("file.txt").path
+            ofItemAtPath: gitDirectory.appendingPathComponent("logs/HEAD").path
         )
         let touchedResult = try await fixture.remove(touched)
         XCTAssertNotEqual(touchedResult, .removed)
@@ -128,6 +142,12 @@ final class GitWorktreeCleanupTests: XCTestCase {
             willRemove: { false }
         )
         XCTAssertNotEqual(protectedResult, .removed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: protected.id))
+        let excludedResult = try await GitWorktreeCleanupService().removeIfInactive(
+            protected, project: fixture.project, inactiveSince: fixture.cutoff,
+            willRemove: { true }, isRemovalAllowed: { false }
+        )
+        XCTAssertNotEqual(excludedResult, .removed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: protected.id))
     }
 }

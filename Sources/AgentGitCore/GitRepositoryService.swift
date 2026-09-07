@@ -2496,6 +2496,16 @@ public struct GitRepositoryService: Sendable {
         return try GitNumstatParser.parse(stagedData) + GitNumstatParser.parse(workingData)
     }
 
+    /// 与列表的 lastActivityAt 使用同一计算方式，不计查看记录或忽略文件。
+    public func loadActivityDate(for worktree: GitWorktree) async throws -> Date {
+        async let loadedDirectories = absoluteGitDirectories(for: worktree.rootURL)
+        let status = try await loadStatus(for: worktree, submoduleScanMode: .commitsOnly)
+        let directories = await loadedDirectories
+        return await activityDate(
+            for: worktree, status: status, gitDirectory: directories.gitDirectory
+        )
+    }
+
     private func activityDate(
         for worktree: GitWorktree,
         status: GitStatusSnapshot,

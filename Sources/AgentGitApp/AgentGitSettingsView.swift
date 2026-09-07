@@ -372,8 +372,16 @@ struct AgentGitSettingsView: View {
                         detail: "Runs while AgentGit is open, including in the background.",
                         image: "clock.arrow.circlepath"
                     )
-                    Toggle("Automatically remove inactive worktrees", isOn: $model.cleanupSettings.isEnabled)
-                        .toggleStyle(.switch)
+                    HStack {
+                        Toggle("Automatically remove inactive worktrees", isOn: $model.cleanupSettings.isEnabled)
+                            .toggleStyle(.switch)
+                        Spacer(minLength: 8)
+                        Button(model.isCleaningWorktrees ? "Cleaning…" : "Clean Up Now") {
+                            Task { await model.runWorktreeCleanupNow() }
+                        }
+                        .disabled(model.isCleaningWorktrees || model.projects.isEmpty)
+                        .help("Check and remove eligible worktrees now, using the current inactivity and exclusion settings.")
+                    }
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 14) {
                         GridRow {
                             settingsFieldLabel("Check every")
@@ -383,6 +391,7 @@ struct AgentGitSettingsView: View {
                                 Text("Day").tag(24)
                             }
                             .labelsHidden()
+                            .disabled(!model.cleanupSettings.isEnabled)
                         }
                         GridRow {
                             settingsFieldLabel("Inactive for")
@@ -394,11 +403,39 @@ struct AgentGitSettingsView: View {
                             .labelsHidden()
                         }
                     }
-                    .disabled(!model.cleanupSettings.isEnabled)
-                    Text("Main, pinned, selected, locked, and recently used worktrees are kept. Worktrees with local changes, untracked or ignored files, or submodules are kept. Branches and referenced commits are preserved.")
+                    Text("Cleanup uses the activity time shown in the list. Main, pinned, selected, and locked worktrees are kept, as are worktrees with uncommitted changes, untracked files, or submodules. Ignored files are removed with eligible worktrees. Branches and referenced commits are preserved.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !model.projects.isEmpty {
+                AgentGitSettingsCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        settingsCardHeading(
+                            "Excluded Projects",
+                            detail: "Checked projects are never automatically cleaned up, including worktrees added later.",
+                            image: "folder.badge.minus"
+                        )
+                        ForEach(model.projects) { state in
+                            Toggle(isOn: Binding(
+                                get: { model.isProjectExcludedFromCleanup(id: state.id) },
+                                set: { model.setProjectCleanupExcluded($0, id: state.id) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(state.project.displayName)
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(state.project.rootURL.path)
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            .help(state.project.rootURL.path)
+                        }
+                    }
                 }
             }
             AgentGitSettingsCard {

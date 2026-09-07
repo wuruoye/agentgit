@@ -21,6 +21,42 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertEqual(restored.cleanupSettings, model.cleanupSettings)
     }
 
+    func testManualCleanupBypassesScheduleWithoutEnablingAutomaticCleanupOrIgnoringProtections() async throws {
+        let fixture = try await AppCleanupFixture.make()
+        defer { fixture.dispose() }
+        let excluded = try await AppCleanupFixture.make()
+        defer { excluded.dispose() }
+        fixture.defaults.set([fixture.repository.path, excluded.repository.path], forKey: "agentgit.project-paths")
+        fixture.defaults.set(
+            try JSONEncoder().encode(WorktreeCleanupReport(checkedAt: fixture.now)),
+            forKey: "agentgit.worktree-cleanup-report"
+        )
+        let model = fixture.model()
+        model.setProjectCleanupExcluded(true, id: excluded.repository.path)
+        model.pinnedWorktreeIDs = [fixture.paths["pinned"]!.path]
+        model.selectedWorktreeID = fixture.paths["selected"]!.path
+        let localFile = fixture.paths["recent"]!.appendingPathComponent("local.txt")
+        try Data("keep this file".utf8).write(to: localFile)
+
+        await model.runWorktreeCleanupNow(now: fixture.now.addingTimeInterval(60))
+
+        let report = try XCTUnwrap(model.cleanupReport)
+        XCTAssertTrue(report.errors.isEmpty, report.errors.joined(separator: "\n"))
+        XCTAssertEqual(Set(report.removedPaths), Set([fixture.paths["old"]!.path, fixture.paths["agent"]!.path]))
+        XCTAssertEqual(report.checkedAt, fixture.now.addingTimeInterval(60))
+        XCTAssertFalse(model.cleanupSettings.isEnabled)
+        XCTAssertFalse(fixture.model().cleanupSettings.isEnabled)
+        XCTAssertFalse(model.isCleaningWorktrees)
+        for url in Array(excluded.paths.values) + [fixture.paths["pinned"]!, fixture.paths["selected"]!] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        }
+        XCTAssertEqual(try String(contentsOf: localFile, encoding: .utf8), "keep this file")
+        for root in [fixture.repository, excluded.repository] {
+            let worktrees = try await GitRepositoryService().listWorktrees(at: root)
+            XCTAssertEqual(worktrees.first?.id, root.path)
+        }
+    }
+
     func testCleanupKeepsProtectedWorktreesUpdatesSnapshotsAndRespectsIntervalAcrossRestart() async throws {
         let fixture = try await AppCleanupFixture.make()
         defer { fixture.dispose() }
@@ -39,9 +75,9 @@ final class WorktreeCleanupTests: XCTestCase {
         model.setApplicationActive(false)
         await model.runWorktreeCleanupIfNeeded(now: fixture.now)
         let report = try XCTUnwrap(model.cleanupReport)
-        XCTAssertEqual(report.removedPaths, [fixture.paths["old"]!.path])
+        XCTAssertEqual(Set(report.removedPaths), Set(["old", "recent", "agent"].map { fixture.paths[$0]!.path }))
         XCTAssertTrue(report.errors.isEmpty, report.errors.joined(separator: "\n"))
-        for name in ["selected", "pinned", "recent", "agent"] {
+        for name in ["selected", "pinned"] {
             XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.paths[name]!.path), name)
         }
         XCTAssertFalse(model.projects.flatMap { $0.snapshot?.worktrees ?? [] }.contains { $0.id == fixture.paths["old"]!.path })
@@ -54,15 +90,16 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: added.path))
     }
 
-    func testCorruptAssociationStoragePreventsAutomaticRemoval() async throws {
+    func testCleanupDoesNotDependOnAgentAssociationStorage() async throws {
         let fixture = try await AppCleanupFixture.make()
         defer { fixture.dispose() }
         try Data("{bad-json".utf8).write(to: fixture.associationURL)
         let model = fixture.model()
         model.cleanupSettings.isEnabled = true
         await model.runWorktreeCleanupIfNeeded(now: fixture.now)
-        XCTAssertFalse(try XCTUnwrap(model.cleanupReport).errors.isEmpty)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.paths["old"]!.path))
+        XCTAssertTrue(try XCTUnwrap(model.cleanupReport).errors.isEmpty)
+        XCTAssertEqual(Set(model.cleanupReport?.removedPaths ?? []), Set(fixture.paths.values.map(\.path)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.paths["old"]!.path))
     }
 
     func testEnabledCleanupStartsAutomaticallyWhenProjectsLoad() async throws {
@@ -78,6 +115,46 @@ final class WorktreeCleanupTests: XCTestCase {
         }
         XCTAssertNotNil(model.cleanupReport)
         XCTAssertTrue(model.cleanupReport?.removedPaths.isEmpty == true)
+        await model.prepareForTermination()
+    }
+
+    func testProjectExclusionPersistsProtectsNewWorktreesAndLeavesOtherProjectsEnabled() async throws {
+        let excluded = try await AppCleanupFixture.make()
+        defer { excluded.dispose() }
+        let other = try await AppCleanupFixture.make()
+        defer { other.dispose() }
+        excluded.defaults.set([excluded.repository.path, other.repository.path], forKey: "agentgit.project-paths")
+        let model = excluded.model()
+        model.cleanupSettings.isEnabled = true
+        model.setProjectCleanupExcluded(true, id: excluded.repository.path)
+        let added = try await excluded.addWorktree("added-after-exclusion")
+        let restored = excluded.model()
+        XCTAssertTrue(restored.isProjectExcludedFromCleanup(id: excluded.repository.path))
+        XCTAssertTrue(restored.cleanupSettings.isEnabled)
+        await restored.runWorktreeCleanupIfNeeded(now: excluded.now)
+        XCTAssertTrue(try XCTUnwrap(restored.cleanupReport).errors.isEmpty)
+        XCTAssertEqual(Set(restored.cleanupReport?.removedPaths ?? []), Set(other.paths.values.map(\.path)))
+        for url in Array(excluded.paths.values) + [added] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        }
+        restored.setProjectCleanupExcluded(false, id: excluded.repository.path)
+        let enabledAgain = excluded.model()
+        XCTAssertFalse(enabledAgain.isProjectExcludedFromCleanup(id: excluded.repository.path))
+        await enabledAgain.runWorktreeCleanupIfNeeded(now: excluded.now.addingTimeInterval(3_601))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: added.path))
+    }
+
+    func testProjectExclusionFollowsCanonicalProjectIdentity() async throws {
+        let fixture = try await AppCleanupFixture.make()
+        defer { fixture.dispose() }
+        let linkedPath = fixture.paths["old"]!.path
+        fixture.defaults.set([linkedPath, fixture.repository.path], forKey: "agentgit.project-paths")
+        let model = fixture.model()
+        model.setProjectCleanupExcluded(true, id: linkedPath)
+        await model.loadProjectsIfNeeded()
+        XCTAssertEqual(model.projects.map(\.id), [fixture.repository.path])
+        XCTAssertTrue(model.isProjectExcludedFromCleanup(id: fixture.repository.path))
+        XCTAssertTrue(fixture.model().isProjectExcludedFromCleanup(id: fixture.repository.path))
         await model.prepareForTermination()
     }
 }

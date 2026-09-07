@@ -82,7 +82,7 @@ final class AppModel {
     private static let currentProjectIdentityVersion = 1
     private static let cleanupSettingsKey = "agentgit.worktree-cleanup-settings"
     private static let cleanupReportKey = "agentgit.worktree-cleanup-report"
-    private static let worktreeLastUsedKey = "agentgit.worktree-last-used"
+    private static let cleanupExcludedProjectsKey = "agentgit.worktree-cleanup-excluded-projects"
     private static let maximumConcurrentProjectRefreshes = 2
     private static let maximumConcurrentWorktreeRefreshes = 2
     private static let maximumConcurrentEventRefreshes = 2
@@ -120,9 +120,13 @@ final class AppModel {
     private var isTerminating = false
     private var mutationWorktreeIDs: Set<GitWorktree.ID> = []
     private var cleanupRemovalWorktreeID: GitWorktree.ID?
-    private var worktreeLastUsed: [String: Date]
     private(set) var isCleaningWorktrees = false
     private(set) var cleanupReport: WorktreeCleanupReport?
+    private(set) var cleanupExcludedProjectIDs: Set<GitProject.ID> {
+        didSet {
+            defaults.set(cleanupExcludedProjectIDs.sorted(), forKey: Self.cleanupExcludedProjectsKey)
+        }
+    }
     var cleanupSettings: WorktreeCleanupSettings {
         didSet {
             if let data = try? JSONEncoder().encode(cleanupSettings) {
@@ -175,14 +179,6 @@ final class AppModel {
     var selectedWorktreeID: GitWorktreeSnapshot.ID? {
         didSet {
             persistSelectedWorktreeSelection()
-            // 长时间审阅后切走，也应记为刚使用过。
-            if let oldValue {
-                worktreeLastUsed[oldValue] = Date()
-            }
-            if let selectedWorktreeID {
-                worktreeLastUsed[selectedWorktreeID] = Date()
-            }
-            defaults.set(worktreeLastUsed, forKey: Self.worktreeLastUsedKey)
         }
     }
 
@@ -210,12 +206,14 @@ final class AppModel {
         self.defaults = defaults
         self.repositoryService = repositoryService
         self.cleanupService = cleanupService
+        self.cleanupExcludedProjectIDs = Set(
+            defaults.stringArray(forKey: Self.cleanupExcludedProjectsKey) ?? []
+        )
         self.cleanupSettings = defaults.data(forKey: Self.cleanupSettingsKey)
             .flatMap { try? JSONDecoder().decode(WorktreeCleanupSettings.self, from: $0) }
             ?? WorktreeCleanupSettings()
         self.cleanupReport = defaults.data(forKey: Self.cleanupReportKey)
             .flatMap { try? JSONDecoder().decode(WorktreeCleanupReport.self, from: $0) }
-        self.worktreeLastUsed = defaults.dictionary(forKey: Self.worktreeLastUsedKey) as? [String: Date] ?? [:]
         self.snapshotStore = snapshotStore
         self.reviewContentStore = reviewContentStore
         self.agentAssociations = agentAssociations ?? AgentAssociationController()
@@ -283,10 +281,6 @@ final class AppModel {
             ?? storedSelectedProjectID
         self.selectedWorktreeID = initialCachedSelection?.worktree.id
             ?? storedSelectedWorktreeID
-        if let selectedWorktreeID {
-            worktreeLastUsed[selectedWorktreeID] = Date()
-            defaults.set(worktreeLastUsed, forKey: Self.worktreeLastUsedKey)
-        }
         if cachedWorktreeSelection == nil,
            !awaitsIncompleteSelectedProject,
            let initialCachedSelection {
@@ -705,6 +699,7 @@ final class AppModel {
         var normalizedCompleteProjectIDs: Set<GitProject.ID> = []
         var seenProjectIDs: Set<GitProject.ID> = []
         var normalizedCollapsedIDs = collapsedProjectIDs
+        var normalizedCleanupExcludedIDs = cleanupExcludedProjectIDs
         for result in results {
             let original = originalStates[result.index]
             guard let resolved = result.project else {
@@ -724,6 +719,10 @@ final class AppModel {
             if collapsedProjectIDs.contains(original.id) {
                 normalizedCollapsedIDs.remove(original.id)
                 normalizedCollapsedIDs.insert(resolved.id)
+            }
+            if cleanupExcludedProjectIDs.contains(original.id) {
+                normalizedCleanupExcludedIDs.remove(original.id)
+                normalizedCleanupExcludedIDs.insert(resolved.id)
             }
             if selectedWorktreeProjectID == original.id {
                 selectedWorktreeProjectID = resolved.id
@@ -748,6 +747,7 @@ final class AppModel {
             Set(normalizedStates.map(\.id))
         )
         collapsedProjectIDs = normalizedCollapsedIDs
+        cleanupExcludedProjectIDs = normalizedCleanupExcludedIDs
         persistProjects()
         defaults.set(
             Self.currentProjectIdentityVersion,
@@ -1032,8 +1032,6 @@ final class AppModel {
             )
         }
         mutationWorktreeIDs.insert(id)
-        worktreeLastUsed[id] = Date()
-        defaults.set(worktreeLastUsed, forKey: Self.worktreeLastUsedKey)
     }
 
     func loadHistory(worktree: GitWorktree) async throws -> [GitCommit] {
@@ -1606,6 +1604,18 @@ final class AppModel {
         }
     }
 
+    func isProjectExcludedFromCleanup(id: GitProject.ID) -> Bool {
+        cleanupExcludedProjectIDs.contains(id)
+    }
+
+    func setProjectCleanupExcluded(_ excluded: Bool, id: GitProject.ID) {
+        if excluded {
+            cleanupExcludedProjectIDs.insert(id)
+        } else {
+            cleanupExcludedProjectIDs.remove(id)
+        }
+    }
+
     private func scheduleWorktreeCleanup() {
         cleanupTimerTask?.cancel()
         cleanupTimerTask = nil
@@ -1623,9 +1633,24 @@ final class AppModel {
     }
 
     func runWorktreeCleanupIfNeeded(now: Date = Date()) async {
+        await runWorktreeCleanup(now: now, immediately: false)
+    }
+
+    func runWorktreeCleanupNow(now: Date = Date()) async {
+        guard cleanupRunTask == nil, !isCleaningWorktrees, !isTerminating else { return }
+        let task = Task<Void, Never> { [weak self] in
+            await self?.runWorktreeCleanup(now: now, immediately: true)
+        }
+        cleanupRunTask = task
+        await task.value
+        cleanupRunTask = nil
+    }
+
+    private func runWorktreeCleanup(now: Date, immediately: Bool) async {
         let settings = cleanupSettings
-        guard settings.isEnabled, !isTerminating, !isCleaningWorktrees,
-              cleanupReport.map({ now.timeIntervalSince($0.checkedAt) >= settings.interval }) ?? true else {
+        let isDue = cleanupReport.map { now.timeIntervalSince($0.checkedAt) >= settings.interval } ?? true
+        guard !isTerminating, !isCleaningWorktrees,
+              immediately || (settings.isEnabled && isDue) else {
             return
         }
         isCleaningWorktrees = true
@@ -1637,26 +1662,34 @@ final class AppModel {
         let cutoff = now.addingTimeInterval(-settings.inactivity)
         for project in projects.map(\.project) {
             guard !isTerminating, cleanupSettings == settings else { break }
+            guard !isProjectExcludedFromCleanup(id: project.id) else { continue }
             do {
                 // 后台也直接读取 Git 成员与状态，不依赖界面缓存。
                 let worktrees = try await repositoryService.listWorktrees(at: project.rootURL)
                 for worktree in worktrees where worktree.id != project.id {
                     guard !isTerminating, cleanupSettings == settings else { break }
                     do {
-                        guard try canCleanWorktree(worktree, project: project, cutoff: cutoff) else {
+                        guard canCleanWorktree(worktree, project: project) else {
                             report.skippedCount += 1
                             continue
                         }
                         let result = try await cleanupService.removeIfInactive(
-                            worktree, project: project, inactiveSince: cutoff
-                        ) { @MainActor [weak self] in
-                            guard let self, !self.isTerminating, self.cleanupSettings == settings,
-                                  try self.canCleanWorktree(worktree, project: project, cutoff: cutoff) else {
-                                return false
+                            worktree, project: project, inactiveSince: cutoff,
+                            willRemove: { @MainActor [weak self] in
+                                guard let self, !self.isTerminating, self.cleanupSettings == settings,
+                                      self.canCleanWorktree(worktree, project: project) else {
+                                    return false
+                                }
+                                self.cleanupRemovalWorktreeID = worktree.id
+                                return true
+                            },
+                            isRemovalAllowed: { @MainActor [weak self] in
+                                guard let self, !self.isTerminating, self.cleanupSettings == settings else {
+                                    return false
+                                }
+                                return self.canCleanWorktree(worktree, project: project)
                             }
-                            self.cleanupRemovalWorktreeID = worktree.id
-                            return true
-                        }
+                        )
                         cleanupRemovalWorktreeID = nil
                         switch result {
                         case .removed:
@@ -1685,17 +1718,17 @@ final class AppModel {
     }
 
     private func canCleanWorktree(
-        _ worktree: GitWorktree, project: GitProject, cutoff: Date
-    ) throws -> Bool {
+        _ worktree: GitWorktree, project: GitProject
+    ) -> Bool {
         guard projects.contains(where: { $0.id == project.id }),
+              !isProjectExcludedFromCleanup(id: project.id),
               worktree.id != selectedWorktreeID,
               !pinnedWorktreeIDs.contains(worktree.id),
               !mutationWorktreeIDs.contains(worktree.id),
-              blockingGitRefreshErrors[worktree.id] == nil,
-              worktreeLastUsed[worktree.id].map({ $0 < cutoff }) ?? true else {
+              blockingGitRefreshErrors[worktree.id] == nil else {
             return false
         }
-        return try agentAssociations.cleanupActivityDates()[worktree.id].map { $0 < cutoff } ?? true
+        return true
     }
 
     private func forgetRemovedWorktree(_ id: GitWorktree.ID, projectID: GitProject.ID) {
@@ -1709,8 +1742,6 @@ final class AppModel {
         pendingEventMetadataWorktreeIDs.remove(id)
         pendingEventContentPathsByWorktreeID[id] = nil
         blockingGitRefreshErrors[id] = nil
-        worktreeLastUsed[id] = nil
-        defaults.set(worktreeLastUsed, forKey: Self.worktreeLastUsedKey)
         if let index = projects.firstIndex(where: { $0.id == projectID }),
            let snapshot = projects[index].snapshot {
             projects[index].snapshot = GitProjectSnapshot(
