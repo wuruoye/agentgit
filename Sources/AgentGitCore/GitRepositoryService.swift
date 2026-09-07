@@ -535,6 +535,17 @@ public struct GitRepositoryService: Sendable {
                     change: change
                 )
             }
+            // `git ls-files --others` 不会走进嵌套仓库（submodule / linked worktree），
+            // 只吐出它的目录路径本身。这里没有本仓库能读的文件内容，读了会拿到
+            // POSIX 21 "Is a directory"，把整个 Review 面板变成一段 NSError。
+            if attributes[.type] as? FileAttributeType == .typeDirectory {
+                return GitFileDiff(
+                    change: change,
+                    scope: scope,
+                    hunks: [],
+                    state: .unavailable("Nested Git repository")
+                )
+            }
             if GitImageDiff.supports(path: change.path) {
                 return GitFileDiff(
                     change: change,

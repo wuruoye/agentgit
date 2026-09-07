@@ -346,6 +346,66 @@ final class GitDiffTests: XCTestCase {
         XCTAssertEqual(diffs.map(\.deletedLineCount), [0, 2])
     }
 
+    /// 未跟踪目录里有嵌套仓库（submodule 或 linked worktree）时，`git ls-files --others`
+    /// 不会走进去，只报那个目录本身。loadDiff 拿目录路径去读文件会抛 POSIX 21
+    /// "Is a directory"，整个 Review 面板就只剩一段 NSError。
+    func testUntrackedNestedRepositoryIsUnavailableInsteadOfThrowing() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-nested-repo-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("repository")
+        let outer = repository.appendingPathComponent("outer")
+        let nested = outer.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+
+        let runner = GitCommandRunner()
+        for directory in [repository, nested] {
+            _ = try await runner.run(arguments: ["init", "-b", "main"], workingDirectory: directory)
+            _ = try await runner.run(
+                arguments: ["config", "user.name", "AgentGit Tests"],
+                workingDirectory: directory
+            )
+            _ = try await runner.run(
+                arguments: ["config", "user.email", "agentgit-tests@example.invalid"],
+                workingDirectory: directory
+            )
+        }
+        try Data("base\n".utf8).write(to: repository.appendingPathComponent("file.txt"))
+        _ = try await runner.run(arguments: ["add", "file.txt"], workingDirectory: repository)
+        _ = try await runner.run(
+            arguments: ["commit", "-m", "Initial commit"],
+            workingDirectory: repository
+        )
+        // outer/ 未跟踪，里面既有普通文件、又有一个嵌套仓库。
+        try Data("note one\nnote two\n".utf8).write(to: outer.appendingPathComponent("note.txt"))
+        try Data("inner\n".utf8).write(to: nested.appendingPathComponent("inner.txt"))
+
+        let service = GitRepositoryService()
+        let project = try await service.loadProject(at: repository)
+        let worktree = try XCTUnwrap(project.worktrees.first)
+        let nestedChange = try XCTUnwrap(
+            worktree.status.changes.first { $0.path.hasPrefix("outer/nested") }
+        )
+        let noteChange = try XCTUnwrap(
+            worktree.status.changes.first { $0.path == "outer/note.txt" }
+        )
+
+        let nestedDiff = try await service.loadDiff(
+            worktree: worktree.worktree,
+            change: nestedChange,
+            scope: .working
+        )
+        XCTAssertEqual(nestedDiff.state, .unavailable("Nested Git repository"))
+
+        // 普通未跟踪文件仍要正常出 diff —— 不能靠「把目录条目整个丢掉」来绕过。
+        let noteDiff = try await service.loadDiff(
+            worktree: worktree.worktree,
+            change: noteChange,
+            scope: .working
+        )
+        XCTAssertEqual(noteDiff.addedLineCount, 2)
+    }
+
     func testLoadsWorkingStagedAndUntrackedDiffsFromGit() async throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-diff-test-\(UUID().uuidString)")
