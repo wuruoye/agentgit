@@ -4,6 +4,7 @@ import SwiftUI
 
 enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     case review
+    case worktrees
     case agents
 
     var id: Self { self }
@@ -11,6 +12,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .review: "Review"
+        case .worktrees: "Worktrees"
         case .agents: "Agents"
         }
     }
@@ -18,6 +20,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .review: "Configure diff presentation and review behavior."
+        case .worktrees: "Automatically remove clean worktrees after a period of inactivity."
         case .agents: "Manage optional AgentGit integrations and local sessions."
         }
     }
@@ -25,6 +28,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .review: "rectangle.split.2x1"
+        case .worktrees: "arrow.triangle.branch"
         case .agents: "sparkles.rectangle.stack"
         }
     }
@@ -32,6 +36,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     var preferredContentHeight: CGFloat {
         switch self {
         case .review: 590
+        case .worktrees: 620
         case .agents: 620
         }
     }
@@ -175,6 +180,8 @@ struct AgentGitSettingsView: View {
                         switch selectedSection {
                         case .review:
                             reviewSettings
+                        case .worktrees:
+                            worktreeSettings
                         case .agents:
                             agentSettings
                         }
@@ -351,6 +358,75 @@ struct AgentGitSettingsView: View {
                     )
                     ReviewSettingsPreview(layout: model.diffLayout)
                 }
+            }
+        }
+    }
+
+    private var worktreeSettings: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 16) {
+            AgentGitSettingsCard {
+                VStack(alignment: .leading, spacing: 16) {
+                    settingsCardHeading(
+                        "Automatic Cleanup",
+                        detail: "Runs while AgentGit is open, including in the background.",
+                        image: "clock.arrow.circlepath"
+                    )
+                    Toggle("Automatically remove inactive worktrees", isOn: $model.cleanupSettings.isEnabled)
+                        .toggleStyle(.switch)
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 14) {
+                        GridRow {
+                            settingsFieldLabel("Check every")
+                            Picker("Check every", selection: $model.cleanupSettings.intervalHours) {
+                                Text("Hour").tag(1)
+                                Text("6 hours").tag(6)
+                                Text("Day").tag(24)
+                            }
+                            .labelsHidden()
+                        }
+                        GridRow {
+                            settingsFieldLabel("Inactive for")
+                            Picker("Inactive for", selection: $model.cleanupSettings.inactiveDays) {
+                                ForEach([3, 7, 14, 30], id: \.self) { days in
+                                    Text("\(days) days").tag(days)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+                    }
+                    .disabled(!model.cleanupSettings.isEnabled)
+                    Text("Main, pinned, selected, locked, and recently used worktrees are kept. Worktrees with local changes, untracked or ignored files, or submodules are kept. Branches and referenced commits are preserved.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            AgentGitSettingsCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    if model.isCleaningWorktrees {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Checking worktrees…")
+                        }
+                    } else if let report = model.cleanupReport {
+                        Text("Last check: \(report.checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .fontWeight(.medium)
+                        Text("\(report.removedPaths.count) removed · \(report.skippedCount) kept · \(report.errors.count) errors")
+                            .foregroundStyle(.secondary)
+                        ForEach(report.removedPaths, id: \.self) { path in
+                            Label(path, systemImage: "checkmark.circle")
+                                .textSelection(.enabled)
+                        }
+                        ForEach(report.errors, id: \.self) { error in
+                            Text(error).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    } else {
+                        Text(model.cleanupSettings.isEnabled ? "Waiting for the first check." : "Automatic cleanup is off.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.system(size: 11.5))
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

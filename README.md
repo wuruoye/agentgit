@@ -122,8 +122,25 @@ Move Up / Move Down 菜单操作。侧栏、History、Files 和 Review 的筛选
 都在原位置提供 Clear Filter。筛选、折叠和列表重建不会清除当前 Review；已经移除的
 worktree ID 也不会覆盖当前有效选择。
 
-M1 不包含 commit、reset 或 worktree 创建删除。Git 写操作支持 Working / Staged 中的 Stage、Unstage 和 Discard，
+M1 不包含 commit、reset 或 worktree 创建。Git 写操作支持 Working / Staged 中的 Stage、Unstage 和 Discard，
 粒度为文件、hunk 或选中行；当前分支另外提供 fast-forward-only Pull 与 Push。
+
+## Worktree 自动清理
+
+Settings → Worktrees 提供自动清理开关，默认关闭。开启后默认每小时检查一次，清理闲置
+至少 7 天的干净 linked worktree；可选择每 1 / 6 / 24 小时检查、闲置 3 / 7 / 14 / 30 天。
+应用保持运行时在后台也会检查，退出后停止；最近检查时间跨启动保存，到期后自动补查。
+设置页面显示最近一次清理的数量、已删除路径和错误。
+
+主 checkout、置顶、当前选中、锁定、正在执行 Git 操作，以及近期在 AgentGit 中使用或登记
+Agent 会话的 worktree 会保留。删除前重新检查 Git 成员、状态、HEAD 与文件时间，包含
+staged / unstaged / untracked / ignored 文件、submodule、隐藏本地改动的 index 标记，
+或无法确认状态的目录都跳过。闲置时间同时检查工作副本创建时间、tracked 文件时间和 HEAD
+及其 reflog 时间，因此新建在旧提交上的 worktree 和修改后恢复干净的文件也会受到保护。
+
+清理使用不带 `--force` 的 `git worktree remove`，保留本地分支（包括尚未推送的提交）；
+detached HEAD 仅在提交仍被本地分支、远端跟踪分支或标签引用时允许清理。清理完成后立即
+更新列表与持久化快照。该功能会实际删除符合条件的目录，启用开关后无需逐项确认。
 
 ## 最近活动时间
 
@@ -170,7 +187,7 @@ Review 使用连续文件流，
 支持 split / unified、分组折叠、分组与文件双层
 吸顶、行内差异和轻量语法高亮。Diff 布局、上下文行数与忽略空白由全局
 Settings 管理并跨启动保存。
-设置窗口使用独立的 Review / Agents 页面；打开 Review 页面不会启动 Agent 插件 CLI 检查，
+设置窗口使用独立的 Review / Worktrees / Agents 页面；打开 Review 页面不会启动 Agent 插件 CLI 检查，
 切换到 Agents 页面后才刷新配置状态。
 Diff 正文使用 AppKit `NSTableView` 复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局
 和无障碍节点；Diff 聚焦时可用 `Tab` / `Shift-Tab` 在 hunk 间导航。
@@ -247,7 +264,7 @@ git show --format= --name-status -z --diff-merges=first-parent
 ```
 
 Git 写操作限定为 Stage、Unstage、Discard 文件 / hunk / 行，以及当前分支的
-fast-forward-only Pull、Push 与 Publish；不提供 commit、reset 或 worktree 创建删除。
+fast-forward-only Pull、Push 与 Publish，以及用户启用的闲置 worktree 自动清理；不提供 commit、reset 或 worktree 创建。
 没有 upstream 的分支使用 `origin` 或唯一 remote 完成 Publish 并设置 upstream；多个无
 `origin` remote 时返回明确选择提示。Discard 文件与 hunk 使用原按钮二次确认，选中行使用
 右键确认子菜单。执行 Discard 前，tracked 文件和行 / hunk 保存完整副本，未跟踪文件或目录

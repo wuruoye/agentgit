@@ -176,6 +176,17 @@ final class AgentAssociationController {
         }
     }
 
+    /// 清理在后台也会运行，因此直接读取存储中的最新活动时间。
+    func cleanupActivityDates() throws -> [String: Date] {
+        guard let store else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return try Dictionary(
+            store.list().map { ($0.worktreePath, $0.updatedAt) },
+            uniquingKeysWith: max
+        )
+    }
+
     func latestRegistrationEvent(
         for provider: AgentProvider
     ) -> AgentRegistrationEvent? {

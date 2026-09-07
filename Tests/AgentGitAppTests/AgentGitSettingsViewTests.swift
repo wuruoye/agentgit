@@ -43,6 +43,18 @@ final class AgentGitSettingsViewTests: XCTestCase {
             fileName: "AgentGitSettings-agents-dark.png",
             size: NSSize(width: 820, height: 620)
         )
+        try await render(
+            AgentGitSettingsView(initialSection: .worktrees).environment(model),
+            appearance: .aqua,
+            fileName: "AgentGitSettings-worktrees-light.png",
+            size: NSSize(width: 820, height: 620)
+        )
+        try await render(
+            AgentGitSettingsView(initialSection: .worktrees).environment(model),
+            appearance: .darkAqua,
+            fileName: "AgentGitSettings-worktrees-dark.png",
+            size: NSSize(width: 820, height: 620)
+        )
     }
 
     func testRendersAgentStorageRepairStateOffscreen() async throws {
@@ -124,7 +136,7 @@ final class AgentGitSettingsViewTests: XCTestCase {
 
         XCTAssertEqual(
             AgentGitSettingsSection.allCases.map(\.title),
-            ["Review", "Agents"]
+            ["Review", "Worktrees", "Agents"]
         )
 
         let bitmap = try XCTUnwrap(
