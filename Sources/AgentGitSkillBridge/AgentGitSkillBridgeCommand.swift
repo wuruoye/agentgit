@@ -8,6 +8,9 @@ private struct AgentGitSkillBridgeEntryPoint {
         do {
             try run()
         } catch {
+            // Hook failures never change the host tool result. Storage/decoding errors
+            // inside the handler are recorded locally; even bootstrap failures fail open.
+            if CommandLine.arguments.dropFirst().first == "hook" { return }
             writeError(error.localizedDescription)
             Darwin.exit(EXIT_FAILURE)
         }
@@ -22,6 +25,19 @@ private struct AgentGitSkillBridgeEntryPoint {
         guard let providerValue = options["provider"],
               let provider = AgentProvider(rawValue: providerValue) else {
             throw AgentGitSkillBridgeError.invalidProvider
+        }
+        if command == "hook" {
+            var data = Data()
+            while data.count <= 2_000_000 {
+                let chunk = try FileHandle.standardInput.read(upToCount: min(65_536, 2_000_001 - data.count)) ?? Data()
+                if chunk.isEmpty { break }
+                data.append(chunk)
+            }
+            AgentHookRegistration(
+                rootURL: try dataDirectory(), provider: provider,
+                pluginVersion: pluginVersion(provider)
+            ).handle(data)
+            return
         }
         guard let sessionID = options["session"],
               let worktreePath = options["worktree"] else {
@@ -42,15 +58,12 @@ private struct AgentGitSkillBridgeEntryPoint {
                 )
             )
         case "register":
-            guard let title = options["title"] else {
-                throw AgentGitSkillBridgeError.invalidArguments
-            }
             try writeJSON(
                 service.register(
                     provider: provider,
                     sessionID: sessionID,
                     candidateURL: candidateURL,
-                    title: title,
+                    title: options["title"] ?? "",
                     summary: options["summary"] ?? ""
                 )
             )
@@ -78,7 +91,30 @@ private struct AgentGitSkillBridgeEntryPoint {
         return options
     }
 
+    private static func pluginVersion(_ provider: AgentProvider) -> String? {
+        let pluginRoot = URL(fileURLWithPath: CommandLine.arguments[0])
+            .resolvingSymlinksInPath().deletingLastPathComponent().deletingLastPathComponent()
+        let manifest = pluginRoot.appendingPathComponent(
+            provider == .codex ? ".codex-plugin/plugin.json" : ".claude-plugin/plugin.json"
+        )
+        guard let data = try? Data(contentsOf: manifest), data.count <= 64_000,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["version"] as? String
+    }
+
     private static func registrationService() throws -> AgentSkillRegistrationService {
+        let rootURL = try dataDirectory()
+        return AgentSkillRegistrationService(
+            associationStore: AgentAssociationStore(
+                storeURL: rootURL.appendingPathComponent("associations.json")
+            ),
+            auditStore: AgentRegistrationAuditStore(
+                storeURL: rootURL.appendingPathComponent("registration-events.json")
+            )
+        )
+    }
+
+    private static func dataDirectory() throws -> URL {
         let rootURL: URL
         if let configuredPath = ProcessInfo.processInfo.environment[
             "AGENTGIT_DATA_DIRECTORY"
@@ -102,16 +138,7 @@ private struct AgentGitSkillBridgeEntryPoint {
                 isDirectory: true
             )
         }
-        return AgentSkillRegistrationService(
-            associationStore: AgentAssociationStore(
-                storeURL: rootURL.appendingPathComponent("associations.json")
-            ),
-            auditStore: AgentRegistrationAuditStore(
-                storeURL: rootURL.appendingPathComponent(
-                    "registration-events.json"
-                )
-            )
-        )
+        return rootURL
     }
 
     private static func writeJSON(_ value: some Encodable) throws {

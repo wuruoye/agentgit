@@ -144,10 +144,19 @@ public final class AgentAssociationStore: @unchecked Sendable {
             .appendingPathComponent("associations.json", isDirectory: false)
     }
 
-    public func upsert(_ association: AgentAssociation) throws -> [AgentAssociation] {
+    public func upsert(
+        _ association: AgentAssociation,
+        minimumRefreshInterval: TimeInterval = 0
+    ) throws -> [AgentAssociation] {
         try validate(association)
         return try withLock {
             var associations = Self.applyLimits(try loadLocked())
+            let existing = associations.first { $0.id == association.id }
+            if let existing,
+               (association.title.isEmpty || association.title == existing.title),
+               association.updatedAt.timeIntervalSince(existing.updatedAt) < minimumRefreshInterval {
+                return associations
+            }
             let retainedTitle = association.title.isEmpty
                 ? associations.first(where: { $0.id == association.id })?.title ?? ""
                 : association.title
@@ -156,7 +165,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
                 sessionID: association.sessionID,
                 worktreePath: association.worktreePath,
                 title: retainedTitle,
-                updatedAt: association.updatedAt
+                updatedAt: max(existing?.updatedAt ?? .distantPast, association.updatedAt)
             )
             associations.removeAll { $0.id == association.id }
             associations.append(storedAssociation)
@@ -307,8 +316,13 @@ public final class AgentAssociationStore: @unchecked Sendable {
         fileLock.l_whence = Int16(SEEK_SET)
         fileLock.l_start = 0
         fileLock.l_len = 0
-        guard Darwin.fcntl(descriptor, F_SETLKW, &fileLock) != -1 else {
-            throw Self.currentPOSIXError()
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        while Darwin.fcntl(descriptor, F_SETLK, &fileLock) == -1 {
+            guard errno == EACCES || errno == EAGAIN || errno == EINTR,
+                  ProcessInfo.processInfo.systemUptime < deadline else {
+                throw Self.currentPOSIXError()
+            }
+            Thread.sleep(forTimeInterval: 0.005)
         }
         defer {
             var unlock = Darwin.flock()

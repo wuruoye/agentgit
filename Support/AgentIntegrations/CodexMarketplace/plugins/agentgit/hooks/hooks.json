@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/hook.sh\"",
+            "timeout": 4,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/hook.sh\"",
+            "timeout": 4
+          }
+        ],
+        "matcher": "^(Bash|exec_command|shell_command|shell|apply_patch|Write|Edit|MultiEdit|NotebookEdit)$"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/hook.sh\"",
+            "timeout": 4,
+            "async": true
+          }
+        ],
+        "matcher": "^(Bash|exec_command|shell_command|shell|apply_patch|Write|Edit|MultiEdit|NotebookEdit)$"
+      }
+    ]
+  }
+}

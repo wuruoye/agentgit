@@ -31,7 +31,6 @@ public struct AgentSkillRegistrationContext: Codable, Hashable, Sendable {
 public enum AgentSkillRegistrationError: LocalizedError, Equatable, Sendable {
     case invalidSessionID
     case repositoryMissing
-    case emptyTitle
     case titleTooLong
     case summaryTooLong
 
@@ -41,8 +40,6 @@ public enum AgentSkillRegistrationError: LocalizedError, Equatable, Sendable {
             "Agent session ID is missing or exceeds 256 bytes."
         case .repositoryMissing:
             "The current directory is not inside a Git worktree."
-        case .emptyTitle:
-            "Agent session title is required."
         case .titleTooLong:
             "Agent session title must contain at most 80 characters."
         case .summaryTooLong:
@@ -84,15 +81,6 @@ public struct AgentSkillRegistrationService: Sendable {
                 state: .registrationRequired
             )
         }
-        _ = try associationStore.upsert(
-            AgentAssociation(
-                provider: existing.provider,
-                sessionID: existing.sessionID,
-                worktreePath: existing.worktreePath,
-                title: existing.title,
-                updatedAt: now
-            )
-        )
         return AgentSkillRegistrationContext(
             provider: provider,
             sessionID: sessionID,
@@ -106,8 +94,8 @@ public struct AgentSkillRegistrationService: Sendable {
         provider: AgentProvider,
         sessionID: String,
         candidateURL: URL,
-        title: String,
-        summary: String,
+        title: String = "",
+        summary: String = "",
         now: Date = Date()
     ) throws -> AgentSkillRegistrationContext {
         try validateSessionID(sessionID)
@@ -118,24 +106,24 @@ public struct AgentSkillRegistrationService: Sendable {
         let normalizedSummary = summary.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        guard !normalizedTitle.isEmpty else {
-            throw AgentSkillRegistrationError.emptyTitle
-        }
         guard normalizedTitle.count <= 80 else {
             throw AgentSkillRegistrationError.titleTooLong
         }
         guard normalizedSummary.count <= 200 else {
             throw AgentSkillRegistrationError.summaryTooLong
         }
-        _ = try associationStore.upsert(
+        let saved = try associationStore.upsert(
             AgentAssociation(
                 provider: provider,
                 sessionID: sessionID,
                 worktreePath: worktreePath,
                 title: normalizedTitle,
                 updatedAt: now
-            )
+            ), minimumRefreshInterval: 60
         )
+        let savedTitle = saved.first {
+            $0.provider == provider && $0.sessionID == sessionID && $0.worktreePath == worktreePath
+        }?.title ?? normalizedTitle
         let summarySuffix = normalizedSummary.isEmpty
             ? ""
             : " \(normalizedSummary)"
@@ -146,15 +134,15 @@ public struct AgentSkillRegistrationService: Sendable {
                 outcome: .succeeded,
                 sessionID: sessionID,
                 worktreePath: worktreePath,
-                message: "Registered by the AgentGit skill.\(summarySuffix)",
+                message: "Session linked.\(summarySuffix)",
                 createdAt: now
-            )
+            ), minimumInterval: 60
         )
         return AgentSkillRegistrationContext(
             provider: provider,
             sessionID: sessionID,
             worktreePath: worktreePath,
-            title: normalizedTitle,
+            title: savedTitle,
             state: .registered
         )
     }

@@ -4,12 +4,14 @@ import Foundation
 public enum AgentRegistrationAction: String, Codable, Hashable, Sendable {
     case register
     case unregister
+    case hook
 }
 
 public enum AgentRegistrationOutcome: String, Codable, Hashable, Sendable {
     case succeeded
     case rejected
     case failed
+    case skipped
 }
 
 public struct AgentRegistrationEvent: Codable, Hashable, Identifiable, Sendable {
@@ -21,6 +23,7 @@ public struct AgentRegistrationEvent: Codable, Hashable, Identifiable, Sendable 
     public let worktreePath: String?
     public let message: String
     public let createdAt: Date
+    public let pluginVersion: String?
 
     public init(
         id: UUID = UUID(),
@@ -30,7 +33,8 @@ public struct AgentRegistrationEvent: Codable, Hashable, Identifiable, Sendable 
         sessionID: String?,
         worktreePath: String?,
         message: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        pluginVersion: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -42,6 +46,7 @@ public struct AgentRegistrationEvent: Codable, Hashable, Identifiable, Sendable 
         }
         self.message = message
         self.createdAt = createdAt
+        self.pluginVersion = pluginVersion
     }
 }
 
@@ -70,9 +75,22 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func record(_ event: AgentRegistrationEvent) throws -> [AgentRegistrationEvent] {
+    public func record(
+        _ event: AgentRegistrationEvent,
+        minimumInterval: TimeInterval = 0
+    ) throws -> [AgentRegistrationEvent] {
         try withLock {
             var events = try loadLocked().events
+            if let latest = events.first(where: {
+                $0.provider == event.provider && $0.action == event.action
+            }), latest.outcome == event.outcome,
+               latest.message == event.message,
+               latest.sessionID == event.sessionID,
+               latest.worktreePath == event.worktreePath,
+               latest.pluginVersion == event.pluginVersion,
+               event.createdAt.timeIntervalSince(latest.createdAt) < minimumInterval {
+                return events
+            }
             events.removeAll { $0.id == event.id }
             events.append(event)
             events.sort(by: Self.compare)
@@ -198,8 +216,13 @@ public final class AgentRegistrationAuditStore: @unchecked Sendable {
         fileLock.l_whence = Int16(SEEK_SET)
         fileLock.l_start = 0
         fileLock.l_len = 0
-        guard Darwin.fcntl(descriptor, F_SETLKW, &fileLock) != -1 else {
-            throw Self.currentPOSIXError()
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        while Darwin.fcntl(descriptor, F_SETLK, &fileLock) == -1 {
+            guard errno == EACCES || errno == EAGAIN || errno == EINTR,
+                  ProcessInfo.processInfo.systemUptime < deadline else {
+                throw Self.currentPOSIXError()
+            }
+            Thread.sleep(forTimeInterval: 0.005)
         }
         defer {
             var unlock = Darwin.flock()

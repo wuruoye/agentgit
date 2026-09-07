@@ -1,5 +1,6 @@
 import AgentGitCore
 import AgentGitIntegrationShared
+import AppKit
 import Foundation
 import Observation
 
@@ -19,7 +20,7 @@ enum AgentPluginConfigurationStatus: Equatable {
         case .needsUpdate: "Update Available"
         case .configuring: "Enabling…"
         case .disabling: "Disabling…"
-        case .configured: "Enabled"
+        case .configured: "Installed"
         case .failed: "Integration Failed"
         }
     }
@@ -58,6 +59,7 @@ final class AgentPluginConfigurator {
         .claude: .notChecked
     ]
     private var operationTracker = AgentPluginConfigurationOperationTracker()
+    private(set) var installedVersionByProvider: [AgentProvider: String] = [:]
     private let marketplaceInstaller: AgentIntegrationMarketplaceInstaller
 
     init(
@@ -166,6 +168,9 @@ final class AgentPluginConfigurator {
                 throw AgentPluginConfigurationError.verificationFailed
             }
             updateStatus(.configured, for: operation)
+            if operationTracker.accepts(operation) {
+                installedVersionByProvider[provider] = bundledVersion
+            }
         } catch is CancellationError {
             updateStatus(.notChecked, for: operation)
         } catch {
@@ -238,6 +243,9 @@ final class AgentPluginConfigurator {
             if let detected = installed.first(where: {
                 $0.pluginID == plugin.pluginID
             }) {
+                if operationTracker.accepts(operation) {
+                    installedVersionByProvider[provider] = detected.version
+                }
                 if detected.version != bundledVersion {
                     updateStatus(.needsUpdate, for: operation)
                 } else {
@@ -247,6 +255,9 @@ final class AgentPluginConfigurator {
                     )
                 }
             } else {
+                if operationTracker.accepts(operation) {
+                    installedVersionByProvider[provider] = nil
+                }
                 updateStatus(.notConfigured, for: operation)
             }
         } catch is CancellationError {
@@ -493,7 +504,10 @@ final class AgentPluginConfigurator {
         let candidates = agentExecutableCandidates(
             provider: provider,
             homeURL: homeURL,
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            desktopApplicationURL: provider == .codex
+                ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex")
+                : nil
         )
         guard let executableURL = candidates.first(where: {
             FileManager.default.isExecutableFile(atPath: $0.path)
@@ -506,9 +520,13 @@ final class AgentPluginConfigurator {
     nonisolated static func agentExecutableCandidates(
         provider: AgentProvider,
         homeURL: URL,
-        environment: [String: String]
+        environment: [String: String],
+        desktopApplicationURL: URL? = nil
     ) -> [URL] {
-        agentExecutableDirectories(
+        let bundled = provider == .codex
+            ? desktopApplicationURL.map { [$0.appendingPathComponent("Contents/Resources/codex")] } ?? []
+            : []
+        return bundled + agentExecutableDirectories(
             homeURL: homeURL,
             environment: environment
         ).map {

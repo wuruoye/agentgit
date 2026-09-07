@@ -437,7 +437,7 @@ struct AgentGitSettingsView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     settingsCardHeading(
                         "Agent Integrations",
-                        detail: "Each provider can enable the AgentGit registration Skill independently.",
+                        detail: "Each provider can link sessions automatically after repository changes.",
                         image: "sparkles.rectangle.stack"
                     )
                     .padding(.bottom, 8)
@@ -458,8 +458,8 @@ struct AgentGitSettingsView: View {
             AgentGitSettingsCard {
                 VStack(alignment: .leading, spacing: 12) {
                     settingsCardHeading(
-                        "Skill Runtime",
-                        detail: "The bundled helper receives registration data from each provider Skill.",
+                        "Registration Runtime",
+                        detail: "The local helper handles host events without adding instructions to the agent.",
                         image: "terminal"
                     )
                     Text(skillBridgePath)
@@ -542,8 +542,9 @@ struct AgentGitSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let event = model.agentAssociations.latestRegistrationEvent(
-                for: provider
+            if let event = model.agentAssociations.latestHookEvent(
+                for: provider,
+                pluginVersion: model.agentPluginConfigurator.installedVersionByProvider[provider]
             ) {
                 Text(
                     "\(registrationEventTitle(event)) · "
@@ -552,8 +553,16 @@ struct AgentGitSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(registrationEventColor(event))
                 .help(event.message)
+                if event.outcome == .failed || event.outcome == .rejected {
+                    Text(event.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else if status == .configured {
-                Text("Waiting for the first repository write registration.")
+                Text(provider == .codex
+                     ? "Hook not observed. Review plugin hook trust in Codex, then start a new task."
+                     : "Hook not observed. Start a new task with the plugin enabled.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -728,6 +737,14 @@ struct AgentGitSettingsView: View {
         _ event: AgentRegistrationEvent
     ) -> String {
         switch (event.action, event.outcome) {
+        case (.hook, .succeeded):
+            "Hook received"
+        case (.hook, .skipped):
+            "Hook received · Registration skipped"
+        case (.hook, .failed), (.hook, .rejected):
+            "Automatic registration needs attention"
+        case (.register, .skipped), (.unregister, .skipped):
+            "Registration skipped"
         case (.register, .succeeded):
             "Session registered"
         case (.register, .rejected):
@@ -747,7 +764,7 @@ struct AgentGitSettingsView: View {
         _ event: AgentRegistrationEvent
     ) -> Color {
         switch event.outcome {
-        case .succeeded: .secondary
+        case .succeeded, .skipped: .secondary
         case .rejected: .orange
         case .failed: .red
         }

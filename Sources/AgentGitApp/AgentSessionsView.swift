@@ -139,13 +139,13 @@ func compactAgentSessionTitle(
 private extension AgentAssociation {
     var displayTitle: String {
         title.isEmpty
-            ? "\(provider.displayName) \(compactRelativeTime(updatedAt))"
+            ? "\(provider.displayName) \(sessionID.prefix(8))"
             : title
     }
 
     /// 菜单里空间充足，标题不截断，用 provider 和更新时间把同名会话区分开。
     var menuTitle: String {
-        let base = title.isEmpty ? "\(provider.displayName) Session" : title
+        let base = title.isEmpty ? String(sessionID.prefix(8)) : title
         return "\(provider.displayName) · \(base) · \(compactRelativeTime(updatedAt))"
     }
 

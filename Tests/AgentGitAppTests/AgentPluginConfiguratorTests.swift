@@ -5,6 +5,31 @@ import XCTest
 @testable import AgentGitApp
 
 final class AgentPluginConfiguratorTests: XCTestCase {
+    @MainActor
+    func testHookReceiptMustMatchInstalledPluginVersion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentgit-hook-receipt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audit = AgentRegistrationAuditStore(storeURL: root.appendingPathComponent("events.json"))
+        _ = try audit.record(AgentRegistrationEvent(
+            provider: .codex, action: .hook, outcome: .succeeded,
+            sessionID: "session", worktreePath: nil, message: "Hook received", pluginVersion: "v1"
+        ))
+        let controller = AgentAssociationController(
+            store: AgentAssociationStore(storeURL: root.appendingPathComponent("associations.json")),
+            auditStore: audit
+        )
+        controller.refresh()
+        XCTAssertNotNil(controller.latestHookEvent(for: .codex, pluginVersion: "v1"))
+        XCTAssertNil(controller.latestHookEvent(for: .codex, pluginVersion: "v2"))
+        XCTAssertNil(controller.latestHookEvent(for: .codex, pluginVersion: nil))
+        _ = try audit.record(AgentRegistrationEvent(
+            provider: .codex, action: .hook, outcome: .succeeded,
+            sessionID: "session", worktreePath: nil, message: "Hook received", pluginVersion: "v2"
+        ))
+        controller.refresh()
+        XCTAssertNotNil(controller.latestHookEvent(for: .codex, pluginVersion: "v2"))
+    }
+
     func testTimeoutErrorNamesProviderAndLimit() {
         let message = AgentPluginConfigurator.configurationErrorMessage(
             GitCommandTimeoutError(arguments: ["plugin", "list"]),
@@ -33,6 +58,14 @@ final class AgentPluginConfiguratorTests: XCTestCase {
             candidates.count(where: { $0.path == "/opt/homebrew/bin/codex" }),
             1
         )
+        let desktopCandidates = AgentPluginConfigurator.agentExecutableCandidates(
+            provider: .codex,
+            homeURL: homeURL,
+            environment: ["PATH": "/older/bin"],
+            desktopApplicationURL: URL(fileURLWithPath: "/Applications/ChatGPT.app")
+        )
+        XCTAssertEqual(desktopCandidates.first?.path, "/Applications/ChatGPT.app/Contents/Resources/codex")
+        XCTAssertTrue(desktopCandidates.contains { $0.path == "/older/bin/codex" })
     }
 
     func testAgentCommandPathStartsWithSelectedExecutableDirectory() {
@@ -134,7 +167,7 @@ final class AgentPluginConfiguratorTests: XCTestCase {
             XCTAssertEqual(plugin.provider, provider)
             XCTAssertEqual(
                 Set(plugin.capabilities),
-                [.skill, .sessionNavigation]
+                [.automaticRegistration, .skill, .sessionNavigation]
             )
             XCTAssertTrue(plugin.manifestRelativePath.hasSuffix("plugin.json"))
         }

@@ -1,6 +1,6 @@
 {
   "name": "agentgit",
-  "version": "0.1.0+codex.20260904144822",
+  "version": "0.1.0+codex.20260907073656",
   "description": "Link Codex sessions to the Git worktrees they modify.",
   "author": {
     "name": "AgentGit"
@@ -9,21 +9,21 @@
     "git",
     "worktree",
     "session",
-    "skills"
+    "hooks"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "AgentGit",
     "shortDescription": "Link Codex sessions to Git worktrees",
-    "longDescription": "The AgentGit skill links a Codex session to the worktree it is about to modify, so the native AgentGit app can show and reopen that session.",
+    "longDescription": "Automatically link sessions after repository changes through local host hooks. Includes manual linking and diagnostics.",
     "developerName": "AgentGit",
     "category": "Productivity",
     "capabilities": [
-      "Registration Skill",
+      "Automatic Registration",
       "Session Linking"
     ],
     "defaultPrompt": [
-      "Register this session before modifying the current Git worktree."
+      "Diagnose why this worktree is missing its AgentGit session association."
     ],
     "brandColor": "#0A84FF"
   }

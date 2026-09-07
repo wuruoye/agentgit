@@ -48,7 +48,7 @@ final class AgentSkillRegistrationTests: XCTestCase {
         XCTAssertEqual(refreshed.title, "Review AgentGit changes")
         XCTAssertEqual(
             try fixture.associations.list().first?.updatedAt,
-            Date(timeIntervalSince1970: 30)
+            Date(timeIntervalSince1970: 20)
         )
     }
 
@@ -140,7 +140,7 @@ final class AgentSkillRegistrationTests: XCTestCase {
                 .repositoryMissing
             )
         }
-        XCTAssertThrowsError(
+        XCTAssertNoThrow(
             try fixture.service.register(
                 provider: .codex,
                 sessionID: "session",
@@ -148,9 +148,7 @@ final class AgentSkillRegistrationTests: XCTestCase {
                 title: "   ",
                 summary: ""
             )
-        ) { error in
-            XCTAssertEqual(error as? AgentSkillRegistrationError, .emptyTitle)
-        }
+        )
         XCTAssertThrowsError(
             try fixture.service.register(
                 provider: .codex,

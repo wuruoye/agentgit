@@ -1,9 +1,14 @@
 {
   "name": "agentgit",
-  "version": "0.1.0+codex.20260904144822",
+  "version": "0.1.0+codex.20260907073656",
   "description": "Link Claude sessions to the Git worktrees they modify.",
   "author": {
     "name": "AgentGit"
   },
-  "keywords": ["git", "worktree", "session", "skills"]
+  "keywords": [
+    "git",
+    "worktree",
+    "session",
+    "hooks"
+  ]
 }

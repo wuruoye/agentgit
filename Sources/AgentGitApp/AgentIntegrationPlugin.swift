@@ -2,7 +2,8 @@ import AgentGitIntegrationShared
 import Foundation
 
 enum AgentIntegrationCapability: String, CaseIterable, Hashable, Sendable {
-    case skill = "Registration Skill"
+    case skill = "Manual Registration"
+    case automaticRegistration = "Automatic Registration"
     case sessionNavigation = "Session Jump"
 }
 
@@ -29,7 +30,7 @@ struct AgentIntegrationPlugin: Identifiable, Hashable, Sendable {
                 marketplaceResourceName: "CodexMarketplace",
                 marketplaceName: "personal",
                 manifestRelativePath: "plugins/agentgit/.codex-plugin/plugin.json",
-                capabilities: [.skill, .sessionNavigation]
+                capabilities: [.automaticRegistration, .skill, .sessionNavigation]
             )
         case .claude:
             AgentIntegrationPlugin(
@@ -37,7 +38,7 @@ struct AgentIntegrationPlugin: Identifiable, Hashable, Sendable {
                 marketplaceResourceName: "ClaudeMarketplace",
                 marketplaceName: "agentgit",
                 manifestRelativePath: "plugins/agentgit/.claude-plugin/plugin.json",
-                capabilities: [.skill, .sessionNavigation]
+                capabilities: [.automaticRegistration, .skill, .sessionNavigation]
             )
         }
     }

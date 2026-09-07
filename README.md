@@ -5,7 +5,7 @@
 AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它面向同时使用
 多个 worktree 的开发方式，把代码审阅体验和本地性能放在首位。
 
-Agent 会话关联通过可选的 AgentGit Skill 插件完成，Git 客户端主路径保持独立。
+Agent 会话关联通过可选的 AgentGit Hook 插件完成，Git 客户端主路径保持独立。
 
 ## 工作区界面
 
@@ -388,7 +388,8 @@ upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与
 
 签名 App bundle 包含 Codex 与 Claude 两套 AgentGit 集成插件，以及
 `Contents/Helpers/AgentGitSkillBridge`。Settings 的 Agents 页面可以独立启用、停用和更新
-每套插件。当前能力包含 `Registration Skill` 与 `Session Jump`。
+每套插件。Codex 优先使用已安装 Desktop 随附的 CLI，缺失时再回退 PATH，避免旧 CLI
+无法读取新版配置。当前能力包含 `Automatic Registration`、`Manual Registration` 与 `Session Jump`。
 
 启用插件时，App 把随包资源复制到
 `~/Library/Application Support/AgentGit/AgentIntegrations/`，再调用对应 Agent 的官方
@@ -396,31 +397,41 @@ upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与
 `agentgit@personal`，Claude 插件标识为 `agentgit@agentgit`。Codex 停用操作移除插件，
 Claude 停用操作保留插件并关闭加载；本地会话关联数据在两种情况下都会保留。
 
-两套插件都包含 `agentgit-register` Skill、状态检查与登记脚本，以及签名后的本地
-Skill bridge：
+两套插件都包含 `hooks/hooks.json`、`scripts/hook.sh`、签名后的本地 bridge，
+以及用于手动补登记和诊断的 `agentgit-register` Skill。普通仓库操作不需要 agent 加载
+Skill、执行登记命令或生成标题摘要。
 
-```text
-<plugin>/skills/agentgit-register/SKILL.md
-<plugin>/scripts/status.sh
-<plugin>/scripts/register.sh
-<plugin>/bin/AgentGitSkillBridge
-```
+`SessionStart` 只记录宿主事件回执。`PreToolUse` 保存操作前的有界状态，
+`PostToolUse` 在观察到目标发生变化后登记；Claude 的 `PostToolUseFailure` 也会检查
+部分失败的写入。Hook 从宿主 JSON 读取 `session_id` 和 `tool_use_id`，不推测身份，
+不扫描 transcript，不执行输入中的命令，也不向模型返回上下文或权限决定。
 
-Skill 的 description 覆盖编辑、生成、删除、移动、格式化、Stage、Commit、Merge、Rebase
-等仓库写操作。Agent 在首次修改 worktree 前加载 Skill，并从宿主提供的当前任务元数据取得
-规范 session ID；宿主没有提供稳定身份时静默跳过，禁止根据目录、标题、历史文件或更新时间
-猜测会话。Skill 先调用 `scripts/status.sh`：已经关联时继续原任务，尚未关联时结合当前用户
-请求组织不含敏感内容的会话标题与操作摘要，再调用 `scripts/register.sh`。
+文件编辑按实际目标路径定位 worktree，支持 `apply_patch` 的新增、修改、删除和移动，
+以及 Write / Edit / MultiEdit / NotebookEdit。Shell 检查工具提供的执行目录、字面量
+`cd` 和 `-C` 指向的仓库，对比 Git status 与变化文件、index、HEAD reflog 的元数据；
+只读命令遇到已有 dirty 文件不会因此登记。检查反映执行期间观察到的仓库变化，
+不能在多个进程同时修改同一目录时证明逐文件作者。
+动态目录、脚本内部写到其它仓库、远程或未覆盖的工具、超时及缺失前置事件不保证自动登记，
+可使用手动补登记。探测不遍历所有 worktree，不展开 shell 变量，不读取代码正文来判断命令意图。
 
-所有触发范围、身份要求、静默条件、标题摘要规则和失败处理都保存在 `SKILL.md`。
-`AgentGitSkillBridge` 只执行确定性工作：验证 provider、session ID、标题和摘要，通过 `.git`
-定位真实 worktree，检查现有关联并写入关联与审计数据。它不分析 Agent 命令，也不参与每个
-tool call。登记操作幂等；同一 session 切换到另一个 worktree 后，新的登记会移动该关联。
+每个 Git 探测最多 500 毫秒，总探测预算 1.5 秒，输出最多 1 MB，状态项最多 2,000，
+单次最多涉及四个仓库。已有会话关联在 60 秒内不重复探测或刷新；status 查询只读。
+前置 Hook 同步保存基线，后置 Hook 使用宿主异步执行。存储锁等待最多 250 毫秒，失败记录在
+AgentGit，原任务继续；下次符合条件的写入重新尝试。基线按 provider/session/tool-call 隔离，
+完成后删除，未完成基线保留最多 24 小时、最多 1,024 份；不持久化命令、代码或工具输出正文。
+自动登记允许空标题，界面用 provider 和短会话 ID 显示，手动设置的标题继续保留。
 
-关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。Skill 检查现有登记时更新
+Settings 区分插件 Installed 和 Hook received；只有已安装版本对应的回执才算已观察到执行，
+没有当前版本的回执时明确显示 Hook not observed。
+Codex 插件安装并不自动授予 Hook 信任，需要在宿主审阅当前 Hook 定义，更新后用新任务验收。
+没有回执只能说明尚未观察到执行，不能直接判定是不受信任、未重载或宿主版本不支持。
+定义依据：[Codex Hooks](https://learn.chatgpt.com/docs/hooks) 和
+[Claude Hooks](https://code.claude.com/docs/en/hooks)，于 2026-09-07 核对。
+
+关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。观察到新的仓库修改时更新
 最近使用时间；新增会话超过上限后淘汰最久未使用的关联。主 App 通过分布式
 通知即时更新，只在选中 worktree 的标题栏显示三个会话按钮，侧栏项目列表保持纯 Git 信息。
-点击按钮直接打开对应会话，悬停显示会话详情。登记成功、登记被拒绝和移除结果
+点击按钮直接打开对应会话，悬停显示会话详情。Hook 回执、跳过与失败、登记成功和移除结果
 保存在 `~/Library/Application Support/AgentGit/registration-events.json`，最多保留最近
 200 条，文件权限为 `0600`。旧格式的非登记事件在首次读取时自动丢弃并重写为当前格式。
 

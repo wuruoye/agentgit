@@ -193,6 +193,13 @@ final class AgentAssociationController {
         registrationEvents.first { $0.provider == provider }
     }
 
+    func latestHookEvent(for provider: AgentProvider, pluginVersion: String?) -> AgentRegistrationEvent? {
+        guard let pluginVersion else { return nil }
+        return registrationEvents.first {
+            $0.provider == provider && $0.action == .hook && $0.pluginVersion == pluginVersion
+        }
+    }
+
     func navigationAvailability(
         for association: AgentAssociation
     ) -> AgentSessionNavigationAvailability {

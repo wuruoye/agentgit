@@ -13,7 +13,21 @@ CLAUDE_PLUGIN_ID="agentgit@agentgit"
 CODEX_SOURCE="${INTEGRATION_ROOT}/CodexMarketplace/plugins/agentgit"
 CLAUDE_SOURCE="${INTEGRATION_ROOT}/ClaudeMarketplace/plugins/agentgit"
 
-command -v codex >/dev/null
+# Prefer the Desktop runtime; a PATH CLI can predate the current config schema.
+CODEX_EXECUTABLE="${AGENTGIT_CODEX_CLI:-}"
+if [[ -z "${CODEX_EXECUTABLE}" ]]; then
+    for app in "${HOME}/Applications/ChatGPT.app" /Applications/ChatGPT.app \
+        "${HOME}/Applications/Codex.app" /Applications/Codex.app; do
+        if [[ -x "${app}/Contents/Resources/codex" ]]; then
+            CODEX_EXECUTABLE="${app}/Contents/Resources/codex"
+            break
+        fi
+    done
+fi
+if [[ -z "${CODEX_EXECUTABLE}" ]]; then
+    CODEX_EXECUTABLE="$(command -v codex)"
+fi
+test -x "${CODEX_EXECUTABLE}"
 command -v claude >/dev/null
 command -v jq >/dev/null
 test -d "${RESOURCE_ROOT}/CodexMarketplace"
@@ -51,9 +65,9 @@ PLUGIN_VERSION="$(/usr/bin/plutil -extract version raw "${CODEX_SOURCE}/.codex-p
 CLAUDE_VERSION="$(/usr/bin/plutil -extract version raw "${CLAUDE_SOURCE}/.claude-plugin/plugin.json")"
 test "${PLUGIN_VERSION}" = "${CLAUDE_VERSION}"
 
-if ! codex plugin marketplace list --json \
+if ! "${CODEX_EXECUTABLE}" plugin marketplace list --json \
     | jq -e 'any(.marketplaces[]; .name == "personal")' >/dev/null; then
-    codex plugin marketplace add \
+    "${CODEX_EXECUTABLE}" plugin marketplace add \
         "${INTEGRATION_ROOT}/CodexMarketplace" \
         --json
 fi
@@ -67,12 +81,12 @@ else
     claude plugin marketplace update agentgit
 fi
 
-if codex plugin list --json \
+if "${CODEX_EXECUTABLE}" plugin list --json \
     | jq -e --arg id "${CODEX_PLUGIN_ID}" \
         'any(.installed[]; .pluginId == $id)' >/dev/null; then
-    codex plugin remove "${CODEX_PLUGIN_ID}" --json
+    "${CODEX_EXECUTABLE}" plugin remove "${CODEX_PLUGIN_ID}" --json
 fi
-codex plugin add "${CODEX_PLUGIN_ID}" --json
+"${CODEX_EXECUTABLE}" plugin add "${CODEX_PLUGIN_ID}" --json
 
 if claude plugin list --json \
     | jq -e --arg id "${CLAUDE_PLUGIN_ID}" \
@@ -81,18 +95,18 @@ if claude plugin list --json \
 fi
 claude plugin install --scope user --yes "${CLAUDE_PLUGIN_ID}"
 
-codex plugin list --json \
+"${CODEX_EXECUTABLE}" plugin list --json \
     | jq -e --arg id "${CODEX_PLUGIN_ID}" --arg version "${PLUGIN_VERSION}" \
         'any(.installed[]; .pluginId == $id and .version == $version and .enabled == true)'
 claude plugin list --json \
     | jq -e --arg id "${CLAUDE_PLUGIN_ID}" --arg version "${PLUGIN_VERSION}" \
         'any(.[]; (.pluginId // .id) == $id and .version == $version and .enabled == true)'
 
-codex plugin remove "${CODEX_PLUGIN_ID}" --json
-codex plugin list --json \
+"${CODEX_EXECUTABLE}" plugin remove "${CODEX_PLUGIN_ID}" --json
+"${CODEX_EXECUTABLE}" plugin list --json \
     | jq -e --arg id "${CODEX_PLUGIN_ID}" \
         'all(.installed[]; .pluginId != $id)'
-codex plugin add "${CODEX_PLUGIN_ID}" --json
+"${CODEX_EXECUTABLE}" plugin add "${CODEX_PLUGIN_ID}" --json
 
 claude plugin disable --scope user "${CLAUDE_PLUGIN_ID}"
 claude plugin list --json \
@@ -110,11 +124,17 @@ for plugin_root in "${CODEX_CACHE}" "${CLAUDE_CACHE}"; do
     test -x "${plugin_root}/scripts/register.sh"
     test -x "${plugin_root}/scripts/status.sh"
     test -f "${plugin_root}/skills/agentgit-register/SKILL.md"
-    test ! -e "${plugin_root}/hooks"
-    if find "${plugin_root}" -type f ! -path '*/bin/*' -print0 \
-        | xargs -0 rg -i -l 'hook'; then
-        exit 1
+    test -x "${plugin_root}/scripts/hook.sh"
+    jq -e '.hooks.PreToolUse[0].hooks[0].type == "command"
+        and .hooks.PostToolUse[0].hooks[0].async == true' \
+        "${plugin_root}/hooks/hooks.json"
+    if [[ "${plugin_root}" == "${CODEX_CACHE}" ]]; then
+        hook_provider=codex
+    else
+        hook_provider=claude
     fi
+    python3 "${SCRIPT_DIR}/verify-agent-hooks.py" "${plugin_root}" --provider "${hook_provider}"
+
 done
 
 verify_skill_flow() {
@@ -185,7 +205,7 @@ verify_skill_flow \
     "${CLAUDE_CACHE}" \
     "00000000-0000-4000-8000-000000000002"
 
-codex plugin list --json \
+"${CODEX_EXECUTABLE}" plugin list --json \
     | jq -e --arg id "${CODEX_PLUGIN_ID}" --arg version "${PLUGIN_VERSION}" \
         '.installed[] | select(.pluginId == $id and .version == $version and .enabled == true)'
 claude plugin list --json \
