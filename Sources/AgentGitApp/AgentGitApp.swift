@@ -51,9 +51,9 @@ struct AgentGitApp: App {
 
                 Divider()
 
-                Button("Refresh Current Worktree") {
+                Button("Refresh Current Project") {
                     Task {
-                        await model.refreshSelectedWorktree()
+                        await model.refreshSelectedProject()
                     }
                 }
                 .keyboardShortcut("r", modifiers: .command)

@@ -166,8 +166,7 @@ last_activity_at = max(
 )
 ```
 
-FSEvents 监听 worktree、实际 Git 目录和公共 Git 目录，文件事件在 400 毫秒内合并，
-只刷新受影响的 worktree。活动时间不采用会被 `git status` 缓存写入改变的 index mtime。
+App 在后台每隔 10 分钟刷新全部项目，前台不自动刷新。活动时间不采用会被 `git status` 缓存写入改变的 index mtime。
 项目顺序由拖拽操作保存。项目内部使用 `last_activity_at` 倒序排列 worktree，
 排序时间与列表显示时间完全相同；时间相同后按名称排列。侧栏使用稳定的 `now / 5m / 3h /
 2d` 紧凑文本，仓库状态没有变化时不为相对秒数持续重绘列表。
@@ -255,7 +254,7 @@ App 进入后台时取消正在解码的可见图片，重新激活后继续生�
 基础 Diff、图片、Whole File、Retry 和额外上下文都绑定完整加载身份；worktree 内容、Review
 上下文、Diff 设置或文件集合变化后，旧任务只能写入旧缓存，不能更新当前 Review 状态。
 后台期间保留已经恢复的 Review 内容并禁用 Git 写操作；`Updating` 只表示真实存在的项目、
-worktree 或文件事件刷新任务，缓存缺少旧版时间字段时不会长期显示伪刷新状态。
+worktree 刷新任务，缓存缺少旧版时间字段时不会长期显示伪刷新状态。
 untracked symlink 按 Git blob 语义显示链接目标路径文本，不跟随链接读取仓库外内容，也不因
 文件名扩展误判为图片。
 
@@ -333,13 +332,10 @@ fsmonitor token、untracked cache 与 index stat cache，避免大型仓库每�
 
 最后一次成功的项目快照保存在
 `~/Library/Caches/com.sigma.agentgit/project-snapshots-v1.json`。缓存包含 worktree 清单、状态
-计数、增删行数、活动时间、branch 信息、项目成员完整标记和对应的 FSEvents 游标，文件权限为
-`0600`。App 启动时立即恢复侧栏；完整缓存直接提供启动首帧，再从缓存游标补收退出
-期间的文件事件，只刷新发生变化的 worktree。worktree 成员元数据事件只核对成员清单；成员
-没有变化时保留全部状态、统计与 Review 缓存，不读取各 worktree 状态。首次读取尚未完成时逐个保存已经取得的项目和
-worktree；下次启动只补齐缺少的项目或成员。`git status` 已经写入快照的 index 缓存事件会
-直接推进游标，外部 Stage、Unstage 和冲突处理仍按 index 指纹变化触发刷新。系统事件记录
-缺失时执行完整刷新。旧版缓存自动迁移，缓存使用版本化 JSON 和原子写入，失败刷新保留此前
+计数、增删行数、活动时间、branch 信息和项目成员完整标记，文件权限为
+`0600`。App 启动时立即恢复侧栏；完整缓存直接提供启动首帧，缺少的项目或成员按需加载。
+文件变化不触发刷新。后台定时刷新和手动刷新会更新项目清单与 worktree 状态。
+旧版缓存自动迁移，缓存使用版本化 JSON 和原子写入，失败刷新保留此前
 的成功内容。每次更新前还会保留
 `~/Library/Caches/com.sigma.agentgit/project-snapshots-v1.backup.json`；主文件损坏或写入中断
 时自动恢复上一份有效快照。新增的快照字段使用兼容默认值读取，应用升级不会因此丢弃全部
@@ -366,21 +362,12 @@ Diff 每完成一个读取批次就保存文件级缓存和部分完成标记；
 16 MiB；超过预算的单项仍返回当前 Review，但不会长期驻留内存。项目快照或 Review 内容写入
 失败时在主窗口显示可关闭的缓存错误，后续保存成功后自动恢复。
 
-FSEvents 忽略 `fsmonitor--daemon` 的内部 cookie，并把这类空影响事件的游标写入启动缓存，
-避免下次启动重复回放。App 进入后台时停止文件监听、取消 debounce 与正在运行的仓库刷新。
-关闭主窗口时执行相同暂停流程；重新打开窗口后恢复监听并补收增量事件。正常退出通过 macOS
-termination reply 等待 Review 状态与项目快照原子写入完成，再结束进程。
-监听器保留最后收到的系统事件 ID。重新激活后先恢复监听，再补收后台期间的文件事件；完整
-项目缓存不会重复读取成员清单。成员发生变化时只加载新增 worktree，直接移除已经删除的项。
-新增、删除、移动、锁定和修复 worktree 会自动刷新项目清单；普通索引与文件变化仍只刷新
-受影响的 worktree。工作区文件事件通过 `git check-ignore --stdin -z` 批量应用仓库自身的
-ignore 规则；构建产物和生成目录只推进事件游标，tracked 文件继续触发刷新。公共 Git 目录
-中的 branch 与 upstream ref 事件按具体 worktree 分发，普通 commit、fetch 和 push 不会扩大
-成整个项目扫描。
+App 在后台每轮刷新完成后等待 10 分钟，再刷新全部项目；回到前台时取消后台定时任务及其刷新。
+回到前台及前台停留期间均不自动刷新，也不监听仓库文件事件。关闭主窗口后继续后台定时刷新。
+正常退出通过 macOS termination reply 等待 Review 状态与项目快照原子写入完成，再结束进程。
 状态扫描使用 `--no-ahead-behind` 和 `--ignore-submodules=dirty`；未跟踪目录按需展开，
-ahead/behind 单独读取。FSEvents 自动刷新受影响 worktree；切换 worktree 立即使用可用快照，
-只有缺少完整状态时自动读取。完成 Git 写操作后刷新当前 worktree。工具栏与 `⌘R` 刷新当前
-worktree，`⇧⌘R` 刷新全部项目。
+ahead/behind 单独读取。切换 worktree 立即使用可用快照，只有缺少完整状态时自动读取。
+完成 Git 写操作后刷新当前 worktree。工具栏与 `⌘R` 刷新当前项目的全部 worktree，`⇧⌘R` 刷新全部项目。
 History、搜索、commit message、提交文件列表与范围文件列表统一使用 30 秒时限；History 与
 文件列表单次输出上限为 8 MiB，commit message 上限为 2 MiB。非法分页参数返回可恢复错误，
 不会触发运行时终止。
@@ -389,8 +376,7 @@ History、搜索、commit message、提交文件列表与范围文件列表统�
 刷新先发布当前 worktree 的轻量状态，再补充 submodule 内容状态。
 刷新请求按项目和 worktree 记录版本，新请求会取消同目标的旧 Git 进程；旧结果无法覆盖
 较新的状态。完整项目刷新优先读取当前选中的 worktree，并在每个 worktree 完成后立即更新
-侧栏。全部项目按每批两个项目读取，每个项目最多同时读取两个 worktree；FSEvents 触发的
-重复事件在当前刷新完成后合并，最多同时读取两个 worktree。ahead / behind 按实时 HEAD 与
+侧栏。全部项目按每批两个项目读取，每个项目最多同时读取两个 worktree。ahead / behind 按实时 HEAD 与
 upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与变更文件元数据构成
 短期指纹缓存，并把统计范围限制在实际变更路径。刷新失败时保留最后一次成功的状态和统计，
 并附加本次错误信息。

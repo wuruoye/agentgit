@@ -187,6 +187,48 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testRepositoryRefreshRunsOnlyInBackground() async throws {
+        let repository = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-background-\(UUID().uuidString)")
+        try await initializeRepository(at: repository, using: GitCommandRunner())
+        defer { try? FileManager.default.removeItem(at: repository) }
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(
+            defaults: defaults,
+            backgroundRefreshInterval: .milliseconds(100)
+        )
+        defer { model.setApplicationActive(true) }
+        await model.addProject(at: repository)
+        await model.loadProjectsIfNeeded()
+        let baseline = try XCTUnwrap(model.selectedWorktree?.refreshedAt)
+        try Data("new file\n".utf8).write(to: repository.appendingPathComponent("new.txt"))
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertEqual(model.selectedWorktree?.refreshedAt, baseline)
+        XCTAssertFalse(model.isRefreshing(worktreeID: repository.path))
+
+        model.setApplicationActive(false)
+        for _ in 0..<100 {
+            if model.selectedWorktree?.status.changes.contains(where: { $0.path == "new.txt" }) == true {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(model.selectedWorktree?.status.changes.contains(where: { $0.path == "new.txt" }) == true)
+        let backgroundSnapshot = model.selectedWorktree?.refreshedAt
+        model.setApplicationActive(true)
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertEqual(model.selectedWorktree?.refreshedAt, backgroundSnapshot)
+        let foregroundSnapshot = model.selectedWorktree?.refreshedAt
+        try Data("another file\n".utf8).write(to: repository.appendingPathComponent("manual.txt"))
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertEqual(model.selectedWorktree?.refreshedAt, foregroundSnapshot)
+        await model.refreshSelectedWorktree()
+        XCTAssertTrue(model.selectedWorktree?.status.changes.contains(where: { $0.path == "manual.txt" }) == true)
+        await model.prepareForTermination()
+    }
+
     func testTerminationFlushesProjectSnapshotAndReviewState() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
@@ -234,6 +276,45 @@ final class AppModelTests: XCTestCase {
             456.5,
             accuracy: 0.01
         )
+    }
+
+    func testRefreshSelectedProjectLeavesOtherProjectsUnchanged() async throws {
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentgit-project-refresh-\(UUID().uuidString)")
+        let repository = container.appendingPathComponent("selected")
+        let other = container.appendingPathComponent("other")
+        let linked = container.appendingPathComponent("linked")
+        let runner = GitCommandRunner()
+        try await initializeRepository(at: repository, using: runner)
+        try await initializeRepository(at: other, using: runner)
+        defer { try? FileManager.default.removeItem(at: container) }
+        _ = try await runner.run(
+            arguments: ["worktree", "add", "-b", "linked", linked.path],
+            workingDirectory: repository
+        )
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults)
+        await model.addProject(at: repository)
+        await model.addProject(at: other)
+        let selectedProject = try XCTUnwrap(model.projects.first(where: {
+            $0.project.rootURL.standardizedFileURL == repository.standardizedFileURL
+        }))
+        let selectedID = try XCTUnwrap(selectedProject.snapshot?.worktrees.first?.id)
+        _ = model.selectWorktree(id: selectedID)
+        let otherSnapshot = model.projects.first(where: { $0.id != selectedProject.id })?.snapshot
+        for url in [repository, linked, other] {
+            try Data("changed\n".utf8).write(to: url.appendingPathComponent("new.txt"))
+        }
+        await model.refreshSelectedProject()
+        let refreshed = try XCTUnwrap(model.projects.first(where: { $0.id == selectedProject.id })?.snapshot)
+        XCTAssertEqual(refreshed.worktrees.count, 2)
+        XCTAssertTrue(refreshed.worktrees.allSatisfy {
+            $0.status.changes.contains(where: { $0.path == "new.txt" })
+        })
+        XCTAssertEqual(model.projects.first(where: { $0.id != selectedProject.id })?.snapshot, otherSnapshot)
+        await model.prepareForTermination()
     }
 
     func testCollapsedProjectsPersistAcrossModelInstances() throws {
@@ -464,63 +545,6 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testPendingRefreshForOneCachedWorktreeKeepsSiblingCacheAvailable() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/cached-sibling-refresh-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent("repository", isDirectory: true)
-        let linked = container.appendingPathComponent("feature", isDirectory: true)
-        let cacheURL = container.appendingPathComponent("project-snapshots.json")
-        try FileManager.default.createDirectory(
-            at: container,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: container) }
-
-        let systemRunner = GitCommandRunner()
-        try await initializeRepository(at: repository, using: systemRunner)
-        _ = try await systemRunner.run(
-            arguments: ["worktree", "add", "-b", "feature", linked.path],
-            workingDirectory: repository
-        )
-        let project = try await GitRepositoryService().loadProject(at: repository)
-        let writer = ProjectSnapshotStore(fileURL: cacheURL)
-        try await writer.save(
-            projectIDs: [project.id],
-            snapshots: [project],
-            eventID: FSEventsGetCurrentEventId(),
-            completeProjectIDs: [project.id]
-        )
-
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set([repository.path], forKey: "agentgit.project-paths")
-        defaults.set(1, forKey: "agentgit.project-identity-version")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-id")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-project-id")
-        let model = AppModel(
-            defaults: defaults,
-            snapshotStore: ProjectSnapshotStore(fileURL: cacheURL)
-        )
-        defer { model.setApplicationActive(false) }
-
-        let eventID = FSEventsGetCurrentEventId()
-        model.enqueueRepositoryEvents(
-            RepositoryChangeImpact(
-                metadataWorktreeIDs: [linked.standardizedFileURL.path]
-            ),
-            eventID: eventID
-        )
-
-        XCTAssertTrue(model.isRefreshing(worktreeID: linked.standardizedFileURL.path))
-        XCTAssertFalse(model.isRefreshing(worktreeID: repository.standardizedFileURL.path))
-        XCTAssertFalse(model.projects.first?.isLoading == true)
-    }
 
     func testSelectingCompleteCachedWorktreeRunsNoGitCommands() async throws {
         let container = URL(
@@ -695,7 +719,7 @@ final class AppModelTests: XCTestCase {
         model.setApplicationActive(false)
     }
 
-    func testProjectMonitorDiscoversAddedAndRemovedWorktrees() async throws {
+    func testBackgroundRefreshDiscoversAddedAndRemovedWorktrees() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -739,9 +763,10 @@ final class AppModelTests: XCTestCase {
         let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let model = AppModel(defaults: defaults)
-        defer { model.setApplicationActive(false) }
+        let model = AppModel(defaults: defaults, backgroundRefreshInterval: .milliseconds(100))
+        defer { model.setApplicationActive(true) }
         await model.addProject(at: repository)
+        model.setApplicationActive(false)
 
         _ = try await runner.run(
             arguments: ["worktree", "add", "-b", "feature", linked.path],
@@ -780,195 +805,9 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testForegroundRefreshFindsWorktreeCreatedBeforeMonitoringStarts() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/foreground-membership-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent("repository", isDirectory: true)
-        let linked = container.appendingPathComponent("feature", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: repository,
-            withIntermediateDirectories: true
-        )
-        defer {
-            try? FileManager.default.removeItem(at: container)
-        }
-        let runner = GitCommandRunner()
-        _ = try await runner.run(
-            arguments: ["init", "-b", "main"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["config", "user.name", "AgentGit Tests"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["config", "user.email", "agentgit-tests@example.invalid"],
-            workingDirectory: repository
-        )
-        try Data("base\n".utf8).write(
-            to: repository.appendingPathComponent("README.md")
-        )
-        _ = try await runner.run(
-            arguments: ["add", "README.md"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["commit", "-m", "Initial commit"],
-            workingDirectory: repository
-        )
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let model = AppModel(defaults: defaults)
-        model.setApplicationActive(false)
-        defer { model.setApplicationActive(false) }
-        await model.loadProjectsIfNeeded()
-        await model.addProject(at: repository)
 
-        _ = try await runner.run(
-            arguments: ["worktree", "add", "-b", "feature", linked.path],
-            workingDirectory: repository
-        )
-        XCTAssertFalse(
-            model.projects.first?.snapshot?.worktrees.contains(where: {
-                $0.id == linked.standardizedFileURL.path
-            }) == true
-        )
 
-        model.setApplicationActive(true)
-        for _ in 0..<100 {
-            if model.projects.first?.snapshot?.worktrees.contains(where: {
-                $0.id == linked.standardizedFileURL.path
-            }) == true {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        XCTAssertTrue(
-            model.projects.first?.snapshot?.worktrees.contains(where: {
-                $0.id == linked.standardizedFileURL.path
-            }) == true
-        )
-    }
-
-    func testCachedStartupRestoresImmediatelyAndReplaysChangedWorktreeEvent() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/cached-startup-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent("repository", isDirectory: true)
-        let linked = container.appendingPathComponent("feature", isDirectory: true)
-        let cacheURL = container.appendingPathComponent("project-snapshots.json")
-        try FileManager.default.createDirectory(
-            at: repository,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: container) }
-        let runner = GitCommandRunner()
-        _ = try await runner.run(
-            arguments: ["init", "-b", "main"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["config", "user.name", "AgentGit Tests"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["config", "user.email", "agentgit-tests@example.invalid"],
-            workingDirectory: repository
-        )
-        try Data("base\n".utf8).write(
-            to: repository.appendingPathComponent("README.md")
-        )
-        _ = try await runner.run(
-            arguments: ["add", "README.md"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["commit", "-m", "Initial commit"],
-            workingDirectory: repository
-        )
-        _ = try await runner.run(
-            arguments: ["worktree", "add", "-b", "feature", linked.path],
-            workingDirectory: repository
-        )
-        let service = GitRepositoryService()
-        let snapshot = try await service.loadProject(at: repository)
-        let baselineEventID = FSEventsGetCurrentEventId()
-        let writingStore = ProjectSnapshotStore(fileURL: cacheURL)
-        try await writingStore.save(
-            projectIDs: [snapshot.id],
-            snapshots: [snapshot],
-            eventID: baselineEventID,
-            completeProjectIDs: [snapshot.id]
-        )
-        try Data("base\nchanged\n".utf8).write(
-            to: linked.appendingPathComponent("README.md")
-        )
-
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set([repository.path], forKey: "agentgit.project-paths")
-        defaults.set(1, forKey: "agentgit.project-identity-version")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-id")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-project-id")
-        let readingStore = ProjectSnapshotStore(fileURL: cacheURL)
-        let model = AppModel(
-            defaults: defaults,
-            repositoryService: service,
-            snapshotStore: readingStore
-        )
-        defer { model.setApplicationActive(false) }
-
-        let immediatelyRestored = try XCTUnwrap(
-            model.projects.first?.snapshot?.worktrees.first(where: {
-                $0.id == linked.standardizedFileURL.path
-            })
-        )
-        XCTAssertTrue(immediatelyRestored.status.changes.isEmpty)
-
-        await model.loadProjectsIfNeeded()
-        for _ in 0..<100 {
-            if model.projects.first?.snapshot?.worktrees.first(where: {
-                $0.id == linked.standardizedFileURL.path
-            })?.status.changes.contains(where: { $0.path == "README.md" }) == true {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        XCTAssertTrue(
-            model.projects.first?.snapshot?.worktrees.first(where: {
-                $0.id == linked.standardizedFileURL.path
-            })?.status.changes.contains(where: { $0.path == "README.md" }) == true
-        )
-
-        for _ in 0..<100 {
-            let cached = try ProjectSnapshotStore.load(from: cacheURL)
-            if cached?.eventID ?? 0 > baselineEventID {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let updatedCache = try XCTUnwrap(ProjectSnapshotStore.load(from: cacheURL))
-        XCTAssertGreaterThan(updatedCache.eventID, baselineEventID)
-        XCTAssertTrue(
-            updatedCache.projects.first?.worktrees.first(where: {
-                $0.id == linked.standardizedFileURL.path
-            })?.status.changes.contains(where: { $0.path == "README.md" }) == true
-        )
-    }
-
-    func testCompleteCachedStartupRunsNoGitCommandsUntilRepositoryChanges() async throws {
+    func testCompleteCachedStartupUsesCacheUntilManualRefresh() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -1095,6 +934,7 @@ final class AppModelTests: XCTestCase {
         try Data("base\nchanged\n".utf8).write(
             to: repository.appendingPathComponent("README.md")
         )
+        await model.refreshSelectedWorktree()
         for _ in 0..<100 {
             let commands = (try? String(
                 contentsOf: commandLogURL,
@@ -1114,7 +954,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(commands.contains("status --porcelain=v2"))
     }
 
-    func testWarmRestartUsesCacheUntilWorktreeMembershipChanges() async throws {
+    func testWarmRestartUsesCacheUntilManualMembershipRefresh() async throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true
@@ -1213,6 +1053,7 @@ final class AppModelTests: XCTestCase {
             ],
             workingDirectory: repository
         )
+        await secondModel.refreshAll()
         for _ in 0..<100 {
             if secondModel.projects.first?.snapshot?.worktrees.contains(where: {
                 $0.id == nextLinked.standardizedFileURL.path
@@ -1462,169 +1303,7 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testEmptyRepositoryImpactAdvancesPersistentCursor() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/ignored-event-cursor-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent("repository", isDirectory: true)
-        let cacheURL = container.appendingPathComponent("project-snapshots.json")
-        try FileManager.default.createDirectory(
-            at: container,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: container) }
-        let runner = GitCommandRunner()
-        try await initializeRepository(at: repository, using: runner)
-        let service = GitRepositoryService()
-        let snapshot = try await service.loadProject(at: repository)
-        let baselineEventID = FSEventsGetCurrentEventId()
-        let writer = ProjectSnapshotStore(fileURL: cacheURL)
-        try await writer.save(
-            projectIDs: [snapshot.id],
-            snapshots: [snapshot],
-            eventID: baselineEventID,
-            completeProjectIDs: [snapshot.id]
-        )
 
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set([repository.path], forKey: "agentgit.project-paths")
-        defaults.set(1, forKey: "agentgit.project-identity-version")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-id")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-project-id")
-        let model = AppModel(
-            defaults: defaults,
-            repositoryService: service,
-            snapshotStore: ProjectSnapshotStore(fileURL: cacheURL)
-        )
-        defer { model.setApplicationActive(false) }
-        await model.loadProjectsIfNeeded()
-
-        let cursorEventID = baselineEventID &+ 1
-        model.enqueueRepositoryEvents(
-            RepositoryChangeImpact(),
-            eventID: cursorEventID
-        )
-
-        for _ in 0..<100 {
-            let payload = try ProjectSnapshotStore.load(from: cacheURL)
-            if payload?.eventID ?? 0 >= cursorEventID {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let updated = try XCTUnwrap(ProjectSnapshotStore.load(from: cacheURL))
-        XCTAssertGreaterThanOrEqual(updated.eventID, cursorEventID)
-    }
-
-    func testIgnoredWorkingTreeEventAdvancesCursorWithoutStatusRefresh() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/ignored-content-event-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent("repository", isDirectory: true)
-        let cacheURL = container.appendingPathComponent("project-snapshots.json")
-        let commandLogURL = container.appendingPathComponent("git-commands.log")
-        let gitWrapperURL = container.appendingPathComponent("git-wrapper.sh")
-        try FileManager.default.createDirectory(
-            at: container,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: container) }
-        let systemRunner = GitCommandRunner()
-        try await initializeRepository(at: repository, using: systemRunner)
-        try Data(".build/\n".utf8).write(
-            to: repository.appendingPathComponent(".gitignore")
-        )
-        _ = try await systemRunner.run(
-            arguments: ["add", ".gitignore"],
-            workingDirectory: repository
-        )
-        _ = try await systemRunner.run(
-            arguments: ["commit", "-m", "Ignore build output"],
-            workingDirectory: repository
-        )
-        let snapshot = try await GitRepositoryService().loadProject(at: repository)
-        let baselineEventID = FSEventsGetCurrentEventId()
-        let writer = ProjectSnapshotStore(fileURL: cacheURL)
-        try await writer.save(
-            projectIDs: [snapshot.id],
-            snapshots: [snapshot],
-            eventID: baselineEventID,
-            completeProjectIDs: [snapshot.id]
-        )
-
-        let quotedLogPath = commandLogURL.path.replacingOccurrences(
-            of: "'",
-            with: "'\\''"
-        )
-        let wrapper = """
-        #!/bin/sh
-        printf '%s\\n' "$*" >> '\(quotedLogPath)'
-        exec /usr/bin/git "$@"
-        """
-        try Data(wrapper.utf8).write(to: gitWrapperURL)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: gitWrapperURL.path
-        )
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set([repository.path], forKey: "agentgit.project-paths")
-        defaults.set(1, forKey: "agentgit.project-identity-version")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-id")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-project-id")
-        let model = AppModel(
-            defaults: defaults,
-            repositoryService: GitRepositoryService(
-                runner: GitCommandRunner(executableURL: gitWrapperURL)
-            ),
-            snapshotStore: ProjectSnapshotStore(fileURL: cacheURL)
-        )
-        defer { model.setApplicationActive(false) }
-        let ignoredDirectory = repository.appendingPathComponent(
-            ".build",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: ignoredDirectory,
-            withIntermediateDirectories: true
-        )
-        let ignoredFile = ignoredDirectory.appendingPathComponent("output.o")
-        try Data("object\n".utf8).write(to: ignoredFile)
-        let impact = RepositoryWatchIndex(projects: model.projects).impact(
-            for: [ignoredFile.path]
-        )
-        XCTAssertEqual(impact.worktreeIDs, [repository.standardizedFileURL.path])
-
-        let cursorEventID = baselineEventID &+ 1
-        model.enqueueRepositoryEvents(impact, eventID: cursorEventID)
-        for _ in 0..<100 {
-            let payload = try ProjectSnapshotStore.load(from: cacheURL)
-            if payload?.eventID ?? 0 >= cursorEventID {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        let updated = try XCTUnwrap(ProjectSnapshotStore.load(from: cacheURL))
-        XCTAssertGreaterThanOrEqual(updated.eventID, cursorEventID)
-        let commands = try String(contentsOf: commandLogURL, encoding: .utf8)
-        XCTAssertTrue(commands.contains("check-ignore --stdin -z"))
-        XCTAssertFalse(
-            commands.contains("status --porcelain=v2"),
-            "Ignored event triggered a status scan: \(commands)"
-        )
-    }
 
     func testCachedStartupOnlyLoadsMissingProjectsAndWorktrees() async throws {
         let container = URL(
@@ -2091,82 +1770,6 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testFullRefreshImpactReloadsChangedStatusAfterDroppedEvent() async throws {
-        let container = URL(
-            fileURLWithPath: FileManager.default.currentDirectoryPath,
-            isDirectory: true
-        ).appendingPathComponent(
-            ".build/test-repositories/full-refresh-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let repository = container.appendingPathComponent(
-            "repository",
-            isDirectory: true
-        )
-        let cacheURL = container.appendingPathComponent("project-snapshots.json")
-        defer { try? FileManager.default.removeItem(at: container) }
-        let runner = GitCommandRunner()
-        try await initializeRepository(at: repository, using: runner)
-        let service = GitRepositoryService()
-        let snapshot = try await service.loadProject(at: repository)
-        let cacheStore = ProjectSnapshotStore(fileURL: cacheURL)
-        try await cacheStore.save(
-            projectIDs: [snapshot.id],
-            snapshots: [snapshot],
-            eventID: FSEventsGetCurrentEventId(),
-            completeProjectIDs: [snapshot.id]
-        )
-        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set([repository.path], forKey: "agentgit.project-paths")
-        defaults.set(1, forKey: "agentgit.project-identity-version")
-        defaults.set(repository.path, forKey: "agentgit.selected-worktree-id")
-        defaults.set(
-            repository.path,
-            forKey: "agentgit.selected-worktree-project-id"
-        )
-        let model = AppModel(
-            defaults: defaults,
-            repositoryService: service,
-            snapshotStore: ProjectSnapshotStore(fileURL: cacheURL)
-        )
-        defer { model.setApplicationActive(false) }
-        XCTAssertTrue(model.selectedWorktree?.status.changes.isEmpty == true)
-        model.setBlockingGitRefreshError(
-            "Repository status is stale.",
-            for: repository.path
-        )
-        XCTAssertEqual(
-            model.blockingGitRefreshError(for: repository.path),
-            "Repository status is stale."
-        )
-
-        try Data("base\nchanged\n".utf8).write(
-            to: repository.appendingPathComponent("README.md")
-        )
-        let impact = RepositoryWatchIndex(projects: model.projects)
-            .fullRefreshImpact
-        model.enqueueRepositoryEvents(
-            impact,
-            eventID: FSEventsGetCurrentEventId()
-        )
-        for _ in 0..<100 {
-            if model.selectedWorktree?.status.changes.contains(where: {
-                $0.path == "README.md"
-            }) == true {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        XCTAssertTrue(
-            model.selectedWorktree?.status.changes.contains(where: {
-                $0.path == "README.md"
-            }) == true
-        )
-        XCTAssertNil(model.blockingGitRefreshError(for: repository.path))
-    }
 
     func testRepositoryFileMonitorReceivesRealFileEvent() async throws {
         let container = URL(

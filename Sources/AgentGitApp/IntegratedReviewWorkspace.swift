@@ -394,9 +394,8 @@ struct IntegratedReviewWorkspace: View {
                 for: snapshot.id
             )
         }
-        // 下面六个 task 只在选中的 worktree / commit / diff 变化时各跑一次，是用户或 agent
-        // 主动切换后必须补上的加载，不是周期刷新，所以不跟随窗口激活状态。跟随激活的是
-        // AppModel 的仓库刷新和下面两个翻页触发器，后台空闲仍然不跑 git。
+        // 下面六个 task 在选中的 worktree / commit / diff 变化时补齐内容，不跟随窗口激活状态。
+        // 下面两个翻页触发器只在前台启用；AppModel 的定时仓库刷新只在后台执行。
         .task(id: historyLoadKey) {
             await loadHistory(for: historyLoadKey)
             await loadPagesForRequestedHistoryContext()
@@ -539,11 +538,11 @@ struct IntegratedReviewWorkspace: View {
             Spacer(minLength: 4)
             AgentSessionsButton(worktree: snapshot.worktree)
             Button {
-                Task { await model.refreshSelectedWorktree() }
+                Task { await model.refreshSelectedProject() }
             } label: { ReviewIconView(icon: .refresh) }
                 .buttonStyle(WorkspaceIconButtonStyle())
-                .help("Refresh Current Worktree (⌘R)")
-                .accessibilityLabel("Refresh Current Worktree")
+                .help("Refresh Current Project (⌘R)")
+                .accessibilityLabel("Refresh Current Project")
             if runningRemoteAction != nil {
                 Button(action: cancelRemoteOperation) { Image(systemName: "xmark.circle") }
                     .buttonStyle(WorkspaceIconButtonStyle())
