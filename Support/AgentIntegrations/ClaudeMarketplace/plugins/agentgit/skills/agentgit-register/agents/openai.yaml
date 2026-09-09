@@ -1,6 +1,0 @@
-interface:
-  display_name: "AgentGit Register"
-  short_description: "Link this session before repository changes"
-  default_prompt: "Use $agentgit-register to link this session before modifying the current Git worktree."
-policy:
-  allow_implicit_invocation: true

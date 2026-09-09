@@ -197,12 +197,6 @@ struct AgentGitSettingsView: View {
             height: fixedContentHeight ?? selectedSection.preferredContentHeight
         )
         .background(Color(nsColor: AgentGitPalette.canvas))
-        .task(id: model.isApplicationActive && selectedSection == .agents) {
-            guard model.isApplicationActive, selectedSection == .agents else {
-                return
-            }
-            await model.agentPluginConfigurator.refresh()
-        }
     }
 
     private var settingsSidebar: some View {
@@ -233,11 +227,6 @@ struct AgentGitSettingsView: View {
                             Text(section.title)
                                 .font(.system(size: 12.5, weight: .medium))
                             Spacer(minLength: 4)
-                            if section == .agents {
-                                Circle()
-                                    .fill(agentIntegrationSummaryColor)
-                                    .frame(width: 7, height: 7)
-                            }
                         }
                         .foregroundStyle(
                             selectedSection == section
@@ -470,143 +459,12 @@ struct AgentGitSettingsView: View {
 
     private var agentSettings: some View {
         VStack(alignment: .leading, spacing: 16) {
-            AgentGitSettingsCard(accent: agentIntegrationSummaryColor) {
-                VStack(alignment: .leading, spacing: 0) {
-                    settingsCardHeading(
-                        "Agent Integrations",
-                        detail: "Each provider can link sessions automatically after repository changes.",
-                        image: "sparkles.rectangle.stack"
-                    )
-                    .padding(.bottom, 8)
-
-                    ForEach(Array(AgentProvider.allCases.enumerated()), id: \.element) {
-                        index,
-                        provider in
-                        if index > 0 {
-                            Divider()
-                                .padding(.leading, 39)
-                        }
-                        integrationRow(provider)
-                            .padding(.vertical, 10)
-                    }
-                }
-            }
-
-            AgentGitSettingsCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    settingsCardHeading(
-                        "Registration Runtime",
-                        detail: "The local helper handles host events without adding instructions to the agent.",
-                        image: "terminal"
-                    )
-                    Text(skillBridgePath)
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color(nsColor: AgentGitPalette.inputBackground),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                }
-            }
-
             AgentGitSettingsCard {
                 agentSessionStorageSettings
             }
         }
     }
 
-    private func integrationRow(_ provider: AgentProvider) -> some View {
-        let status = pluginStatus(provider)
-        let plugin = AgentIntegrationPlugin.plugin(for: provider)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: provider.systemImageName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(provider.tintColor)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        provider.tintColor.opacity(0.1),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(provider.displayName)
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text(pluginCapabilityDescription(plugin))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Circle()
-                    .fill(integrationStatusColor(status))
-                    .frame(width: 7, height: 7)
-                Text(status.title)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                if status == .configuring
-                    || status == .disabling
-                    || status == .notChecked {
-                    ProgressView()
-                        .controlSize(.small)
-                } else if status == .configured {
-                    Button("Disable") {
-                        Task {
-                            await model.agentPluginConfigurator.disable(provider)
-                        }
-                    }
-                    .controlSize(.small)
-                } else if let actionTitle = integrationActionTitle(status) {
-                    Button(actionTitle) {
-                        Task {
-                            await model.agentPluginConfigurator.enable(provider)
-                        }
-                    }
-                    .controlSize(.small)
-                }
-            }
-
-            if case let .failed(message) = status {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            } else if status == .needsUpdate {
-                Text("A newer AgentGit integration plugin is available.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let event = model.agentAssociations.latestHookEvent(
-                for: provider,
-                pluginVersion: model.agentPluginConfigurator.installedVersionByProvider[provider]
-            ) {
-                Text(
-                    "\(registrationEventTitle(event)) · "
-                        + compactRelativeTime(event.createdAt)
-                )
-                .font(.caption)
-                .foregroundStyle(registrationEventColor(event))
-                .help(event.message)
-                if event.outcome == .failed || event.outcome == .rejected {
-                    Text(event.message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else if status == .configured {
-                Text(provider == .codex
-                     ? "Hook not observed. Review plugin hook trust in Codex, then start a new task."
-                     : "Hook not observed. Start a new task with the plugin enabled.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
     private var agentSessionStorageSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             settingsCardHeading(
@@ -687,22 +545,6 @@ struct AgentGitSettingsView: View {
             .frame(width: 82, alignment: .leading)
     }
 
-    private var agentIntegrationSummaryColor: Color {
-        let statuses = AgentProvider.allCases.map(pluginStatus)
-        if statuses.contains(where: { status in
-            if case .failed = status {
-                return true
-            }
-            return false
-        }) {
-            return .red
-        }
-        if statuses.allSatisfy({ $0 == .configured }) {
-            return .green
-        }
-        return .orange
-    }
-
     private var layoutBinding: Binding<DiffLayoutMode> {
         Binding(
             get: { model.diffLayout },
@@ -732,79 +574,5 @@ struct AgentGitSettingsView: View {
         )
     }
 
-    private func pluginStatus(_ provider: AgentProvider) -> AgentPluginConfigurationStatus {
-        model.agentPluginConfigurator.statusByProvider[provider] ?? .notChecked
-    }
-
-    private func integrationStatusColor(
-        _ status: AgentPluginConfigurationStatus
-    ) -> Color {
-        switch status {
-        case .configured: .green
-        case .configuring, .disabling, .notChecked: .secondary
-        case .notConfigured, .needsUpdate: .orange
-        case .failed: .red
-        }
-    }
-
-    private func integrationActionTitle(
-        _ status: AgentPluginConfigurationStatus
-    ) -> String? {
-        switch status {
-        case .notConfigured: "Enable"
-        case .needsUpdate: "Update"
-        case .failed: "Retry"
-        case .notChecked, .configuring, .disabling, .configured: nil
-        }
-    }
-
-    private func pluginCapabilityDescription(
-        _ plugin: AgentIntegrationPlugin
-    ) -> String {
-        plugin.capabilities.map(\.rawValue).joined(separator: " · ")
-    }
-
-    private var skillBridgePath: String {
-        Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/AgentGitSkillBridge")
-            .path
-    }
-
-    private func registrationEventTitle(
-        _ event: AgentRegistrationEvent
-    ) -> String {
-        switch (event.action, event.outcome) {
-        case (.hook, .succeeded):
-            "Hook received"
-        case (.hook, .skipped):
-            "Hook received · Registration skipped"
-        case (.hook, .failed), (.hook, .rejected):
-            "Automatic registration needs attention"
-        case (.register, .skipped), (.unregister, .skipped):
-            "Registration skipped"
-        case (.register, .succeeded):
-            "Session registered"
-        case (.register, .rejected):
-            "Registration rejected"
-        case (.register, .failed):
-            "Registration failed"
-        case (.unregister, .succeeded):
-            "Session removed"
-        case (.unregister, .rejected):
-            "Removal rejected"
-        case (.unregister, .failed):
-            "Removal failed"
-        }
-    }
-
-    private func registrationEventColor(
-        _ event: AgentRegistrationEvent
-    ) -> Color {
-        switch event.outcome {
-        case .succeeded, .skipped: .secondary
-        case .rejected: .orange
-        case .failed: .red
-        }
-    }
 
 }

@@ -10,8 +10,7 @@ let package = Package(
     products: [
         .library(name: "AgentGitCore", targets: ["AgentGitCore"]),
         .library(name: "AgentGitIntegrationShared", targets: ["AgentGitIntegrationShared"]),
-        .executable(name: "AgentGitApp", targets: ["AgentGitApp"]),
-        .executable(name: "AgentGitSkillBridge", targets: ["AgentGitSkillBridge"])
+        .executable(name: "AgentGitApp", targets: ["AgentGitApp"])
     ],
     targets: [
         .target(name: "AgentGitCore"),
@@ -20,10 +19,6 @@ let package = Package(
             name: "AgentGitApp",
             dependencies: ["AgentGitCore", "AgentGitIntegrationShared"],
             resources: [.copy("Resources/ReviewIcons")]
-        ),
-        .executableTarget(
-            name: "AgentGitSkillBridge",
-            dependencies: ["AgentGitIntegrationShared"]
         ),
         .testTarget(
             name: "AgentGitCoreTests",

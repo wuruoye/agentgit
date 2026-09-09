@@ -152,7 +152,6 @@ final class AppModel {
     /// 刻意放在观察体系之外：滚动位置每帧都变，进来会把整个工作区拖进重绘。
     let reviewStates: ReviewStateStore
     let agentAssociations: AgentAssociationController
-    let agentPluginConfigurator = AgentPluginConfigurator()
 
     private(set) var projects: [ProjectState]
     private(set) var repositoryMonitorError: String?

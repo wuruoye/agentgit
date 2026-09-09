@@ -5,8 +5,6 @@
 AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它面向同时使用
 多个 worktree 的开发方式，把代码审阅体验和本地性能放在首位。
 
-Agent 会话关联通过可选的 AgentGit Hook 插件完成，Git 客户端主路径保持独立。
-
 ## 工作区界面
 
 - **多 worktree 总览**：`All Worktrees` 按项目展示紧凑列表，分支、文件数、增删行数、
@@ -197,8 +195,7 @@ Review 使用连续文件流，
 支持 split / unified、分组折叠、分组与文件双层
 吸顶、行内差异和轻量语法高亮。Diff 布局、上下文行数与忽略空白由全局
 Settings 管理并跨启动保存。
-设置窗口使用独立的 Review / Worktrees / Agents 页面；打开 Review 页面不会启动 Agent 插件 CLI 检查，
-切换到 Agents 页面后才刷新配置状态。
+设置窗口使用独立的 Review / Worktrees / Agents 页面。
 Diff 正文使用 AppKit `NSTableView` 复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局
 和无障碍节点；Diff 聚焦时可用 `Tab` / `Shift-Tab` 在 hunk 间导航。
 主窗口最小尺寸为 1040×680 点；项目侧栏和提交导航在窄窗口分别压缩到 240 与 200 点，
@@ -309,7 +306,6 @@ Reviewed 标记和 Whole File 切换保持可用。操作完成后保留当前 R
 ```text
 AgentGitCore       Git 命令、解析、领域模型、项目持久化
 AgentGitIntegrationShared  Agent 会话、Skill 登记与持久化
-AgentGitSkillBridge  Skill 状态检查、登记与本地通知命令
 AgentGitApp        SwiftUI App 外壳与 AppKit 高性能视图
 AgentGitCoreTests  porcelain / diff parser 与真实临时仓库测试
 AgentGitAppTests   AppKit Review 布局、交互与离屏快照测试
@@ -381,80 +377,25 @@ upstream OID 缓存；diff numstat 使用 HEAD、index、Git 属性、status 与
 短期指纹缓存，并把统计范围限制在实际变更路径。刷新失败时保留最后一次成功的状态和统计，
 并附加本次错误信息。
 
-## Agent 会话集成
+## Agent 会话关联
 
-签名 App bundle 包含 Codex 与 Claude 两套 AgentGit 集成插件，以及
-`Contents/Helpers/AgentGitSkillBridge`。Settings 的 Agents 页面可以独立启用、停用和更新
-每套插件。Codex 优先使用已安装 Desktop 随附的 CLI，缺失时再回退 PATH，避免旧 CLI
-无法读取新版配置。当前能力包含 `Automatic Registration`、`Manual Registration` 与 `Session Jump`。
+会话与 worktree 的关联记在 `~/Library/Application Support/AgentGit/associations.json`，
+只留在本机、按私有文件权限存放，每个 worktree 最多关联三个会话，超出后按更新时间淘汰。
+Settings 的 Agents 页面显示已登记的会话数量；存储 JSON 损坏时提供 `Repair Storage`：
+原文件以 `0600` 权限移动到唯一 `.corrupt-<UUID>.json` 备份，再原子重建空存储，
+正常数据不会自动删除。
 
-启用插件时，App 把随包资源复制到
-`~/Library/Application Support/AgentGit/AgentIntegrations/`，再调用对应 Agent 的官方
-插件 CLI 注册本地 marketplace、安装插件并验证版本与启用状态。Codex 插件标识为
-`agentgit@personal`，Claude 插件标识为 `agentgit@agentgit`。Codex 停用操作移除插件，
-Claude 停用操作保留插件并关闭加载；本地会话关联数据在两种情况下都会保留。
+主 App 只在选中 worktree 的标题栏显示会话按钮，侧栏项目列表保持纯 Git 信息。点击按钮
+直接打开对应会话，悬停显示会话详情。Codex 会话使用规范 thread UUID 打开；Claude 的规范
+session UUID 与 Desktop 内部 session ID 可能不同，主 App 在后台只读 Claude Desktop 的
+JSON 会话索引，按精确 `cliSessionId` 解析当前 Desktop session ID，不读取 transcript 正文。
+索引映射已经失效的关联显示为 Unavailable，并排到仍可打开的会话之后，可从右键菜单移除。
 
-两套插件都包含 `hooks/hooks.json`、`scripts/hook.sh`、签名后的本地 bridge，
-以及用于手动补登记和诊断的 `agentgit-register` Skill。普通仓库操作不需要 agent 加载
-Skill、执行登记命令或生成标题摘要。
+AgentGit 不扫描 transcript，也不启动额外后台服务。关联数据的读取、合并与原子写入通过
+独立锁文件串行执行，数据文件与锁文件权限均为 `0600`。
 
-`SessionStart` 只记录宿主事件回执。`PreToolUse` 保存操作前的有界状态，
-`PostToolUse` 在观察到目标发生变化后登记；Claude 的 `PostToolUseFailure` 也会检查
-部分失败的写入。Hook 从宿主 JSON 读取 `session_id` 和 `tool_use_id`，不推测身份，
-不扫描 transcript，不执行输入中的命令。正常执行没有模型输出；脚本故障会通过
-`additionalContext` 请求当前会话的 LLM 排查，不返回阻断或权限决定。
-
-文件编辑按实际目标路径定位 worktree，支持 `apply_patch` 的新增、修改、删除和移动，
-以及 Write / Edit / MultiEdit / NotebookEdit。Shell 检查工具提供的执行目录、字面量
-`cd` 和 `-C` 指向的仓库，对比 Git status 与变化文件、index、HEAD reflog 的元数据；
-只读命令遇到已有 dirty 文件不会因此登记。检查反映执行期间观察到的仓库变化，
-不能在多个进程同时修改同一目录时证明逐文件作者。
-动态目录、脚本内部写到其它仓库、远程或未覆盖的工具、超时及缺失前置事件不保证自动登记，
-可使用手动补登记。探测不遍历所有 worktree，不展开 shell 变量，不读取代码正文来判断命令意图。
-
-每个 Git 探测最多 500 毫秒，总探测预算 1.5 秒，输出最多 1 MB，状态项最多 2,000，
-单次最多涉及四个仓库。同一 worktree 与 session 的关联只要存在，就不再探测或自动刷新；status 查询只读。
-前置 Hook 同步保存基线，后置 Hook 使用宿主异步执行。存储锁等待最多 250 毫秒，失败记录在
-AgentGit，原任务继续；首次故障向当前模型返回排障上下文，同一会话和插件版本在排障
-待处理期间不重复发送；自动登记成功后解除抑制，新版本也可重新上报。异步 Hook 的上下文
-由宿主在下一次模型请求送达，不另起 LLM 会话。helper 无法启动时脚本也会返回一次诊断。基线按 provider/session/tool-call 隔离，
-完成后删除，未完成基线保留最多 24 小时、最多 1,024 份；不持久化命令、代码或工具输出正文。
-自动登记允许空标题，界面用 provider 和短会话 ID 显示，手动设置的标题继续保留。
-
-Settings 区分插件 Installed 和 Hook received；只有已安装版本对应的回执才算已观察到执行，
-没有当前版本的回执时明确显示 Hook not observed。
-Codex 插件安装并不自动授予 Hook 信任，需要在宿主审阅当前 Hook 定义，更新后用新任务验收。
-没有回执只能说明尚未观察到执行，不能直接判定是不受信任、未重载或宿主版本不支持。
-定义依据：[Codex Hooks](https://learn.chatgpt.com/docs/hooks) 和
-[Claude Hooks](https://code.claude.com/docs/en/hooks)，于 2026-09-07 核对。
-
-关联数据由 AgentGit 自己保存，每个 worktree 最多关联三个会话。首次观察到仓库修改时建立
-关联；已有配对不再自动刷新时间，移除或淘汰后可在下一次修改时重新登记。新增会话超过
-上限后按保存的更新时间淘汰旧关联。主 App 通过分布式
-通知即时更新，只在选中 worktree 的标题栏显示三个会话按钮，侧栏项目列表保持纯 Git 信息。
-点击按钮直接打开对应会话，悬停显示会话详情。Hook 回执、跳过与失败、登记成功和移除结果
-保存在 `~/Library/Application Support/AgentGit/registration-events.json`，最多保留最近
-200 条，文件权限为 `0600`。旧格式的非登记事件在首次读取时自动丢弃并重写为当前格式。
-
-Skill bridge 可以通过绝对路径 `AGENTGIT_DATA_DIRECTORY` 使用隔离存储；正常 App 配置没有
-设置该变量，继续使用 Application Support。无效参数或相对数据目录会输出可读 stderr 并以
-普通失败码退出。
-Settings 同时显示本地关联数量。关联或审计 JSON 损坏时提供 `Repair Storage`：原文件以
-`0600` 权限移动到唯一 `.corrupt-<UUID>.json` 备份，再原子重建空存储；正常数据不会自动
-删除。
-
-Codex 会话使用规范 thread UUID 打开。Claude 的规范 session UUID 与 Desktop 内部
-session ID 可能不同；主 App 在后台只读 Claude Desktop 的 JSON 会话索引，按精确
-`cliSessionId` 解析当前 Desktop session ID，不读取 transcript 正文。索引映射已经失效的
-关联显示为 Unavailable，并排到仍可打开的会话之后，用户可从右键菜单移除。
-重复关联通知会保留未变化会话的跳转结果；只有新增会话显示解析中，侧栏 badge 不会在
-每次关联刷新时清空并重新排序。关联集合与已有结果一致时直接跳过 Claude Desktop 会话
-索引扫描；App 从后台恢复时重新验证一次。
-
-AgentGit 不扫描 transcript，也不启动额外后台服务。插件状态只在 Settings 的 Agents 页面
-打开时读取，每条 CLI 命令的时限为 15 秒。配置检查与写入按 provider 使用最新操作令牌；
-较早结果不会覆盖后续操作。多个 Skill bridge 进程通过独立锁文件串行执行关联数据的读取、
-合并和原子写入，避免同时登记时丢失其它会话；数据文件与锁文件权限均为 `0600`。
+2026-09-09 起不再随 App 分发 Codex / Claude 插件：自动登记、hook、Skill bridge 与
+marketplace 模板已整体移除，`associations.json` 只保留已有关联，不再新增。
 
 ## M1 验收
 
