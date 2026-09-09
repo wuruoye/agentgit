@@ -375,7 +375,7 @@ final class AppModel {
     }
 
     func loadProjectsIfNeeded() async {
-        guard !hasLoadedProjects else {
+        guard !hasLoadedProjects, isApplicationActive else {
             return
         }
         hasLoadedProjects = true
@@ -951,6 +951,18 @@ final class AppModel {
         )
     }
 
+    func applyAllChangesAction(
+        _ action: GitAllChangesAction,
+        worktree: GitWorktree
+    ) async throws {
+        try beginWorktreeMutation(worktree.id)
+        defer { mutationWorktreeIDs.remove(worktree.id) }
+        try await repositoryService.applyAllChangesAction(action, worktree: worktree)
+        try requireSuccessfulMutationRefresh(
+            await refresh(worktree: worktree, submoduleScanMode: .allChanges)
+        )
+    }
+
     func applySelectionAction(
         _ action: GitPendingSelectionAction,
         worktree: GitWorktree,
@@ -1487,6 +1499,9 @@ final class AppModel {
         if isActive {
             backgroundRefreshTask?.cancel()
             backgroundRefreshTask = nil
+            if !hasLoadedProjects {
+                Task { await loadProjectsIfNeeded() }
+            }
             return
         }
 
@@ -2090,6 +2105,7 @@ final class AppModel {
     }
 
     private func beginProjectRefresh(_ id: GitProject.ID) -> RepositoryRefreshToken {
+        completeProjectSnapshotIDs.remove(id)
         let token = refreshCoordinator.beginProject(id)
         if let index = projects.firstIndex(where: { $0.id == id }) {
             projects[index].isLoading = true

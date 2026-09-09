@@ -81,7 +81,7 @@ scripts/package-app.sh --notarize
   -> 自动发现该仓库的全部 worktree
   -> 项目保持手动拖拽顺序
   -> 项目内部按列表展示的最近更新时间排列 worktree
-  -> 每个项目显示最多四个近期活跃 worktree
+  -> 每个项目显示近期 worktree，所有有修改的 worktree 始终显示
   -> 查看工作区状态和改动规模
   -> 进入高质量 Diff 审阅
   -> 查看常规 Git 历史
@@ -110,8 +110,8 @@ M1 完成以下链路：
    从任意 linked worktree 添加时都解析到同一主 checkout，已有重复保存项在启动时按该身份
    合并，并保留首次出现的位置；
 3. 每个 worktree 显示 branch、HEAD、dirty 文件数、增删行数和上游 ahead/behind；
-4. 项目支持折叠和手动拖拽排序；每个项目默认显示最多四个近期活跃 worktree，
-   其余 worktree 通过列表末尾控件展开；
+4. 项目支持折叠和手动拖拽排序；每个项目默认显示最多四个近期活跃 worktree，所有有修改
+   或置顶的 worktree 都保留显示，不受四条上限和闲置时间影响；其余通过列表末尾控件展开；
 5. 选择 worktree 后展示 changed-file 导航、unified diff 和提交历史；
 6. 项目列表与最后选中的 worktree 在下次启动时恢复；
 7. Git 命令失败时在对应项目或 worktree 上显示明确错误和恢复操作，不让整个窗口失效。

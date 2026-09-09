@@ -3,6 +3,68 @@ import XCTest
 @testable import AgentGitCore
 
 final class GitRepositoryServiceTests: XCTestCase {
+    func testDiscardAllHandlesStagedRenameAndNewFiles() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let repository = container.appendingPathComponent("repository")
+        try await makeRepository(at: repository)
+        let runner = GitCommandRunner()
+        _ = try await runner.run(arguments: ["mv", "README.md", "renamed.md"], workingDirectory: repository)
+        try Data("added\n".utf8).write(to: repository.appendingPathComponent("added.txt"))
+        _ = try await runner.run(arguments: ["add", "."], workingDirectory: repository)
+        let service = GitRepositoryService(runner: runner, discardRecoveryStore: .init(destination: .directory(container.appendingPathComponent("recovery"))))
+        let project = try await service.loadProject(at: repository)
+        try await service.applyAllChangesAction(.discard, worktree: XCTUnwrap(project.worktrees.first?.worktree))
+        let status = try await runner.run(arguments: ["status", "--porcelain"], workingDirectory: repository)
+        XCTAssertTrue(status.isEmpty)
+        XCTAssertEqual(try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8), "base\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent("renamed.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent("added.txt").path))
+    }
+
+    func testAllChangesActionsPreserveStagedWorkingAndUntrackedContents() async throws {
+        for action in [GitAllChangesAction.stash, .discard] {
+            let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: container) }
+            let repository = container.appendingPathComponent("repository")
+            let recovery = container.appendingPathComponent("recovery")
+            try await makeRepository(at: repository)
+            let runner = GitCommandRunner()
+            let service = GitRepositoryService(runner: runner, discardRecoveryStore: .init(destination: .directory(recovery)))
+            let file = repository.appendingPathComponent("README.md")
+            try Data("staged\n".utf8).write(to: file)
+            _ = try await runner.run(arguments: ["add", "."], workingDirectory: repository)
+            try Data("working\n".utf8).write(to: file)
+            try Data("new\n".utf8).write(to: repository.appendingPathComponent("new.txt"))
+            let project = try await service.loadProject(at: repository)
+            let worktree = try XCTUnwrap(project.worktrees.first?.worktree)
+            try await service.applyAllChangesAction(action, worktree: worktree)
+            let status = try await runner.run(arguments: ["status", "--porcelain"], workingDirectory: repository)
+            XCTAssertTrue(status.isEmpty)
+            XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "base\n")
+            if action == .stash {
+                _ = try await runner.run(arguments: ["stash", "pop", "--index"], workingDirectory: repository)
+                XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "working\n")
+                let staged = try await runner.run(arguments: ["show", ":README.md"], workingDirectory: repository)
+                XCTAssertEqual(String(decoding: staged, as: UTF8.self), "staged\n")
+                XCTAssertEqual(try String(contentsOf: repository.appendingPathComponent("new.txt"), encoding: .utf8), "new\n")
+            } else {
+                let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: recovery, includingPropertiesForKeys: nil))
+                let files = enumerator.allObjects.compactMap { $0 as? URL }
+                let patch = try XCTUnwrap(files.first { $0.lastPathComponent == "staged.patch" })
+                _ = try await runner.run(arguments: ["apply", "--cached", patch.path], workingDirectory: repository)
+                let staged = try await runner.run(arguments: ["show", ":README.md"], workingDirectory: repository)
+                XCTAssertEqual(String(decoding: staged, as: UTF8.self), "staged\n")
+                XCTAssertTrue(files.filter { $0.lastPathComponent == "README.md" }.contains {
+                    (try? String(contentsOf: $0, encoding: .utf8)) == "working\n"
+                })
+                XCTAssertTrue(files.filter { $0.lastPathComponent == "new.txt" }.contains {
+                    (try? String(contentsOf: $0, encoding: .utf8)) == "new\n"
+                })
+            }
+        }
+    }
+
     func testLoadsCommitTreeAndAuthorEmailForSummary() async throws {
         let container = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentgit-commit-metadata-\(UUID().uuidString)")
@@ -457,6 +519,15 @@ final class GitRepositoryServiceTests: XCTestCase {
         try await makeRepository(at: repository)
         try await makeRepository(at: submoduleSource, initialContents: "submodule base\n")
         let runner = GitCommandRunner()
+        let nestedOID = try await revision("HEAD", in: submoduleSource, using: runner)
+        try Data("[submodule \"Nested\"]\n\tpath = Nested\n\turl = /nonexistent/agentgit-nested-repository\n".utf8)
+            .write(to: submoduleSource.appendingPathComponent(".gitmodules"))
+        _ = try await runner.run(arguments: ["add", ".gitmodules"], workingDirectory: submoduleSource)
+        _ = try await runner.run(
+            arguments: ["update-index", "--add", "--cacheinfo", "160000,\(nestedOID),Nested"],
+            workingDirectory: submoduleSource
+        )
+        _ = try await runner.run(arguments: ["commit", "-m", "Record uninitialized nested dependency"], workingDirectory: submoduleSource)
         _ = try await runner.run(
             arguments: [
                 "-c", "protocol.file.allow=always",
@@ -509,6 +580,11 @@ final class GitRepositoryServiceTests: XCTestCase {
         )
         XCTAssertTrue(change.submoduleStatus?.commitChanged == true)
 
+        // A worktree can retain a submodule checkout after its local registration is removed.
+        _ = try await runner.run(
+            arguments: ["config", "--remove-section", "submodule.Modules/Shared"],
+            workingDirectory: repository
+        )
         try await service.discardFile(worktree: worktree.worktree, change: change)
 
         let restoredOID = String(
@@ -519,6 +595,7 @@ final class GitRepositoryServiceTests: XCTestCase {
             as: UTF8.self
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(restoredOID, recordedOID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: submodulePath.appendingPathComponent("Nested/.git").path))
         project = try await service.loadProject(at: repository)
         worktree = try XCTUnwrap(project.worktrees.first)
         XCTAssertFalse(worktree.status.changes.contains { $0.path == "Modules/Shared" })
@@ -540,7 +617,7 @@ final class GitRepositoryServiceTests: XCTestCase {
         XCTAssertTrue(dirtyChange.submoduleStatus?.hasTrackedChanges == true)
         XCTAssertTrue(dirtyChange.submoduleStatus?.hasUntrackedChanges == true)
 
-        try await service.discardFile(worktree: selected.worktree, change: dirtyChange)
+        try await service.applyAllChangesAction(.discard, worktree: selected.worktree)
 
         let clean = await service.loadWorktree(
             selected.worktree,

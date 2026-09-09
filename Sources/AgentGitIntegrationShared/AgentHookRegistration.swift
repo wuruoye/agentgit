@@ -5,6 +5,14 @@ import Foundation
 /// Consumes host events without evaluating command text. Failures request bounded LLM diagnosis.
 /// PreToolUse saves a bounded baseline; PostToolUse links only roots that changed.
 public struct AgentHookRegistration {
+    /// PreToolUse 会阻塞宿主的工具调用，预算按「两档探测各一秒」留；
+    /// PostToolUse 是异步的，可以给单档更宽的时间把基线复算完。
+    private static let preToolUseDeadline: TimeInterval = 4.5
+    private static let preToolUseStatusBudget: TimeInterval = 1.0
+    private static let postToolUseDeadline: TimeInterval = 6.0
+    private static let postToolUseStatusBudget: TimeInterval = 3.0
+    private static let scopeCacheLifetime: TimeInterval = 24 * 60 * 60
+
     private let rootURL: URL
     private let provider: AgentProvider
     private let pluginVersion: String?
@@ -63,9 +71,13 @@ public struct AgentHookRegistration {
                 )
                 try? fileManager.removeItem(at: pendingURL)
                 try prune(pendingRoot, now: now)
-                let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+                let deadline = ProcessInfo.processInfo.systemUptime + Self.preToolUseDeadline
                 let snapshots = try targets.map { target in
-                    Baseline(target: target, fingerprint: try fingerprint(target, deadline: deadline))
+                    let probe = try fingerprint(
+                        target, scope: nil, deadline: deadline,
+                        statusBudget: Self.preToolUseStatusBudget, now: now
+                    )
+                    return Baseline(target: target, fingerprint: probe.value, scope: probe.scope)
                 }
                 let pending = Pending(createdAt: now, baselines: snapshots)
                 try JSONEncoder().encode(pending).write(to: pendingURL, options: .atomic)
@@ -98,14 +110,18 @@ public struct AgentHookRegistration {
             guard now.timeIntervalSince(pending.createdAt) < 24 * 60 * 60 else {
                 throw HookError.expiredBaseline
             }
-            let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+            let deadline = ProcessInfo.processInfo.systemUptime + Self.postToolUseDeadline
             var changed = false
             let service = AgentSkillRegistrationService(
                 associationStore: AgentAssociationStore(storeURL: rootURL.appendingPathComponent("associations.json")),
                 auditStore: auditStore
             )
             for baseline in baselines {
-                guard try fingerprint(baseline.target, deadline: deadline) != baseline.fingerprint else { continue }
+                let probe = try fingerprint(
+                    baseline.target, scope: baseline.scope ?? .untrackedAll,
+                    deadline: deadline, statusBudget: Self.postToolUseStatusBudget, now: now
+                )
+                guard probe.value != baseline.fingerprint else { continue }
                 // A nonzero shell exit can still have changed files. Use the observed state,
                 // not the exit status, to decide whether this worktree needs an association.
                 _ = try service.register(
@@ -221,7 +237,13 @@ public struct AgentHookRegistration {
         }
     }
 
-    private func fingerprint(_ target: Target, deadline: TimeInterval) throws -> String {
+    private func fingerprint(
+        _ target: Target,
+        scope requestedScope: ProbeScope?,
+        deadline: TimeInterval,
+        statusBudget: TimeInterval,
+        now: Date
+    ) throws -> (value: String, scope: ProbeScope) {
         if let files = target.files {
             var data = Data()
             for path in files {
@@ -229,23 +251,109 @@ public struct AgentHookRegistration {
                 data.append(Data(path.utf8))
                 data.append(try fileFingerprint(path))
             }
-            return digest(data)
+            return (digest(data), .untrackedAll)
         }
         let worktree = URL(fileURLWithPath: target.worktree, isDirectory: true)
-        var data = try gitStatus(worktree, deadline: deadline)
-        let fields = data.split(separator: 0, omittingEmptySubsequences: true)
-        guard fields.count <= 2_000 else { throw HookError.limitExceeded }
-        var index = 0
-        while index < fields.count {
-            let field = fields[index]
-            guard field.count >= 4, field[field.startIndex + 2] == 32,
-                  let path = String(data: field.dropFirst(3), encoding: .utf8) else {
-                throw HookError.limitExceeded
+        // 超大 worktree 的全量 status 跑不进一次 Hook 的预算。逐级缩小探测范围，
+        // 让这类仓库拿到一个能复算的基线，而不是每次调用都以超时失败告终。
+        // 从上次记下的档位起步，否则每次 PreToolUse 都要把超时的档位重跑一遍。
+        let scopes: [ProbeScope]
+        if let requestedScope {
+            scopes = [requestedScope]
+        } else {
+            let cached = cachedScope(target.worktree, now: now) ?? .untrackedAll
+            scopes = Array(ProbeScope.allCases.drop { $0 != cached })
+        }
+        for scope in scopes {
+            guard let data = try statusFingerprintData(
+                worktree, scope: scope, deadline: deadline, statusBudget: statusBudget
+            ) else {
+                continue
             }
-            data.append(try fileMetadata(worktree.appendingPathComponent(path).path))
-            if field.prefix(2).contains(82) || field.prefix(2).contains(67) { index += 1 }
-            index += 1
-            guard ProcessInfo.processInfo.systemUptime < deadline else { throw HookError.limitExceeded }
+            if requestedScope == nil {
+                storeScope(scope, worktree: target.worktree, now: now)
+            }
+            return (digest(data), scope)
+        }
+        throw HookError.limitExceeded
+    }
+
+    /// 记住每个 worktree 上次成功的探测档位，过期后重新从最大范围试一遍。
+    private func cachedScope(_ worktree: String, now: Date) -> ProbeScope? {
+        guard let entry = loadScopeCache()[worktree],
+              now.timeIntervalSince(entry.updatedAt) < Self.scopeCacheLifetime,
+              entry.updatedAt <= now else {
+            return nil
+        }
+        return entry.scope
+    }
+
+    private func storeScope(_ scope: ProbeScope, worktree: String, now: Date) {
+        var cache = loadScopeCache()
+        if let entry = cache[worktree], entry.scope == scope,
+           now.timeIntervalSince(entry.updatedAt) < Self.scopeCacheLifetime / 4 {
+            return
+        }
+        cache[worktree] = ScopeCacheEntry(scope: scope, updatedAt: now)
+        if cache.count > 64 {
+            cache = Dictionary(
+                uniqueKeysWithValues: cache.sorted { $0.value.updatedAt > $1.value.updatedAt }
+                    .prefix(64).map { ($0.key, $0.value) }
+            )
+        }
+        guard let data = try? JSONEncoder().encode(cache) else { return }
+        try? data.write(to: scopeCacheURL, options: .atomic)
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: scopeCacheURL.path
+        )
+    }
+
+    private func loadScopeCache() -> [String: ScopeCacheEntry] {
+        guard let data = try? Data(contentsOf: scopeCacheURL), data.count <= 200_000,
+              let cache = try? JSONDecoder().decode(
+                  [String: ScopeCacheEntry].self, from: data
+              ) else {
+            return [:]
+        }
+        return cache
+    }
+
+    private var scopeCacheURL: URL {
+        rootURL.appendingPathComponent("probe-scopes.json")
+    }
+
+    /// 返回 nil 表示这一档探测超出预算，可以降级重试；仓库真的读不了才抛错。
+    private func statusFingerprintData(
+        _ worktree: URL,
+        scope: ProbeScope,
+        deadline: TimeInterval,
+        statusBudget: TimeInterval
+    ) throws -> Data? {
+        var data = Data("\(scope.rawValue)\u{0}".utf8)
+        if let statusArguments = scope.statusArguments {
+            guard let status = try gitStatus(
+                worktree,
+                statusArguments: statusArguments,
+                deadline: deadline,
+                statusBudget: statusBudget * scope.budgetScale
+            ) else {
+                return nil
+            }
+            data.append(status)
+            let fields = status.split(separator: 0, omittingEmptySubsequences: true)
+            guard fields.count <= 2_000 else { return nil }
+            var index = 0
+            while index < fields.count {
+                let field = fields[index]
+                guard field.count >= 4, field[field.startIndex + 2] == 32,
+                      let path = String(data: field.dropFirst(3), encoding: .utf8) else {
+                    throw HookError.limitExceeded
+                }
+                data.append(try fileMetadata(worktree.appendingPathComponent(path).path))
+                if field.prefix(2).contains(82) || field.prefix(2).contains(67) { index += 1 }
+                index += 1
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            }
         }
         var gitDirectory = worktree.appendingPathComponent(".git")
         var isDirectory: ObjCBool = false
@@ -257,7 +365,7 @@ public struct AgentHookRegistration {
         for path in ["HEAD", "index", "logs/HEAD"] {
             data.append(try fileMetadata(gitDirectory.appendingPathComponent(path).path))
         }
-        return digest(data)
+        return data
     }
 
     private func fileFingerprint(_ path: String) throws -> Data {
@@ -279,7 +387,12 @@ public struct AgentHookRegistration {
         return Data("\(info.st_mode):\(info.st_size):\(info.st_ino):\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec):\(info.st_ctimespec.tv_sec):\(info.st_ctimespec.tv_nsec)\u{0}".utf8)
     }
 
-    private func gitStatus(_ worktree: URL, deadline: TimeInterval) throws -> Data {
+    private func gitStatus(
+        _ worktree: URL,
+        statusArguments: [String],
+        deadline: TimeInterval,
+        statusBudget: TimeInterval
+    ) throws -> Data? {
         let outputURL = rootURL.appendingPathComponent(".hook-status-\(UUID().uuidString)")
         guard fileManager.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw HookError.unreadableTarget
@@ -289,7 +402,11 @@ public struct AgentHookRegistration {
         defer { try? output.close() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        // 沿用仓库自己的 fsmonitor / untrackedCache 配置：App 主刷新路径也这么跑，
+        // 关掉它们会让配了 fsmonitor 的大仓库慢上数倍，正好把探测拖过预算。
+        process.arguments = [
+            "--no-optional-locks", "status", "--porcelain=v1", "-z"
+        ] + statusArguments
         process.currentDirectoryURL = worktree
         // A hook's ambient Git variables must not redirect a probe into another repository.
         process.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"]
@@ -297,19 +414,19 @@ public struct AgentHookRegistration {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         try process.run()
-        let probeDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 0.5)
+        let probeDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + statusBudget)
         while process.isRunning {
             let size = (try? fileManager.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.intValue ?? 0
             if ProcessInfo.processInfo.systemUptime >= probeDeadline || size > 1_000_000 {
                 kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
-                throw HookError.limitExceeded
+                return nil
             }
             Thread.sleep(forTimeInterval: 0.005)
         }
         guard process.terminationStatus == 0 else { throw HookError.invalidRepository }
         let data = try Data(contentsOf: outputURL)
-        guard data.count <= 1_000_000 else { throw HookError.limitExceeded }
+        guard data.count <= 1_000_000 else { return nil }
         return data
     }
 
@@ -367,6 +484,40 @@ public struct AgentHookRegistration {
     private struct Baseline: Codable {
         let target: Target
         let fingerprint: String
+        let scope: ProbeScope?
+    }
+
+    private struct ScopeCacheEntry: Codable {
+        let scope: ProbeScope
+        let updatedAt: Date
+    }
+
+    /// 探测范围从大到小；PostToolUse 必须沿用基线记录的这一档，指纹才可比。
+    private enum ProbeScope: String, Codable, CaseIterable {
+        case untrackedAll
+        case trackedOnly
+        case trackedWithoutSubmodules
+        case gitMetadata
+
+        /// nil 表示这一档不跑 status，只看 .git 元数据。
+        var statusArguments: [String]? {
+            switch self {
+            case .untrackedAll: ["--untracked-files=all"]
+            case .trackedOnly: ["--untracked-files=no"]
+            case .trackedWithoutSubmodules: ["--untracked-files=no", "--ignore-submodules=all"]
+            case .gitMetadata: nil
+            }
+        }
+
+        /// 各档开销差别很大，预算按倍数给，避免便宜的档被贵的档的超时拖垮。
+        var budgetScale: Double {
+            switch self {
+            case .untrackedAll: 1.0
+            case .trackedOnly: 1.5
+            case .trackedWithoutSubmodules: 1.0
+            case .gitMetadata: 0
+            }
+        }
     }
 
     private struct Pending: Codable {

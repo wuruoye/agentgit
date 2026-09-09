@@ -135,7 +135,7 @@ final class AgentPluginConfigurator {
             }
             let current = try await Self.pluginList(
                 executableURL: executableURL,
-                includesAvailable: true
+                includesAvailable: false
             ).first(where: {
                 $0.pluginID == plugin.pluginID && $0.installed
             })
@@ -289,6 +289,10 @@ final class AgentPluginConfigurator {
         }
         return error.localizedDescription
     }
+
+    /// `plugin list --available` 会带上整份远程目录，条目数以千计，
+    /// 早先的 1 MB 上限已经装不下，超限会让启用集成直接失败。
+    private static let maximumCommandOutputBytes = 32 * 1_024 * 1_024
 
     private static func pluginListArguments(
         includesAvailable: Bool
@@ -594,7 +598,7 @@ final class AgentPluginConfigurator {
             let output = try await runner.run(
                 arguments: arguments,
                 workingDirectory: FileManager.default.homeDirectoryForCurrentUser,
-                maximumOutputBytes: 1 * 1_024 * 1_024,
+                maximumOutputBytes: Self.maximumCommandOutputBytes,
                 environment: commandEnvironment(
                     executableURL: executableURL,
                     homeURL: FileManager.default.homeDirectoryForCurrentUser,

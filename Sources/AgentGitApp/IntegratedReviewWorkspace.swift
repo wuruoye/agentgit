@@ -81,6 +81,7 @@ struct IntegratedReviewWorkspace: View {
     @State private var isLoadingDiffs = false
     @State private var diffLoadSequence: UInt64 = 0
     @State private var isApplyingMutation = false
+    @State private var isConfirmingDiscardAll = false
     @State private var mutationSequence: UInt64 = 0
     @State private var runningRemoteAction: GitRemoteAction?
     @State private var remoteOperationFeedback: RemoteOperationFeedback?
@@ -299,7 +300,14 @@ struct IntegratedReviewWorkspace: View {
                 workspaceSplitView
             }
         }
+        .confirmationDialog("Discard all uncommitted changes in this worktree?", isPresented: $isConfirmingDiscardAll) {
+            Button("Discard All", role: .destructive) { performAllChangesAction(.discard) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Includes staged, unstaged, and untracked files. Recovery copies and a staged patch will be saved in Trash.")
+        }
         .onChange(of: snapshot.id) {
+            isConfirmingDiscardAll = false
             resetWorkspace()
         }
         .onChange(of: stateKey) { previousKey, newKey in
@@ -1790,7 +1798,12 @@ struct IntegratedReviewWorkspace: View {
                     onExpandContext: expandContext,
                     onFileUtilityAction: performFileUtilityAction,
                     onFileAction: performFileAction,
-                    onSelectionAction: performSelectionAction
+                    onSelectionAction: performSelectionAction,
+                    canStashAll: !snapshot.worktree.isUnborn,
+                    onAllChangesAction: { action in
+                        if action == .discard { isConfirmingDiscardAll = true }
+                        else { performAllChangesAction(action) }
+                    }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -2082,6 +2095,33 @@ struct IntegratedReviewWorkspace: View {
             candidate = candidate.deletingLastPathComponent()
         }
         return candidate
+    }
+
+    private func performAllChangesAction(_ action: GitAllChangesAction) {
+        guard activeContext == .pending, allowsPendingMutations else { return }
+        mutationSequence &+= 1
+        let request = ReviewOperationRequest(worktreeID: snapshot.id, sequence: mutationSequence)
+        let worktree = snapshot.worktree
+        isApplyingMutation = true
+        Task {
+            var operationError: String?
+            var refreshError: String?
+            do {
+                try await model.applyAllChangesAction(action, worktree: worktree)
+            } catch let error as GitMutationRefreshError {
+                refreshError = error.description
+            } catch {
+                operationError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                refreshError = mutationRefreshFailureMessage(await model.refreshWorktree(id: worktree.id))
+            }
+            model.setBlockingGitRefreshError(refreshError, for: request.worktreeID)
+            guard reviewOperationRequestMatches(
+                currentWorktreeID: model.selectedWorktreeID,
+                currentSequence: mutationSequence, requested: request
+            ) else { return }
+            mutationError = operationError
+            isApplyingMutation = false
+        }
     }
 
     private func performFileAction(

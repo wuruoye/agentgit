@@ -1058,7 +1058,13 @@ func projectWorktreePresentation(
         }
         recentWorktrees.append(selected)
     }
-    let defaultWorktrees = pinned + recentWorktrees
+    // 有改动的 worktree 不受四条上限影响，也不能被选中项挤出折叠列表。
+    let retainedIDs = Set((pinned + recentWorktrees).map(\.id))
+    let defaultWorktrees = orderedWorktrees.filter {
+        retainedIDs.contains($0.id)
+            || $0.status.changedFileCount > 0
+            || !$0.diffStat.isEmpty
+    }
     return ProjectWorktreePresentation(
         visibleWorktrees: showsAll ? orderedWorktrees : defaultWorktrees,
         hiddenWorktreeCount: orderedWorktrees.count - defaultWorktrees.count

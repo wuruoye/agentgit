@@ -156,6 +156,28 @@ public enum GitMutationError: Error, Equatable, Sendable {
     case pathOutsideWorktree
 }
 
+public enum GitAllChangesAction: Sendable {
+    case stash, discard
+}
+
+public enum GitAllChangesError: LocalizedError {
+    case conflicts
+    case submoduleStash
+    public var errorDescription: String? {
+        switch self {
+        case .conflicts: "Resolve conflicts before using an all-changes action."
+        case .submoduleStash: "Git stash does not restore submodule changes. Handle those changes separately before Stash All."
+        }
+    }
+}
+
+public struct GitSubmoduleDiscardError: Error, CustomStringConvertible, Sendable {
+    public let path: String
+    public var description: String {
+        "Submodule \(path) still has unstaged changes after discard. Check its update configuration and target commit availability."
+    }
+}
+
 public enum GitHistoryLoadError: LocalizedError, Equatable, Sendable {
     case invalidOffset(Int)
     case invalidPageSize(Int)
@@ -1868,6 +1890,59 @@ public struct GitRepositoryService: Sendable {
         _ = try await runner.run(arguments: arguments, workingDirectory: worktree.rootURL)
     }
 
+    public func applyAllChangesAction(
+        _ action: GitAllChangesAction,
+        worktree: GitWorktree
+    ) async throws {
+        let status = try await loadStatus(for: worktree, submoduleScanMode: .allChanges)
+        guard !status.changes.isEmpty else { return }
+        guard !status.changes.contains(where: { $0.kind == .unmerged }) else {
+            throw GitAllChangesError.conflicts
+        }
+        if action == .stash {
+            guard !status.changes.contains(where: { $0.submoduleStatus != nil }) else {
+                throw GitAllChangesError.submoduleStash
+            }
+            _ = try await runner.run(
+                arguments: ["stash", "push", "--include-untracked", "--message", "AgentGit: Stash All"],
+                workingDirectory: worktree.rootURL
+            )
+            return
+        }
+
+        // Preserve the index diff as well as working files: staged content may differ from both HEAD and disk.
+        let recoveryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgentGit-All-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: recoveryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: recoveryURL) }
+        let stagedPatch = try await runner.run(
+            arguments: ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"],
+            workingDirectory: worktree.rootURL
+        )
+        try stagedPatch.write(to: recoveryURL.appendingPathComponent("staged.patch"))
+        _ = try discardRecoveryStore.preserve(
+            itemAt: recoveryURL, worktreeURL: worktree.rootURL,
+            relativePath: "AgentGit-All-Changes", kind: .selection, movesOriginal: false
+        )
+        for change in status.changes {
+            if change.submoduleStatus != nil {
+                try await preserveSubmoduleDiscard(
+                    worktree: worktree, change: change,
+                    submoduleURL: validatedSubmoduleDiscardURL(worktree: worktree, change: change)
+                )
+            } else {
+                try preserveDiscardedItemIfPresent(worktree: worktree, relativePath: change.path, kind: .file)
+            }
+        }
+        for change in status.changes where change.isStaged {
+            try await unstageFile(worktree: worktree, change: change)
+        }
+        let unstaged = try await loadStatus(for: worktree, submoduleScanMode: .allChanges)
+        for change in unstaged.changes {
+            try await discardFile(worktree: worktree, change: change)
+        }
+    }
+
     public func discardFile(worktree: GitWorktree, change: GitFileChange) async throws {
         if change.isUntracked {
             let target = try discardTargetURL(
@@ -1884,16 +1959,7 @@ public struct GitRepositoryService: Sendable {
             return
         }
         if let submoduleStatus = change.submoduleStatus {
-            let root = worktree.rootURL.standardizedFileURL
-            let target = root.appendingPathComponent(change.path).standardizedFileURL
-            guard target.path.hasPrefix(root.path + "/") else {
-                throw GitMutationError.pathOutsideWorktree
-            }
-            let resolvedRoot = root.resolvingSymlinksInPath()
-            let resolvedTarget = target.resolvingSymlinksInPath()
-            guard resolvedTarget.path.hasPrefix(resolvedRoot.path + "/") else {
-                throw GitMutationError.pathOutsideWorktree
-            }
+            let target = try validatedSubmoduleDiscardURL(worktree: worktree, change: change)
             try await preserveSubmoduleDiscard(
                 worktree: worktree,
                 change: change,
@@ -1907,16 +1973,22 @@ public struct GitRepositoryService: Sendable {
             }
             _ = try await runner.run(
                 arguments: [
+                    "-c", "submodule.recurse=false",
+                    "-c", "fetch.recurseSubmodules=false",
                     "submodule",
                     "update",
+                    "--init",
                     "--checkout",
                     "--force",
-                    "--recursive",
                     "--",
                     change.path
                 ],
                 workingDirectory: worktree.rootURL
             )
+            let refreshed = try await loadStatus(for: worktree, submoduleScanMode: .allChanges)
+            if refreshed.changes.contains(where: { $0.path == change.path && $0.isUnstaged }) {
+                throw GitSubmoduleDiscardError(path: change.path)
+            }
             return
         }
         try preserveDiscardedItemIfPresent(
@@ -2063,6 +2135,15 @@ public struct GitRepositoryService: Sendable {
             relativePath
         ).standardizedFileURL
         guard target.path.hasPrefix(root.path + "/") else {
+            throw GitMutationError.pathOutsideWorktree
+        }
+        return target
+    }
+
+    private func validatedSubmoduleDiscardURL(worktree: GitWorktree, change: GitFileChange) throws -> URL {
+        let target = try discardTargetURL(worktree: worktree, relativePath: change.path)
+        let resolvedRoot = worktree.rootURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard target.resolvingSymlinksInPath().path.hasPrefix(resolvedRoot.path + "/") else {
             throw GitMutationError.pathOutsideWorktree
         }
         return target

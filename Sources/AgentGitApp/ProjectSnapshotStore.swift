@@ -18,7 +18,7 @@ struct ProjectSnapshotCachePayload: Codable, Equatable, Sendable {
         self.eventID = eventID
         self.projects = projects
         self.completeProjectIDs = completeProjectIDs.intersection(
-            Set(projects.map(\.id))
+            Set(projects.filter { !$0.worktrees.isEmpty }.map(\.id))
         )
     }
 
@@ -40,7 +40,7 @@ struct ProjectSnapshotCachePayload: Codable, Equatable, Sendable {
             forKey: .projects
         )
         try Self.validateUniqueIdentities(in: projects)
-        let availableProjectIDs = Set(projects.map(\.id))
+        let availableProjectIDs = Set(projects.filter { !$0.worktrees.isEmpty }.map(\.id))
         let completeProjectIDs: Set<GitProject.ID>
         if storedVersion == 1 {
             completeProjectIDs = availableProjectIDs
@@ -163,10 +163,15 @@ actor ProjectSnapshotStore {
                 refreshedAt: current.refreshedAt
             )
         }
+        let fullyRetainedProjectIDs = Set(projects.compactMap { saved -> GitProject.ID? in
+            guard let current = currentByProjectID[saved.id] else { return saved.id }
+            return Set(saved.worktrees.map(\.id)) == Set(current.worktrees.map(\.id))
+                ? saved.id : nil
+        })
         let nextPayload = ProjectSnapshotCachePayload(
             eventID: eventID,
             projects: projects,
-            completeProjectIDs: completeProjectIDs
+            completeProjectIDs: completeProjectIDs.intersection(fullyRetainedProjectIDs)
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970

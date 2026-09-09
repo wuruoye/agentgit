@@ -103,6 +103,26 @@ final class AgentHookRegistrationTests: XCTestCase {
         XCTAssertEqual(try fixture.associations.list().count, 1)
     }
 
+    /// 超大仓库的探测会降到只看 .git 元数据这一档。降级后基线仍要能复算：
+    /// 看不见的改动不能误登记，索引变化必须照常登记。
+    func testDegradedProbeScopeKeepsBaselineComparable() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.forceProbeScope("gitMetadata")
+
+        let readOnly: [String: Any] = ["command": "./inspect.sh"]
+        try fixture.event("PreToolUse", input: readOnly)
+        try Data("dirty\n".utf8).write(to: fixture.repository.appendingPathComponent("tracked.txt"))
+        try fixture.event("PostToolUse", input: readOnly)
+        XCTAssertTrue(try fixture.associations.list().isEmpty)
+
+        let staged: [String: Any] = ["command": "git add -A"]
+        try fixture.event("PreToolUse", input: staged, call: "staged")
+        try fixture.git(["add", "."])
+        try fixture.event("PostToolUse", input: staged, call: "staged")
+        XCTAssertEqual(try fixture.associations.list().map(\.worktreePath), [fixture.repository.path])
+    }
+
     func testShellWithLiteralDirectoryTargetsLinkedWorktree() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -213,6 +233,14 @@ final class AgentHookRegistrationTests: XCTestCase {
             try process.run()
             process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, 0)
+        }
+
+        func forceProbeScope(_ scope: String) throws {
+            let cache = [repository.path: [
+                "scope": scope, "updatedAt": Date().timeIntervalSinceReferenceDate
+            ] as [String: Any]]
+            try JSONSerialization.data(withJSONObject: cache)
+                .write(to: data.appendingPathComponent("probe-scopes.json"))
         }
 
         func pendingCount() throws -> Int {

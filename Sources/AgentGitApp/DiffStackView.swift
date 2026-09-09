@@ -432,6 +432,8 @@ struct DiffStackView: NSViewRepresentable {
     let onFileUtilityAction: (String, DiffStackFileUtilityAction) -> Void
     let onFileAction: (String, GitPendingSelectionAction) -> Void
     let onSelectionAction: (String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void
+    var canStashAll = true
+    var onAllChangesAction: ((GitAllChangesAction) -> Void)? = nil
 
     func makeNSView(context: Context) -> DiffStackScrollView {
         let scrollView = DiffStackScrollView()
@@ -456,6 +458,8 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.onFileUtilityAction = onFileUtilityAction
         scrollView.onFileAction = onFileAction
         scrollView.onSelectionAction = onSelectionAction
+        scrollView.onAllChangesAction = onAllChangesAction
+        scrollView.canStashAll = canStashAll
         scrollView.bind(store: scrollStore, key: scrollKey)
         scrollView.isApplicationActive = isApplicationActive
         scrollView.loadingMessage = loadingMessage
@@ -520,6 +524,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     var onFileUtilityAction: ((String, DiffStackFileUtilityAction) -> Void)?
     var onFileAction: ((String, GitPendingSelectionAction) -> Void)?
     var onSelectionAction: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
+    var onAllChangesAction: ((GitAllChangesAction) -> Void)?
+    var canStashAll = true {
+        didSet { updateVisibleMutationAvailability() }
+    }
     var isApplicationActive = true {
         didSet {
             guard isApplicationActive != oldValue else {
@@ -857,6 +865,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .group(group, count):
             let cell = reusableCell(DiffGroupCellView.self, identifier: DiffGroupCellView.identifier)
             cell.update(group: group, count: count)
+            configureGroupActions(cell)
             return cell
         case let .folder(folder):
             let cell = reusableCell(
@@ -2109,6 +2118,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 )
             }
             stickyGroupHeader.isHidden = false
+            configureGroupActions(stickyGroupHeader)
         } else {
             stickyGroupID = nil
             stickyGroupHeader.isHidden = true
@@ -2798,7 +2808,15 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
     }
 
+    private func configureGroupActions(_ cell: DiffGroupCellView) {
+        cell.setActions(enabled: mutationActionsEnabled, canStash: canStashAll) { [weak self] action in
+            guard self?.mutationActionsEnabled == true else { return }
+            self?.onAllChangesAction?(action)
+        }
+    }
+
     private func updateVisibleMutationAvailability() {
+        configureGroupActions(stickyGroupHeader)
         stickyFileHeader.setMutationActionsEnabled(mutationActionsEnabled)
         let visibleRows = tableView.rows(in: contentView.bounds)
         guard visibleRows.location != NSNotFound else {
@@ -2813,7 +2831,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                   ) else {
                 continue
             }
-            if let fileCell = cell as? DiffFileCellView {
+            if let groupCell = cell as? DiffGroupCellView {
+                configureGroupActions(groupCell)
+            } else if let fileCell = cell as? DiffFileCellView {
                 fileCell.setMutationActionsEnabled(mutationActionsEnabled)
             } else if let hunkCell = cell as? DiffHunkCellView {
                 hunkCell.setMutationActionsEnabled(mutationActionsEnabled)
@@ -3709,6 +3729,9 @@ private final class DiffGroupCellView: NSTableCellView {
         selectable: false
     )
     private var groupID = ""
+    private let stashButton = NSButton(title: "Stash All", target: nil, action: nil)
+    private let discardButton = NSButton(title: "Discard All", target: nil, action: nil)
+    private var allChangesHandler: ((GitAllChangesAction) -> Void)?
 
     override var isFlipped: Bool { true }
 
@@ -3716,6 +3739,17 @@ private final class DiffGroupCellView: NSTableCellView {
         super.init(frame: frameRect)
         addSubview(chevron)
         addSubview(label)
+        for button in [stashButton, discardButton] {
+            button.bezelStyle = .inline
+            button.font = .systemFont(ofSize: 11)
+            button.target = self
+            button.isHidden = true
+            addSubview(button)
+        }
+        stashButton.action = #selector(stashAll)
+        discardButton.action = #selector(discardAll)
+        stashButton.toolTip = "Stash all staged, unstaged, and untracked files in this worktree"
+        discardButton.toolTip = "Discard all uncommitted changes in this worktree; saves recovery copies in Trash"
     }
 
     required init?(coder: NSCoder) {
@@ -3736,9 +3770,11 @@ private final class DiffGroupCellView: NSTableCellView {
         label.frame = NSRect(
             x: 36,
             y: (bounds.height - 16) / 2,
-            width: max(0, bounds.width - 43),
+            width: max(0, bounds.width - (groupID == "working" ? 223 : 43)),
             height: 16
         )
+        stashButton.frame = NSRect(x: bounds.width - 182, y: (bounds.height - 22) / 2, width: 80, height: 22)
+        discardButton.frame = NSRect(x: bounds.width - 98, y: (bounds.height - 22) / 2, width: 90, height: 22)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -3751,6 +3787,8 @@ private final class DiffGroupCellView: NSTableCellView {
 
     func update(group: DiffStackGroup, count: Int) {
         groupID = group.id
+        stashButton.isHidden = groupID != "working"
+        discardButton.isHidden = groupID != "working"
         chevron.image = disclosureImage(isExpanded: group.isExpanded)
         label.attributedStringValue = NSAttributedString(
             string: "\(group.title ?? "") · \(count)",
@@ -3768,6 +3806,15 @@ private final class DiffGroupCellView: NSTableCellView {
         needsLayout = true
         needsDisplay = true
     }
+
+    func setActions(enabled: Bool, canStash: Bool, handler: @escaping (GitAllChangesAction) -> Void) {
+        allChangesHandler = handler
+        stashButton.isEnabled = enabled && canStash
+        discardButton.isEnabled = enabled
+    }
+
+    @objc private func stashAll() { allChangesHandler?(.stash) }
+    @objc private func discardAll() { allChangesHandler?(.discard) }
 }
 
 private final class DiffFolderCellView: NSTableCellView {

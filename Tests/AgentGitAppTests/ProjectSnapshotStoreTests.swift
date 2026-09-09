@@ -37,6 +37,31 @@ final class ProjectSnapshotStoreTests: XCTestCase {
         )
     }
 
+    func testFailedInitialSnapshotDoesNotMarkProjectComplete() async throws {
+        let container = cacheContainer(name: "incomplete-initial")
+        defer { try? FileManager.default.removeItem(at: container) }
+        let fileURL = container.appendingPathComponent("snapshots.json")
+        let successful = makeProjectSnapshot()
+        let failedWorktree = GitWorktreeSnapshot(
+            worktree: try XCTUnwrap(successful.worktrees.first).worktree,
+            status: .clean, diffStat: .zero, lastActivityAt: .distantPast,
+            errorMessage: "status timed out", hasUsableState: false
+        )
+        let failed = GitProjectSnapshot(project: successful.project, worktrees: [failedWorktree], refreshedAt: Date())
+        let store = ProjectSnapshotStore(fileURL: fileURL)
+        try await store.save(projectIDs: [failed.id], snapshots: [failed], eventID: 1, completeProjectIDs: [failed.id])
+        let restored = try XCTUnwrap(ProjectSnapshotStore(fileURL: fileURL).initialPayload)
+        XCTAssertTrue(try XCTUnwrap(restored.projects.first).worktrees.isEmpty)
+        XCTAssertFalse(restored.completeProjectIDs.contains(failed.id))
+
+        // Older caches could persist an empty project with a complete marker.
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
+        legacy["completeProjectIDs"] = [failed.id]
+        try JSONSerialization.data(withJSONObject: legacy).write(to: fileURL)
+        let migrated = try XCTUnwrap(ProjectSnapshotStore(fileURL: fileURL).initialPayload)
+        XCTAssertFalse(migrated.completeProjectIDs.contains(failed.id))
+    }
+
     func testFailedRefreshKeepsLastSuccessfulWorktreeSnapshot() async throws {
         let container = cacheContainer(name: "preserve-success")
         let fileURL = container.appendingPathComponent("snapshots.json")

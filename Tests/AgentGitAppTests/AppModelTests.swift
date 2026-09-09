@@ -73,6 +73,27 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.isApplicationActive)
     }
 
+    func testBackgroundLaunchLoadsProjectsWhenActivated() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: container) }
+        try await initializeRepository(at: container, using: GitCommandRunner())
+        let suiteName = "AgentGitAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set([container.path], forKey: "agentgit.project-paths")
+        let model = AppModel(defaults: defaults)
+        defer { model.setApplicationActive(false) }
+        model.setApplicationActive(false)
+        await model.loadProjectsIfNeeded()
+        XCTAssertNil(model.projects.first?.snapshot)
+        model.setApplicationActive(true)
+        let deadline = Date().addingTimeInterval(5)
+        while model.projects.first?.snapshot == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(model.projects.first?.snapshot?.worktrees.count, 1)
+    }
+
     func testAgentPersistenceRepairRecoversBothCorruptStores() throws {
         let container = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
@@ -1434,7 +1455,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.projects.first?.errorMessage)
     }
 
-    func testProjectShowsFourActiveWorktreesAndFoldsInactiveOnes() {
+    func testProjectKeepsAllChangedWorktreesWhenFolded() {
         let now = Date(timeIntervalSince1970: 200_000)
         let project = GitProject(rootURL: URL(fileURLWithPath: "/projects/sample"))
         let worktrees = (0..<5).map { index in
@@ -1444,6 +1465,11 @@ final class AppModelTests: XCTestCase {
                 isDirty: true
             )
         } + [
+            makeWorktreeSnapshot(
+                name: "older-dirty",
+                activityAt: now.addingTimeInterval(-72 * 60 * 60),
+                isDirty: true
+            ),
             makeWorktreeSnapshot(
                 name: "inactive",
                 activityAt: now.addingTimeInterval(-48 * 60 * 60),
@@ -1462,8 +1488,8 @@ final class AppModelTests: XCTestCase {
             showsAll: false,
             now: now
         )
-        XCTAssertEqual(collapsed.visibleWorktrees.count, 4)
-        XCTAssertEqual(collapsed.hiddenWorktreeCount, 2)
+        XCTAssertEqual(Set(collapsed.visibleWorktrees.map(\.id)), Set(worktrees.dropLast().map(\.id)))
+        XCTAssertEqual(collapsed.hiddenWorktreeCount, 1)
         XCTAssertFalse(collapsed.visibleWorktrees.contains { $0.worktree.displayName == "inactive" })
 
         let selectedInactive = projectWorktreePresentation(
@@ -1472,7 +1498,7 @@ final class AppModelTests: XCTestCase {
             showsAll: false,
             now: now
         )
-        XCTAssertEqual(selectedInactive.visibleWorktrees.count, 4)
+        XCTAssertEqual(selectedInactive.visibleWorktrees.count, 7)
         XCTAssertTrue(selectedInactive.visibleWorktrees.contains { $0.id == worktrees.last?.id })
 
         let expanded = projectWorktreePresentation(
@@ -1481,7 +1507,7 @@ final class AppModelTests: XCTestCase {
             showsAll: true,
             now: now
         )
-        XCTAssertEqual(expanded.visibleWorktrees.count, 6)
+        XCTAssertEqual(expanded.visibleWorktrees.count, 7)
     }
 
     func testPinnedWorktreesStayFirstAndVisibleWhenCollapsed() {
@@ -1491,7 +1517,7 @@ final class AppModelTests: XCTestCase {
             makeWorktreeSnapshot(
                 name: "recent-\(index)",
                 activityAt: now.addingTimeInterval(TimeInterval(-index * 60)),
-                isDirty: true
+                isDirty: false
             )
         }
         // 两天没动过，折叠视图本来看不到它。

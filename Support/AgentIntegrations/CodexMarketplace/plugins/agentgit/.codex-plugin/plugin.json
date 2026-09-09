@@ -1,6 +1,6 @@
 {
   "name": "agentgit",
-  "version": "0.1.0+codex.20260907085811",
+  "version": "0.1.0+codex.20260908162500",
   "description": "Link Codex sessions to the Git worktrees they modify.",
   "author": {
     "name": "AgentGit"
@@ -12,6 +12,7 @@
     "hooks"
   ],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "AgentGit",
     "shortDescription": "Link Codex sessions to Git worktrees",
