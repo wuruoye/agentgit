@@ -1834,6 +1834,32 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertTrue(labels.contains { $0.contains("Sample.swift") })
     }
 
+    func testRepeatedFileFocusCommandsReturnToFileAfterScrolling() throws {
+        let scrollView = makeScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 100)
+        let group = makeGroup(includesSecondHunk: true)
+        let fileID = try XCTUnwrap(group.files.first?.id)
+        scrollView.display(groups: [group], layout: .unified, scrollTarget: fileID)
+        scrollView.layoutSubtreeIfNeeded()
+        let fileOffset = scrollView.contentView.bounds.minY
+
+        for id: UInt64 in [1, 2] {
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: fileOffset + 100))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            XCTAssertGreaterThan(scrollView.contentView.bounds.minY, fileOffset)
+
+            scrollView.perform(DiffStackCommand(id: id, action: .focusFile(fileID)))
+            XCTAssertEqual(scrollView.contentView.bounds.minY, fileOffset, accuracy: 0.5)
+
+            // 普通视图刷新不得重新执行已完成的点击请求。
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: fileOffset + 100))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            scrollView.display(groups: [group], layout: .unified, scrollTarget: fileID)
+            scrollView.perform(DiffStackCommand(id: id, action: .focusFile(fileID)))
+            XCTAssertGreaterThan(scrollView.contentView.bounds.minY, fileOffset)
+        }
+    }
+
     func testHunkNavigationCommandMovesTheSameWayAsTab() throws {
         let scrollView = makeScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 100)

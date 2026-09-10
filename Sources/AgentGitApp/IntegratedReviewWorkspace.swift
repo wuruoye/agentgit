@@ -44,7 +44,6 @@ struct IntegratedReviewWorkspace: View {
     @State private var selectedReviewDocument: ReviewDocumentSelection = .summary
     /// 空表示跟随上下文默认值：看 commit 时展开，看工作区改动时没有这块。
     @State private var contextMessageExpansionOverride: Bool?
-    @State private var openReviewFileIDs: [String] = []
     @State private var review = ReviewState()
     @State private var navigatorSelection: NavigatorSelection?
     @State private var navigatorTreeCache = NavigatorTreeCache()
@@ -344,7 +343,6 @@ struct IntegratedReviewWorkspace: View {
             isLoadingDiffs = false
             selectedReviewDocument = .summary
             contextMessageExpansionOverride = nil
-            openReviewFileIDs = []
             collapsedDiffGroupIDs = newKey.context == .pending ? ["staged"] : []
             diffCommand = nil
         }
@@ -1147,7 +1145,16 @@ struct IntegratedReviewWorkspace: View {
                     isExpanded: expandedFolderIDs.contains(id)
                 )
                 .padding(.leading, CGFloat(row.depth) * 13)
+                .contentShape(Rectangle())
                 .tag(NavigatorSelection.folder(id))
+                .simultaneousGesture(TapGesture().onEnded {
+                    navigatorSelection = .folder(id)
+                    isFilesNavigatorFocused = true
+                    guard review.filterText.isEmpty else {
+                        return
+                    }
+                    toggleNavigatorFolder(id)
+                })
             case let .file(item):
                 let mutationMode = primaryPendingMutationMode(
                     context: activeContext,
@@ -1164,13 +1171,12 @@ struct IntegratedReviewWorkspace: View {
                     showsPathDetail: false
                 )
                 .padding(.leading, CGFloat(row.depth) * 13)
+                .contentShape(Rectangle())
                 .tag(NavigatorSelection.file(item.id.stackID))
-                .onTapGesture(count: 2) {
-                    performFileUtilityAction(
-                        fileID: item.id.stackID,
-                        action: .openFile
-                    )
-                }
+                .simultaneousGesture(TapGesture().onEnded {
+                    isFilesNavigatorFocused = true
+                    focusFileFromNavigator(item.id.stackID)
+                })
                 .contextMenu {
                     fileUtilityMenu(for: item)
                 }
@@ -1178,7 +1184,7 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    /// Files 只负责定位：选中即滚动到 Review 流里的那个文件。
+    /// 键盘选择也打开文件；鼠标点击另行处理，确保重复点击仍能定位。
     private var navigatorSelectionBinding: Binding<NavigatorSelection?> {
         Binding(
             get: { navigatorSelection },
@@ -1190,11 +1196,8 @@ struct IntegratedReviewWorkspace: View {
                 switch requestedSelection {
                 case let .file(fileID):
                     focusFileFromNavigator(fileID)
-                case let .folder(folderID):
-                    guard review.filterText.isEmpty else {
-                        return
-                    }
-                    toggleNavigatorFolder(folderID)
+                case .folder:
+                    break
                 case nil:
                     focusFileFromNavigator(nil, expandsFile: false)
                 }
@@ -1217,6 +1220,11 @@ struct IntegratedReviewWorkspace: View {
         navigatorSelection = fileID.map(NavigatorSelection.file)
         if expandsFile, let fileID {
             openReviewDocument(fileID)
+            diffCommandSequence &+= 1
+            diffCommand = DiffStackCommand(
+                id: diffCommandSequence,
+                action: .focusFile(fileID)
+            )
         }
         if expandsFile,
            let fileID,
@@ -1231,22 +1239,11 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func openReviewDocument(_ fileID: String) {
-        if !openReviewFileIDs.contains(fileID) {
-            openReviewFileIDs.append(fileID)
-        }
         selectedReviewDocument = .file(fileID)
-    }
-
-    private func closeReviewDocument(_ fileID: String) {
-        openReviewFileIDs.removeAll { $0 == fileID }
-        if selectedReviewDocument == .file(fileID) {
-            selectedReviewDocument = .summary
-        }
     }
 
     private func synchronizeReviewDocuments() {
         let validFileIDs = Set(currentFileItems.map { $0.id.stackID })
-        openReviewFileIDs.removeAll { !validFileIDs.contains($0) }
         if case let .file(fileID) = selectedReviewDocument,
            !validFileIDs.contains(fileID) {
             selectedReviewDocument = .summary
@@ -1310,10 +1307,6 @@ struct IntegratedReviewWorkspace: View {
 
     private var reviewPane: some View {
         VStack(spacing: 0) {
-            if activeContext != .pending || !openReviewFileIDs.isEmpty {
-                reviewDocumentTabBar
-                Divider()
-            }
             reviewToolbar
             Divider()
             if selectedReviewDocument == .summary, isContextMessageExpanded {
@@ -1520,29 +1513,6 @@ struct IntegratedReviewWorkspace: View {
         diffCommand = DiffStackCommand(
             id: diffCommandSequence,
             action: .moveHunk(offset)
-        )
-    }
-
-    private var reviewDocumentTabBar: some View {
-        ReviewDocumentTabBar(
-            selection: selectedReviewDocument,
-            files: openReviewFileIDs.compactMap { fileID in
-                currentFileItems.first(where: { $0.id.stackID == fileID }).map {
-                    ReviewDocumentFile(
-                        id: fileID,
-                        title: ($0.change.path as NSString).lastPathComponent,
-                        path: $0.change.path
-                    )
-                }
-            },
-            selectSummary: {
-                selectedReviewDocument = .summary
-            },
-            selectFile: { fileID in
-                selectedReviewDocument = .file(fileID)
-                focusFileFromNavigator(fileID)
-            },
-            closeFile: closeReviewDocument
         )
     }
 
@@ -2026,13 +1996,12 @@ struct IntegratedReviewWorkspace: View {
         fileID: String,
         action: DiffStackFileUtilityAction
     ) {
-        // 开标签不需要工作区里真的存在这个文件，删除的文件也应该能单独摊开来看，
-        // 所以放在下面那道 workingFileURL 判断之前。
-        if action == .openInTab {
+        // 删除的文件也能查看 diff，无需工作区文件存在。
+        if action == .openInReview {
             guard currentFileItems.contains(where: { $0.id.stackID == fileID }) else {
                 return
             }
-            openReviewDocument(fileID)
+            focusFileFromNavigator(fileID)
             return
         }
         guard let item = currentFileItems.first(where: { $0.id.stackID == fileID }),
@@ -2040,7 +2009,7 @@ struct IntegratedReviewWorkspace: View {
             return
         }
         switch action {
-        case .openInTab:
+        case .openInReview:
             return
         case .openFile:
             guard existingWorkingFileURL(for: item) != nil else {
@@ -4863,12 +4832,6 @@ enum ReviewDocumentSelection: Hashable {
     case file(String)
 }
 
-struct ReviewDocumentFile: Identifiable, Hashable {
-    let id: String
-    let title: String
-    let path: String
-}
-
 func normalizedOverviewSelection(
     previous: Set<IntegratedOverviewSelection>,
     current: Set<IntegratedOverviewSelection>
@@ -6522,103 +6485,6 @@ private struct ReviewLayoutControls: View {
     }
 }
 
-private struct ReviewDocumentTabBar: View {
-    let selection: ReviewDocumentSelection
-    let files: [ReviewDocumentFile]
-    let selectSummary: () -> Void
-    let selectFile: (String) -> Void
-    let closeFile: (String) -> Void
-    @State private var hoveredFileID: String?
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Button(action: selectSummary) {
-                Text("Summary")
-                    .font(.system(size: 12, weight: .regular))
-                    .frame(width: 100, height: 32)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(tabBackground(isSelected: selection == .summary))
-            .accessibilityAddTraits(selection == .summary ? .isSelected : [])
-
-            Divider()
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(files) { file in
-                        let isSelected = selection == .file(file.id)
-                        let tabWidth = documentTabWidth(file.title)
-                        HStack(spacing: 0) {
-                            Button {
-                                selectFile(file.id)
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Text(file.title)
-                                        .font(.system(size: 12, weight: .regular))
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                    Spacer(minLength: 2)
-                                }
-                                .padding(.leading, 9)
-                                .frame(width: tabWidth - 24, height: 32)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(file.title)
-                            .accessibilityHint("Show file review")
-                            .accessibilityAddTraits(isSelected ? .isSelected : [])
-
-                            Button {
-                                closeFile(file.id)
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 8, weight: .semibold))
-                                    .frame(width: 24, height: 32)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.tertiary)
-                            .opacity(
-                                isSelected || hoveredFileID == file.id ? 1 : 0
-                            )
-                            .accessibilityLabel("Close \(file.title)")
-                        }
-                        .frame(width: tabWidth, height: 32)
-                        .background(tabBackground(isSelected: isSelected))
-                        .overlay(alignment: .trailing) {
-                            Divider()
-                        }
-                        .help(file.path)
-                        .onHover { isHovered in
-                            if isHovered {
-                                hoveredFileID = file.id
-                            } else if hoveredFileID == file.id {
-                                hoveredFileID = nil
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(minLength: 8)
-        }
-        .frame(height: 32)
-        .background(Color(nsColor: AgentGitPalette.reviewTabBarBackground))
-    }
-
-    private func tabBackground(isSelected: Bool) -> Color {
-        isSelected ? Color(nsColor: AgentGitPalette.canvas) : Color.clear
-    }
-
-    private func documentTabWidth(_ title: String) -> CGFloat {
-        let textWidth = (title as NSString).size(
-            withAttributes: [.font: NSFont.systemFont(ofSize: 12)]
-        ).width
-        return min(190, max(100, ceil(textWidth) + 48))
-    }
-
-}
 
 private struct IntegratedFilterField: View {
     let placeholder: String

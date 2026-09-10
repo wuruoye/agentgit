@@ -38,7 +38,7 @@ enum DiffStackMutationMode: Hashable {
 }
 
 enum DiffStackFileUtilityAction: Hashable {
-    case openInTab
+    case openInReview
     case openFile
     case openInVisualStudioCode
     case revealInFinder
@@ -399,6 +399,7 @@ private struct PendingDiffSummaryHeader: View {
 
 struct DiffStackCommand: Equatable {
     enum Action: Equatable {
+        case focusFile(String)
         case requestFileDiscard(String)
         case moveHunk(Int)
     }
@@ -702,6 +703,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         appliedCommandID = command.id
         switch command.action {
+        case let .focusFile(fileID):
+            pendingRestoreOffset = nil
+            pendingCodeAnchor = nil
+            pendingHunkAnchor = nil
+            scroll(toFileID: fileID)
         case let .requestFileDiscard(fileID):
             _ = requestFileDiscard(fileID: fileID)
         case let .moveHunk(offset):
@@ -2338,11 +2344,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
         switch rows[clickedRow] {
         case let .file(file):
-            // Review 的文件标签原来只能从 Files 导航打开，Summary 里看到一个文件想单独摊开
-            // 没有入口。放在菜单第一项，和下面几条“用别的程序打开”区分开。
             addMenuItem(
-                "Open in Tab",
-                command: .fileUtility(file.id, .openInTab),
+                "Open in Review",
+                command: .fileUtility(file.id, .openInReview),
                 to: menu
             )
             menu.addItem(.separator())
