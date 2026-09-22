@@ -286,6 +286,20 @@ private final class ProcessPipeCapture: @unchecked Sendable {
 }
 
 public struct GitCommandRunner: Sendable {
+    /// 从 Dock/Finder 启动时 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，git hook 和 LFS 过滤器找不到 Homebrew 装的 git-lfs。
+    // ponytail: 只补 Homebrew 默认目录；工具装在其他位置时再改为读取 login shell 的 PATH。
+    static let baseEnvironment: [String: String] = {
+        var environment = ProcessInfo.processInfo.environment
+        var paths = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            .split(separator: ":")
+            .map(String.init)
+        for directory in ["/opt/homebrew/bin", "/usr/local/bin"] where !paths.contains(directory) {
+            paths.append(directory)
+        }
+        environment["PATH"] = paths.joined(separator: ":")
+        return environment
+    }()
+
     private let executableURL: URL
 
     public init(executableURL: URL = URL(fileURLWithPath: "/usr/bin/git")) {
@@ -325,11 +339,9 @@ public struct GitCommandRunner: Sendable {
         process.standardOutput = stdoutCapture.pipe
         process.standardError = stderrCapture.pipe
         process.standardInput = stdinPipe ?? nullInputHandle
-        if !environment.isEmpty {
-            var mergedEnvironment = ProcessInfo.processInfo.environment
-            mergedEnvironment.merge(environment) { _, configured in configured }
-            process.environment = mergedEnvironment
-        }
+        var processEnvironment = Self.baseEnvironment
+        processEnvironment.merge(environment) { _, configured in configured }
+        process.environment = processEnvironment
 
         let handle = GitProcessHandle()
         let terminationWaiter = ProcessTerminationWaiter()
