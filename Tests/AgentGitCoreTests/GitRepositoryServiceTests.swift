@@ -3,6 +3,52 @@ import XCTest
 @testable import AgentGitCore
 
 final class GitRepositoryServiceTests: XCTestCase {
+    func testFileActionsTreatPathspecCharactersAsLiteralNames() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let repository = container.appendingPathComponent("repository")
+        let recovery = container.appendingPathComponent("recovery")
+        try await makeRepository(at: repository)
+        let runner = GitCommandRunner()
+        let names = ["*.txt", "other.txt", ":(glob)*.txt"]
+        for name in names {
+            try Data("before \(name)\n".utf8).write(to: repository.appendingPathComponent(name))
+        }
+        _ = try await runner.run(arguments: ["add", "."], workingDirectory: repository)
+        _ = try await runner.run(arguments: ["commit", "-m", "Add literal path fixtures"], workingDirectory: repository)
+        for name in names {
+            try Data("after \(name)\n".utf8).write(to: repository.appendingPathComponent(name))
+        }
+        let service = GitRepositoryService(
+            runner: runner,
+            discardRecoveryStore: .init(destination: .directory(recovery))
+        )
+        let project = try await service.loadProject(at: repository)
+        let snapshot = try XCTUnwrap(project.worktrees.first)
+        for name in [names[0], names[2]] {
+            let change = try XCTUnwrap(snapshot.status.changes.first { $0.path == name })
+            let diff = try await service.loadDiff(worktree: snapshot.worktree, change: change, scope: .working)
+            XCTAssertEqual(diff.hunks.flatMap(\.lines).filter { $0.kind == .addition }.map(\.content), ["after \(name)"])
+            try await service.stageFile(worktree: snapshot.worktree, change: change)
+            let staged = try await runner.run(arguments: ["diff", "--cached", "--name-only", "-z"], workingDirectory: repository)
+            XCTAssertEqual(staged, Data((name + "\0").utf8))
+            _ = try await runner.run(arguments: ["add", "--", "other.txt"], workingDirectory: repository)
+            try await service.unstageFile(worktree: snapshot.worktree, change: change)
+            let remaining = try await runner.run(arguments: ["diff", "--cached", "--name-only", "-z"], workingDirectory: repository)
+            XCTAssertEqual(remaining, Data("other.txt\0".utf8))
+            _ = try await runner.run(arguments: ["reset", "-q", "HEAD", "--"], workingDirectory: repository)
+            try await service.discardFile(worktree: snapshot.worktree, change: change)
+            XCTAssertEqual(try String(contentsOf: repository.appendingPathComponent(name), encoding: .utf8), "before \(name)\n")
+            XCTAssertEqual(try String(contentsOf: repository.appendingPathComponent("other.txt"), encoding: .utf8), "after other.txt\n")
+        }
+        let recoveredURLs = try XCTUnwrap(FileManager.default.enumerator(at: recovery, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+        for name in [names[0], names[2]] {
+            let recovered = try XCTUnwrap(recoveredURLs.first { $0.lastPathComponent == name })
+            XCTAssertEqual(try String(contentsOf: recovered, encoding: .utf8), "after \(name)\n")
+        }
+    }
+
     func testDiscardAllHandlesStagedRenameAndNewFiles() async throws {
         let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: container) }

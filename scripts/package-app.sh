@@ -30,6 +30,7 @@ if [[ "${NOTARIZE}" == true ]]; then
     fi
 fi
 
+mkdir -p "${PROJECT_DIR}/.build/release"
 VERIFY_DIR="$(mktemp -d "${PROJECT_DIR}/.build/release/verify.XXXXXX")"
 
 cleanup() {

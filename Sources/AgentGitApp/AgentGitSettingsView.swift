@@ -474,7 +474,7 @@ struct AgentGitSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             settingsCardHeading(
                 "Worktree Creator",
-                detail: "A global git hook records which Claude or Codex session ran `git worktree add`.",
+                detail: "A global git hook records which Claude or Codex session ran `git worktree add`. Requires Git 2.54 or later.",
                 image: "arrow.triangle.branch"
             )
 

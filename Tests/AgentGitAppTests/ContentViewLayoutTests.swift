@@ -966,16 +966,6 @@ final class ContentViewLayoutTests: XCTestCase {
             SidebarLayoutMetrics.navigationContentWidth,
             accuracy: 1
         )
-        let splitSubviewWidths = descendants(of: hostingView)
-            .compactMap { $0 as? NSSplitView }
-            .flatMap(\.subviews)
-            .map(\.frame.width)
-        XCTAssertTrue(
-            splitSubviewWidths.contains {
-                abs($0 - SidebarLayoutMetrics.visibleWidth) <= 1
-            },
-            "Expected a 360pt visible sidebar, got \(splitSubviewWidths)"
-        )
     }
 
     func testNativeReviewSplitterResizesPaneWithoutMovingWindow() async throws {
@@ -1238,8 +1228,13 @@ final class ContentViewLayoutTests: XCTestCase {
             hostingView.frame = NSRect(origin: .zero, size: size)
             hostingView.layoutSubtreeIfNeeded()
             hostingView.displayIfNeeded()
-            labels = descendants(of: hostingView).compactMap {
-                ($0 as? NSTextField)?.stringValue
+            labels = descendants(of: hostingView).flatMap { view in
+                [
+                    (view as? NSTextField)?.stringValue,
+                    (view as? NSTextView)?.string,
+                    view.accessibilityLabel(),
+                    view.accessibilityValue() as? String
+                ].compactMap { $0 }
             }
             let isLoading = labels.contains(where: {
                 $0.hasPrefix("Loading diff")

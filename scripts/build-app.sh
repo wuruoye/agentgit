@@ -33,9 +33,8 @@ install -m 755 "${BIN_DIR}/AgentGitApp" "${CONTENTS_DIR}/MacOS/AgentGitApp"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
 install -m 644 "${ICON_PATH}" "${RESOURCES_DIR}/AgentGit.icns"
 /usr/bin/ditto "${BIN_DIR}/AgentGit_AgentGitApp.bundle" "${RESOURCES_DIR}/AgentGit_AgentGitApp.bundle"
-# ad-hoc 签名没有稳定身份，每次重建都会让 TCC 重新弹“文稿”授权并挂起 git 子进程；
-# 用固定开发证书签名让授权跨构建保留。
-SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:-Apple Development: Example (TEAMID)}"
+# 默认使用不依赖证书的 ad-hoc 签名；本机固定证书可让 TCC 授权跨构建保留。
+SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:--}"
 sign_target() {
     local target="$1"
     if [[ "${CONFIGURATION}" == "release" ]]; then

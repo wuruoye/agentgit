@@ -297,6 +297,9 @@ public struct GitCommandRunner: Sendable {
             paths.append(directory)
         }
         environment["PATH"] = paths.joined(separator: ":")
+        for name in ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"] {
+            environment[name] = nil
+        }
         // AgentGit 自己执行的 git 不代表任何 agent 会话。从 agent 终端启动或在 agent 会话里跑测试时
         // 会继承这些变量，全局 worktree 创建者 hook 会把 AgentGit 的操作记到那个会话名下。
         for name in ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID", "CODEX_THREAD_ID"] {
@@ -346,6 +349,11 @@ public struct GitCommandRunner: Sendable {
         process.standardInput = stdinPipe ?? nullInputHandle
         var processEnvironment = Self.baseEnvironment
         processEnvironment.merge(environment) { _, configured in configured }
+        // `--` 后是实际文件名。worktree 接受目录路径；stash 和 check-ignore 不使用此模式。
+        if let separator = arguments.firstIndex(of: "--"),
+           !arguments[..<separator].contains("worktree") {
+            processEnvironment["GIT_LITERAL_PATHSPECS"] = "1"
+        }
         process.environment = processEnvironment
 
         let handle = GitProcessHandle()

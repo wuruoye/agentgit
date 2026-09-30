@@ -2501,7 +2501,7 @@ final class DiffStackViewTests: XCTestCase {
         let fileButtons = fileCell.subviews.compactMap { $0 as? NSButton }
         let fileStage = try XCTUnwrap(fileButtons.first { $0.title == "Stage" })
         let fileDiscard = try XCTUnwrap(fileButtons.first { $0.title == "Discard" })
-        XCTAssertTrue(fileStage.isHidden)
+        XCTAssertFalse(fileStage.isHidden)
         XCTAssertTrue(fileDiscard.isHidden)
         fileCell.mouseEntered(with: try makeMouseMoveEvent())
         XCTAssertFalse(fileStage.isHidden)

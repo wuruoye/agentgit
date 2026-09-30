@@ -2,6 +2,8 @@
 
 状态：原生 macOS 开发版本，可用于日常 worktree review。
 
+本项目采用 [MIT License](LICENSE)。
+
 AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它面向同时使用
 多个 worktree 的开发方式，把代码审阅体验和本地性能放在首位。
 
@@ -28,6 +30,8 @@ AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它
   AppKit 虚拟列表绘制。窗口最小尺寸为 `1040×680`，项目侧栏和 Review 导航可以拖动调宽。
 
 ## 本地运行
+
+运行需要 macOS 14 或更新版本，以及 Xcode Command Line Tools。编译需要 Swift 6.2 或更新版本。
 
 ```bash
 swift test
@@ -69,8 +73,12 @@ scripts/package-app.sh --notarize
 公证模式会等待 Apple 返回终态，把 ticket staple 到 `.app`，重新生成最终 zip 和 SHA-256，
 再验证解压后的签名、staple ticket 与 Gatekeeper。凭据只从 Keychain profile 读取。
 
-本地默认使用开发证书签名；需要改用其它证书时设置
-`AGENTGIT_SIGNING_IDENTITY`。
+本地默认使用不依赖证书的 ad-hoc 签名。重新构建后，macOS 可能重新请求目录访问权限。
+需要让权限跨构建保留时，可设置自己的固定开发证书：
+
+```bash
+AGENTGIT_SIGNING_IDENTITY='Apple Development: Example (TEAMID)' scripts/install-local.sh
+```
 
 ## 产品主路径
 
@@ -406,19 +414,22 @@ Settings → Agents 的 `Install Hook` 把脚本写到
 和仓库自带的 hook（如 git-lfs）一起运行，不改 `.git/hooks` 或 `core.hooksPath`；
 `Remove Hook` 删除 `hook.agentgit` 配置段。
 
+此功能需要 `/usr/bin/git` 支持 Git 2.54 的配置式 hook；不支持时安装会显示升级提示。
+可通过更新 Xcode Command Line Tools 升级系统 Git，其他 Git 客户端功能仍可使用。
+
 创建者记录由 AgentGit 保存在 `~/Library/Application Support/AgentGit/worktree-creators/`，
 每个 worktree 一个 JSON 文件，文件名是 worktree 路径的 SHA-256，同一路径后写的覆盖先写的；
 AgentGit 不往仓库的 `.git` 里写东西：
 
 ```json
 {
-  "created_at": "2026-09-29T12:00:00Z",
+  "created_at": "2026-01-01T00:00:00Z",
   "host_session_id": "local_11111111-1111-4111-8111-111111111111",
   "provider": "claude",
   "session_id": "22222222-2222-4222-8222-222222222222",
   "source": "git-hook",
-  "title": "agentgit agent 绑定能力",
-  "worktree_path": "/Users/developer/Documents/github/agentgit/.claude/worktrees/creator"
+  "title": "Example session",
+  "worktree_path": "/Users/developer/projects/agentgit/.claude/worktrees/example"
 }
 ```
 

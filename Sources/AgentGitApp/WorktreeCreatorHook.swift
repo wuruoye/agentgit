@@ -6,6 +6,13 @@ import Foundation
 /// 把运行这条命令的 agent 会话记到 AgentGit 的 worktree 创建者目录。配置式 hook 和仓库自带的
 /// hook（如 git-lfs）同时运行，不占用 `.git/hooks` 或 `core.hooksPath`。
 enum WorktreeCreatorHook {
+    enum InstallationError: Error, CustomStringConvertible {
+        case unsupportedGit
+
+        var description: String {
+            "Worktree Creator requires Git 2.54 or later with configuration-based hooks. Upgrade /usr/bin/git through Xcode Command Line Tools."
+        }
+    }
     // post-checkout 参数：旧 HEAD、新 HEAD、是否切分支。新建 worktree 时旧 HEAD 全零；
     // 只有 linked worktree 的 git 目录里有 commondir，clone 出来的主 checkout 不记录。
     // Claude 的 Bash 子进程有 CLAUDE_CODE_SESSION_ID；EnterWorktree 由 claude 进程直接调 git，
@@ -86,8 +93,21 @@ enum WorktreeCreatorHook {
         "'" + scriptURL.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    static func supportsConfiguredHooks(using runner: GitCommandRunner = Self.runner) async throws -> Bool {
+        let data = try await runner.run(
+            arguments: ["--no-pager", "help", "--config"],
+            workingDirectory: homeURL,
+            maximumOutputBytes: 128 * 1_024,
+            timeout: .seconds(15)
+        )
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").contains {
+            $0.hasPrefix("hook.") && $0.hasSuffix(".event")
+        }
+    }
+
     static func isInstalled() async -> Bool {
-        guard let scriptURL = try? scriptURL,
+        guard (try? await supportsConfiguredHooks()) == true,
+              let scriptURL = try? scriptURL,
               FileManager.default.isExecutableFile(atPath: scriptURL.path),
               let data = try? await runner.run(
                   arguments: ["config", "--global", "--get", "hook.agentgit.command"],
@@ -99,7 +119,10 @@ enum WorktreeCreatorHook {
             .trimmingCharacters(in: .newlines) == command(for: scriptURL)
     }
 
-    static func install() async throws {
+    static func install(using runner: GitCommandRunner = Self.runner) async throws {
+        guard try await supportsConfiguredHooks(using: runner) else {
+            throw InstallationError.unsupportedGit
+        }
         let scriptURL = try scriptURL
         try writeScript(to: scriptURL)
         _ = try await runner.run(

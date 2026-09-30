@@ -6,9 +6,25 @@ import XCTest
 @testable import AgentGitApp
 
 final class WorktreeCreatorHookTests: XCTestCase {
+    func testInstallationRejectsGitWithoutConfiguredHooks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("git")
+        try Data("#!/bin/sh\nprintf '%s\\n' 'core.hooksPath'\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        do {
+            try await WorktreeCreatorHook.install(using: GitCommandRunner(executableURL: executable))
+            XCTFail("Expected unsupported Git to be rejected before installation")
+        } catch WorktreeCreatorHook.InstallationError.unsupportedGit {
+        }
+    }
+
     /// 真实 `git worktree add` 触发安装的脚本，把创建者写进 AgentGit 的记录目录并发通知；
     /// 没有 agent 会话变量的新 worktree 和普通分支切换都不记录。
     func testWorktreeAddRecordsCreatingSession() async throws {
+        let supportsConfiguredHooks = try await WorktreeCreatorHook.supportsConfiguredHooks()
+        try XCTSkipUnless(supportsConfiguredHooks, "Requires configuration-based hooks")
         let fixture = try await Fixture.make()
         defer { fixture.dispose() }
         let home = fixture.container.appendingPathComponent("home", isDirectory: true)

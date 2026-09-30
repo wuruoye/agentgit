@@ -1616,9 +1616,9 @@ final class AppModelTests: XCTestCase {
             )
         }
         let worktrees = [
-            worktree("/Users/developer/Documents/github/agentgit"),
+            worktree("/Users/developer/projects/github/agentgit"),
             worktree("/Users/developer/.codex/worktrees/worktree-test/agentgit"),
-            worktree("/Users/developer/Documents/github/agentgit-feature")
+            worktree("/Users/developer/projects/github/agentgit-feature")
         ]
 
         XCTAssertEqual(
