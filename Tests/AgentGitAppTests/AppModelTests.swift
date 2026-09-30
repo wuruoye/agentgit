@@ -1568,6 +1568,41 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testSelectingAChangedWorktreeKeepsOtherRowsVisible() {
+        let now = Date(timeIntervalSince1970: 200_000)
+        let recent = (0..<4).map { index in
+            makeWorktreeSnapshot(
+                name: "recent-\(index)",
+                activityAt: now.addingTimeInterval(TimeInterval(-index * 60)),
+                isDirty: false
+            )
+        }
+        // 有改动但活动时间排在最近四个之后，折叠时靠“有改动”显示。
+        let olderDirty = makeWorktreeSnapshot(
+            name: "older-dirty",
+            activityAt: now.addingTimeInterval(-3 * 60 * 60),
+            isDirty: true
+        )
+        let snapshot = GitProjectSnapshot(
+            project: GitProject(rootURL: URL(fileURLWithPath: "/projects/selection")),
+            worktrees: recent + [olderDirty],
+            refreshedAt: now
+        )
+        func visibleIDs(selecting id: GitWorktreeSnapshot.ID?) -> Set<GitWorktreeSnapshot.ID> {
+            Set(projectWorktreePresentation(
+                snapshot: snapshot,
+                selectedWorktreeID: id,
+                showsAll: false,
+                now: now
+            ).visibleWorktrees.map(\.id))
+        }
+
+        let unselected = visibleIDs(selecting: nil)
+        XCTAssertEqual(unselected, Set((recent + [olderDirty]).map(\.id)))
+        XCTAssertEqual(visibleIDs(selecting: olderDirty.id), unselected)
+        XCTAssertEqual(visibleIDs(selecting: recent[0].id), unselected)
+    }
+
     func testWorktreesSortByDisplayedActivityTime() {
         let now = Date(timeIntervalSince1970: 200_000)
         let recentClean = makeWorktreeSnapshot(

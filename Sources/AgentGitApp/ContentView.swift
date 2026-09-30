@@ -1043,15 +1043,18 @@ func projectWorktreePresentation(
     }
     let pinned = orderedWorktrees.filter { pinnedWorktreeIDs.contains($0.id) }
     let unpinned = orderedWorktrees.filter { !pinnedWorktreeIDs.contains($0.id) }
+    let hasChanges = { (worktree: GitWorktreeSnapshot) in
+        worktree.status.changedFileCount > 0 || !worktree.diffStat.isEmpty
+    }
     // 折叠时置顶的永远露出来，不占“最近四个”的名额，也不会被选中项挤掉。
     var recentWorktrees = Array(
         unpinned.filter { worktree in
-            worktree.status.changedFileCount > 0
-                || !worktree.diffStat.isEmpty
-                || worktree.lastActivityAt >= recentCutoff
+            hasChanges(worktree) || worktree.lastActivityAt >= recentCutoff
         }.prefix(4)
     )
+    // 选中项本来就会显示（有改动）时不占名额，否则换选中项会让别的行时隐时现。
     if let selected = unpinned.first(where: { $0.id == selectedWorktreeID }),
+       !hasChanges(selected),
        !recentWorktrees.contains(where: { $0.id == selected.id }) {
         if recentWorktrees.count == 4 {
             recentWorktrees.removeLast()
@@ -1061,9 +1064,7 @@ func projectWorktreePresentation(
     // 有改动的 worktree 不受四条上限影响，也不能被选中项挤出折叠列表。
     let retainedIDs = Set((pinned + recentWorktrees).map(\.id))
     let defaultWorktrees = orderedWorktrees.filter {
-        retainedIDs.contains($0.id)
-            || $0.status.changedFileCount > 0
-            || !$0.diffStat.isEmpty
+        retainedIDs.contains($0.id) || hasChanges($0)
     }
     return ProjectWorktreePresentation(
         visibleWorktrees: showsAll ? orderedWorktrees : defaultWorktrees,
