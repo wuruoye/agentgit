@@ -91,6 +91,9 @@ final class AgentGitApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         FontScaleSettings.shared.installKeyboardShortcuts()
+        Task.detached(priority: .utility) {
+            await WorktreeCreatorHook.updateInstalledScript()
+        }
     }
 
     func attach(_ model: AppModel) {

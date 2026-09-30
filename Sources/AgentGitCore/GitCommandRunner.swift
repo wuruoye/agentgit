@@ -297,6 +297,11 @@ public struct GitCommandRunner: Sendable {
             paths.append(directory)
         }
         environment["PATH"] = paths.joined(separator: ":")
+        // AgentGit 自己执行的 git 不代表任何 agent 会话。从 agent 终端启动或在 agent 会话里跑测试时
+        // 会继承这些变量，全局 worktree 创建者 hook 会把 AgentGit 的操作记到那个会话名下。
+        for name in ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID", "CODEX_THREAD_ID"] {
+            environment[name] = nil
+        }
         return environment
     }()
 

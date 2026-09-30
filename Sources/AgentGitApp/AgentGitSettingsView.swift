@@ -152,6 +152,8 @@ private struct AgentGitSettingsCard<Content: View>: View {
 struct AgentGitSettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedSection: AgentGitSettingsSection
+    @State private var creatorHookInstalled: Bool?
+    @State private var creatorHookError: String?
     let fixedContentHeight: CGFloat?
 
     init(
@@ -460,8 +462,56 @@ struct AgentGitSettingsView: View {
     private var agentSettings: some View {
         VStack(alignment: .leading, spacing: 16) {
             AgentGitSettingsCard {
+                worktreeCreatorHookSettings
+            }
+            AgentGitSettingsCard {
                 agentSessionStorageSettings
             }
+        }
+    }
+
+    private var worktreeCreatorHookSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsCardHeading(
+                "Worktree Creator",
+                detail: "A global git hook records which Claude or Codex session ran `git worktree add`.",
+                image: "arrow.triangle.branch"
+            )
+
+            HStack {
+                Text(creatorHookInstalled.map {
+                    $0 ? "Installed in global git config" : "Not installed"
+                } ?? "Checking…")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                Spacer()
+                if let installed = creatorHookInstalled {
+                    Button(installed ? "Remove Hook" : "Install Hook") {
+                        Task {
+                            do {
+                                try await installed
+                                    ? WorktreeCreatorHook.uninstall()
+                                    : WorktreeCreatorHook.install()
+                                creatorHookError = nil
+                            } catch {
+                                creatorHookError = String(describing: error)
+                            }
+                            creatorHookInstalled = await WorktreeCreatorHook.isInstalled()
+                        }
+                    }
+                }
+            }
+
+            if let creatorHookError {
+                Text(creatorHookError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            }
+        }
+        .task {
+            creatorHookInstalled = await WorktreeCreatorHook.isInstalled()
         }
     }
 

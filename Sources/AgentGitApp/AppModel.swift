@@ -379,6 +379,9 @@ final class AppModel {
         }
         hasLoadedProjects = true
         agentAssociations.start()
+        agentAssociations.lookUpCreators(
+            worktreePaths: Set(projects.compactMap(\.snapshot).flatMap(\.worktrees).map(\.id))
+        )
         if isApplicationActive {
             await normalizeStoredProjects()
             await validateSelectedSnapshotIfNeeded()
@@ -1678,6 +1681,8 @@ final class AppModel {
                 report.errors.append("\(project.rootURL.path): \(error)")
             }
         }
+        // 创建者记录没有删除 hook，随定期清理删掉已删除或重建过的 worktree 的记录。
+        await agentAssociations.removeStaleCreators()
         cleanupReport = report
         if let data = try? JSONEncoder().encode(report) {
             defaults.set(data, forKey: Self.cleanupReportKey)
@@ -2101,6 +2106,10 @@ final class AppModel {
             projectRefreshTasks[request.token.projectID] = nil
         }
         finishRefresh(request.token)
+        // 每次 worktree 列表刷新后，给还没有创建者记录的 worktree 补查一次。
+        if let worktrees = projects.first(where: { $0.id == request.token.projectID })?.snapshot?.worktrees {
+            agentAssociations.lookUpCreators(worktreePaths: Set(worktrees.map(\.id)))
+        }
     }
 
     private func beginProjectRefresh(_ id: GitProject.ID) -> RepositoryRefreshToken {

@@ -22,10 +22,13 @@ struct AgentSessionsButton: View {
                             Text(association.menuTitle)
                         }
                     }
-                    Divider()
-                    ForEach(sortedAssociations) { association in
-                        Button("Remove \(association.menuTitle)", role: .destructive) {
-                            model.agentAssociations.remove(association)
+                    let removable = sortedAssociations.filter { $0.id != creator?.id }
+                    if !removable.isEmpty {
+                        Divider()
+                        ForEach(removable) { association in
+                            Button("Remove \(association.menuTitle)", role: .destructive) {
+                                model.agentAssociations.remove(association)
+                            }
                         }
                     }
                 } label: {
@@ -52,21 +55,43 @@ struct AgentSessionsButton: View {
             availability: model.agentAssociations.navigationAvailability(
                 for: association
             ),
+            isCreator: association.id == creator?.id,
             openSession: { model.agentAssociations.open(association) },
-            removeSession: { model.agentAssociations.remove(association) }
+            removeSession: association.id == creator?.id
+                ? nil
+                : { model.agentAssociations.remove(association) }
         )
     }
 
+    /// 创建这个 worktree 的会话排在最前；创建者记录不能在这里移除。
+    private var creator: AgentAssociation? {
+        model.agentAssociations.creatorAssociation(forWorktreeAt: worktree.id)
+    }
+
     private var sortedAssociations: [AgentAssociation] {
-        model.agentAssociations.associations(for: worktree)
+        let stored = model.agentAssociations.associations(for: worktree)
+        let associations = creator.map { creator in
+            [creator] + stored.filter { $0.id != creator.id }
+        } ?? stored
+        // 标题优先用宿主里的最新标题。
+        return associations.map { association in
+            AgentAssociation(
+                provider: association.provider,
+                sessionID: association.sessionID,
+                worktreePath: association.worktreePath,
+                title: model.agentAssociations.displayTitle(for: association),
+                updatedAt: association.updatedAt
+            )
+        }
     }
 }
 
 private struct AgentSessionShortcutButton: View {
     let association: AgentAssociation
     let availability: AgentSessionNavigationAvailability
+    let isCreator: Bool
     let openSession: () -> Void
-    let removeSession: () -> Void
+    let removeSession: (() -> Void)?
     @State private var isHovered = false
 
     var body: some View {
@@ -76,13 +101,14 @@ private struct AgentSessionShortcutButton: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(tintColor)
 
-                Text(compactAgentSessionTitle(association.displayTitle))
+                Text(compactAgentSessionTitle(association.displayTitle, maximumCharacterCount: 24))
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
             }
             .padding(.horizontal, 8)
-            .frame(maxWidth: 124, minHeight: 28)
+            .frame(minHeight: 28)
+            .fixedSize()
             .background(
                 isHovered
                     ? Color(nsColor: AgentGitPalette.reviewHover)
@@ -97,14 +123,19 @@ private struct AgentSessionShortcutButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help(association.hoverDescription(availability: availability))
+        .help(
+            (isCreator ? "Created this worktree\n" : "")
+                + association.hoverDescription(availability: availability)
+        )
         .accessibilityLabel(
             "Open \(association.provider.displayName) session \(association.displayTitle)"
         )
         .contextMenu {
             Button("Open Session", action: openSession)
-            Divider()
-            Button("Remove Association", role: .destructive, action: removeSession)
+            if let removeSession {
+                Divider()
+                Button("Remove Association", role: .destructive, action: removeSession)
+            }
         }
     }
 

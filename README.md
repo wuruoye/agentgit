@@ -391,11 +391,68 @@ session UUID 与 Desktop 内部 session ID 可能不同，主 App 在后台只�
 JSON 会话索引，按精确 `cliSessionId` 解析当前 Desktop session ID，不读取 transcript 正文。
 索引映射已经失效的关联显示为 Unavailable，并排到仍可打开的会话之后，可从右键菜单移除。
 
-AgentGit 不扫描 transcript，也不启动额外后台服务。关联数据的读取、合并与原子写入通过
+AgentGit 不扫描 transcript，唯一的例外是查 Codex `create_worktree` 建的 worktree 属于哪个线程时，
+只读 worktree 创建之后仍在写入的 Codex 会话日志，见下文「Worktree 创建者」；也不启动额外后台服务。
+关联数据的读取、合并与原子写入通过
 独立锁文件串行执行，数据文件与锁文件权限均为 `0600`。
 
-2026-09-09 起不再随 App 分发 Codex / Claude 插件：自动登记、hook、Skill bridge 与
-marketplace 模板已整体移除，`associations.json` 只保留已有关联，不再新增。
+`associations.json` 不再新增关联，只保留已有数据。
+
+### Worktree 创建者
+
+Settings → Agents 的 `Install Hook` 把脚本写到
+`~/Library/Application Support/AgentGit/git-hooks/post-checkout`，并在全局 git 配置里登记
+`hook.agentgit.event = post-checkout` 与 `hook.agentgit.command`。这是 git 的配置式 hook，
+和仓库自带的 hook（如 git-lfs）一起运行，不改 `.git/hooks` 或 `core.hooksPath`；
+`Remove Hook` 删除 `hook.agentgit` 配置段。
+
+创建者记录由 AgentGit 保存在 `~/Library/Application Support/AgentGit/worktree-creators/`，
+每个 worktree 一个 JSON 文件，文件名是 worktree 路径的 SHA-256，同一路径后写的覆盖先写的；
+AgentGit 不往仓库的 `.git` 里写东西：
+
+```json
+{
+  "created_at": "2026-09-29T12:00:00Z",
+  "host_session_id": "local_11111111-1111-4111-8111-111111111111",
+  "provider": "claude",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "source": "git-hook",
+  "title": "agentgit agent 绑定能力",
+  "worktree_path": "/Users/developer/Documents/github/agentgit/.claude/worktrees/creator"
+}
+```
+
+记录有三种来源：
+
+| `source` | 创建方式 | 会话来源 |
+|---|---|---|
+| `git-hook` | agent shell 里执行 `git worktree add`，包括 Claude 的 `EnterWorktree` | 环境变量，依次认 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CLAUDE_CODE_HOST_SESSION_ID` |
+| `claude-desktop` | Claude Desktop 新建会话时自己建的 worktree | Desktop 会话索引里 `worktreePath` 等于该路径的会话 |
+| `codex-app` | Codex App 在 `~/.codex/worktrees/` 下建的 worktree | `~/.codex/state_<n>.sqlite` 里以该路径为 `cwd` 的最早线程；线程里调用 `create_worktree` 建的，取会话日志里 `worktreeGitRoot` 等于该路径的那次调用所在线程 |
+
+- hook 只有 Desktop 会话 ID 时，从该会话的 Desktop 索引读出 `cliSessionId`；Claude 的标题和
+  `host_session_id` 只在索引的 `cliSessionId` 与会话一致时写入。Codex 标题取
+  `~/.codex/session_index.jsonl` 里该线程最新的 `thread_name`。hook 写完后用
+  `notifyutil -p com.sigma.agentgit.worktree-creators.changed` 通知 AgentGit 重读。
+- 宿主自己建的 worktree 不经过 agent shell，hook 认不出会话，改写待查标记
+  `worktree-creators/pending/<路径哈希>` 并发同一个通知。AgentGit 不论在前台还是后台，
+  都每 10 秒按宿主元数据把所有待查路径查一次，查到或超过 1 分钟后删掉标记；启动和回到前台时
+  也会接着处理剩下的标记。
+- 启动时和每次项目刷新（worktree 列表重新发现）完成后，对还没有记录的 worktree 再按宿主元数据
+  查一次。会话创建时间和 worktree 的 git 管理目录创建时间要在一小时内；Codex 会话日志只查一天内
+  建的 worktree，并且只读 worktree 创建之后仍在写入的日志。
+- AgentGit 自己执行的 git 命令不带 agent 会话的环境变量，不会被记到任何会话名下。
+- worktree 或它的 git 管理目录已不存在、或 git 管理目录比记录晚一小时以上创建（同一路径删掉
+  重建过）的记录不再显示。git 删除 worktree 时没有 hook，这些记录文件由 worktree 定期清理
+  在每次运行末尾删除，同一路径较旧的重复记录一并删除；`/Volumes` 下未挂载的外接卷上的记录保留。
+- `git worktree add --no-checkout` 不触发 post-checkout；IDE 等不调用 git 命令行的工具、
+  以及不在 agent 会话里、宿主元数据也查不到的 worktree 都没有记录。
+
+worktree 页面工具栏的会话按钮把创建者会话排在最前，点击打开该会话，按钮宽度随标题变化；
+创建者记录不能在这里移除。All Worktrees 列表在目录名后显示创建者。标题优先取宿主索引里的最新值，其次是记录里的
+`title`，都没有时显示 provider 和会话 ID 前 8 位；悬停显示 provider、会话 ID 和创建时间。
+右键 `Open Creator Session` 打开该会话：Codex 用 `codex://threads/<id>`，Claude 按
+Desktop 会话索引解析出的 Desktop 会话打开。
 
 ## M1 验收
 

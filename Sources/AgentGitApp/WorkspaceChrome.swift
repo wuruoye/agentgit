@@ -1,4 +1,5 @@
 import AgentGitCore
+import AgentGitIntegrationShared
 import AppKit
 import SwiftUI
 
@@ -94,14 +95,27 @@ struct WorktreeOverview: View {
                     ForEach(projects) { project in
                         Section {
                             ForEach(project.worktrees) { snapshot in
+                                let creator = creatorAssociation(for: snapshot)
                                 OverviewWorktreeRow(
                                     snapshot: snapshot,
+                                    creator: creator.map {
+                                        OverviewWorktreeCreator(
+                                            association: $0,
+                                            title: model.agentAssociations.displayTitle(for: $0),
+                                            availability: model.agentAssociations.navigationAvailability(for: $0)
+                                        )
+                                    },
                                     isPinned: model.isWorktreePinned(id: snapshot.id),
                                     isSelected: model.selectedWorktreeID == snapshot.id,
                                     open: { select(snapshot.id) }
                                 )
                                 .contextMenu {
                                     Button("Open Worktree") { select(snapshot.id) }
+                                    if let creator {
+                                        Button("Open Creator Session") {
+                                            model.agentAssociations.open(creator)
+                                        }
+                                    }
                                     Button(model.isWorktreePinned(id: snapshot.id) ? "Unpin from Top" : "Pin to Top") {
                                         model.toggleWorktreePinned(id: snapshot.id)
                                     }
@@ -147,10 +161,41 @@ struct WorktreeOverview: View {
         .background(Color(nsColor: AgentGitPalette.card))
         .focusedSceneValue(\.workspaceSearchAction, { isSearchFocused = true })
     }
+
+    private func creatorAssociation(for snapshot: GitWorktreeSnapshot) -> AgentAssociation? {
+        model.agentAssociations.creatorAssociation(forWorktreeAt: snapshot.id)
+    }
+}
+
+struct OverviewWorktreeCreator {
+    let association: AgentAssociation
+    let title: String
+    let availability: AgentSessionNavigationAvailability
+
+    var provider: AgentProvider { association.provider }
+
+    var helpText: String {
+        var lines = [
+            "Created by \(provider.displayName) session",
+            title,
+            association.sessionID
+        ]
+        if association.updatedAt != .distantPast {
+            lines.append(association.updatedAt.formatted(date: .abbreviated, time: .shortened))
+        }
+        switch availability {
+        case .resolving, .available:
+            lines.append("Right-click → Open Creator Session")
+        case let .unavailable(reason):
+            lines.append(reason)
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 struct OverviewWorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
+    var creator: OverviewWorktreeCreator? = nil
     let isPinned: Bool
     let isSelected: Bool
     let open: () -> Void
@@ -172,10 +217,22 @@ struct OverviewWorktreeRow: View {
                                 Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(.secondary)
                             }
                         }
-                        Text(snapshot.worktree.rootURL.lastPathComponent)
-                            .font(.system(size: 11))
-                            .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
-                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            Text(snapshot.worktree.rootURL.lastPathComponent)
+                            if let creator {
+                                Text("·")
+                                HStack(spacing: 4) {
+                                    Image(systemName: creator.provider.systemImageName)
+                                        .foregroundStyle(creator.provider.tintColor)
+                                    Text(creator.title)
+                                        .truncationMode(.tail)
+                                }
+                                .help(creator.helpText)
+                            }
+                        }
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                        .lineLimit(1)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -210,7 +267,7 @@ struct OverviewWorktreeRow: View {
         .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(snapshot.worktree.displayName), \(snapshot.worktree.rootURL.lastPathComponent), \(snapshot.status.changedFileCount) changed files, +\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount), \(syncLabel)")
+        .accessibilityLabel("\(snapshot.worktree.displayName), \(snapshot.worktree.rootURL.lastPathComponent),\(creator.map { " created by \($0.provider.displayName) session \($0.title)," } ?? "") \(snapshot.status.changedFileCount) changed files, +\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount), \(syncLabel)")
     }
 
     private var syncLabel: String {
