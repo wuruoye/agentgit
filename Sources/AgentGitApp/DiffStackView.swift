@@ -2051,6 +2051,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     private func cancelPendingDiscardConfirmations() -> Bool {
         var cancelled = stickyFileHeader.cancelDiscardConfirmation()
+        cancelled = stickyGroupHeader.cancelDiscardConfirmation() || cancelled
         let visibleRows = tableView.rows(in: tableView.visibleRect)
         guard visibleRows.location != NSNotFound else {
             return cancelled
@@ -2065,6 +2066,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
             if let fileCell = cell as? DiffFileCellView {
                 cancelled = fileCell.cancelDiscardConfirmation() || cancelled
+            } else if let groupCell = cell as? DiffGroupCellView {
+                cancelled = groupCell.cancelDiscardConfirmation() || cancelled
             } else if let hunkCell = cell as? DiffHunkCellView {
                 cancelled = hunkCell.cancelDiscardConfirmation() || cancelled
             }
@@ -3736,6 +3739,9 @@ private final class DiffGroupCellView: NSTableCellView {
     private let stashButton = NSButton(title: "Stash All", target: nil, action: nil)
     private let discardButton = NSButton(title: "Discard All", target: nil, action: nil)
     private var allChangesHandler: ((GitAllChangesAction) -> Void)?
+    /// 和文件、hunk 的 Discard 一样原地二次确认：第一次点击变成 Confirm，3 秒内再点才执行。
+    private var discardConfirmationTimer: Timer?
+    private var isConfirmingDiscard: Bool { discardConfirmationTimer != nil }
 
     override var isFlipped: Bool { true }
 
@@ -3753,7 +3759,7 @@ private final class DiffGroupCellView: NSTableCellView {
         stashButton.action = #selector(stashAll)
         discardButton.action = #selector(discardAll)
         stashButton.toolTip = "Stash all staged, unstaged, and untracked files in this worktree"
-        discardButton.toolTip = "Discard all uncommitted changes in this worktree; saves recovery copies in Trash"
+        resetDiscardConfirmation()
     }
 
     required init?(coder: NSCoder) {
@@ -3790,6 +3796,9 @@ private final class DiffGroupCellView: NSTableCellView {
     }
 
     func update(group: DiffStackGroup, count: Int) {
+        if groupID != group.id {
+            resetDiscardConfirmation()
+        }
         groupID = group.id
         stashButton.isHidden = groupID != "working"
         discardButton.isHidden = groupID != "working"
@@ -3815,10 +3824,58 @@ private final class DiffGroupCellView: NSTableCellView {
         allChangesHandler = handler
         stashButton.isEnabled = enabled && canStash
         discardButton.isEnabled = enabled
+        if !enabled {
+            resetDiscardConfirmation()
+        }
     }
 
-    @objc private func stashAll() { allChangesHandler?(.stash) }
-    @objc private func discardAll() { allChangesHandler?(.discard) }
+    @objc private func stashAll() {
+        resetDiscardConfirmation()
+        allChangesHandler?(.stash)
+    }
+
+    @objc private func discardAll() {
+        guard isConfirmingDiscard else {
+            beginDiscardConfirmation()
+            return
+        }
+        resetDiscardConfirmation()
+        allChangesHandler?(.discard)
+    }
+
+    func cancelDiscardConfirmation() -> Bool {
+        guard isConfirmingDiscard else {
+            return false
+        }
+        resetDiscardConfirmation()
+        return true
+    }
+
+    private func beginDiscardConfirmation() {
+        resetDiscardConfirmation()
+        discardButton.attributedTitle = NSAttributedString(
+            string: "Confirm",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: AgentGitPalette.reviewActionConfirmationText
+            ]
+        )
+        discardButton.toolTip = "Press again to discard staged, unstaged, and untracked files; recovery copies and a staged patch are saved in Trash"
+        discardButton.setAccessibilityLabel("Confirm Discard All")
+        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resetDiscardConfirmation() }
+        }
+        discardConfirmationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func resetDiscardConfirmation() {
+        discardConfirmationTimer?.invalidate()
+        discardConfirmationTimer = nil
+        discardButton.title = "Discard All"
+        discardButton.toolTip = "Discard all uncommitted changes in this worktree; requires confirmation and saves recovery copies in Trash"
+        discardButton.setAccessibilityLabel("Discard All")
+    }
 }
 
 private final class DiffFolderCellView: NSTableCellView {

@@ -80,7 +80,6 @@ struct IntegratedReviewWorkspace: View {
     @State private var isLoadingDiffs = false
     @State private var diffLoadSequence: UInt64 = 0
     @State private var isApplyingMutation = false
-    @State private var isConfirmingDiscardAll = false
     @State private var mutationSequence: UInt64 = 0
     @State private var runningRemoteAction: GitRemoteAction?
     @State private var remoteOperationFeedback: RemoteOperationFeedback?
@@ -299,14 +298,7 @@ struct IntegratedReviewWorkspace: View {
                 workspaceSplitView
             }
         }
-        .confirmationDialog("Discard all uncommitted changes in this worktree?", isPresented: $isConfirmingDiscardAll) {
-            Button("Discard All", role: .destructive) { performAllChangesAction(.discard) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Includes staged, unstaged, and untracked files. Recovery copies and a staged patch will be saved in Trash.")
-        }
         .onChange(of: snapshot.id) {
-            isConfirmingDiscardAll = false
             resetWorkspace()
         }
         .onChange(of: stateKey) { previousKey, newKey in
@@ -1770,10 +1762,7 @@ struct IntegratedReviewWorkspace: View {
                     onFileAction: performFileAction,
                     onSelectionAction: performSelectionAction,
                     canStashAll: !snapshot.worktree.isUnborn,
-                    onAllChangesAction: { action in
-                        if action == .discard { isConfirmingDiscardAll = true }
-                        else { performAllChangesAction(action) }
-                    }
+                    onAllChangesAction: performAllChangesAction
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

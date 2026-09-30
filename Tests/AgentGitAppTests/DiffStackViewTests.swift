@@ -2545,6 +2545,33 @@ final class DiffStackViewTests: XCTestCase {
         XCTAssertEqual(hunkDiscard.accessibilityLabel(), "Discard Hunk")
     }
 
+    func testDiscardAllConfirmsInPlaceBeforeRunning() throws {
+        let scrollView = makeScrollView()
+        var actions: [GitAllChangesAction] = []
+        scrollView.onAllChangesAction = { actions.append($0) }
+        let file = makeGroup().files[0]
+        let working = DiffStackGroup(
+            id: "working",
+            title: "Working",
+            emptyMessage: "No working changes",
+            isExpanded: true,
+            files: [file]
+        )
+        scrollView.display(groups: [working], layout: .unified, scrollTarget: nil)
+        let tableView = try XCTUnwrap(scrollView.documentView as? NSTableView)
+        let header = try XCTUnwrap(tableView.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        let discardAll = try XCTUnwrap(
+            header.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Discard All" }
+        )
+
+        discardAll.performClick(nil)
+        XCTAssertEqual(actions, [])
+        XCTAssertEqual(discardAll.title, "Confirm")
+        discardAll.performClick(nil)
+        XCTAssertEqual(actions, [.discard])
+        XCTAssertEqual(discardAll.title, "Discard All")
+    }
+
     func testKeyboardDiscardCommandUsesFileButtonConfirmation() throws {
         let scrollView = makeScrollView()
         var actions: [GitPendingSelectionAction] = []
