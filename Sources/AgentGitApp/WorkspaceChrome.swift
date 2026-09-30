@@ -93,11 +93,17 @@ struct WorktreeOverview: View {
             ScrollView {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(projects) { project in
+                        // 重名按整个项目判断，筛选后也保持同样的显示。
+                        let locationLabels = worktreeLocationLabels(
+                            (model.projects.first { $0.id == project.id }?.snapshot?.worktrees
+                                ?? project.worktrees).map(\.worktree)
+                        )
                         Section {
                             ForEach(project.worktrees) { snapshot in
                                 let creator = creatorAssociation(for: snapshot)
                                 OverviewWorktreeRow(
                                     snapshot: snapshot,
+                                    locationLabel: locationLabels[snapshot.id],
                                     creator: creator.map {
                                         OverviewWorktreeCreator(
                                             association: $0,
@@ -195,6 +201,7 @@ struct OverviewWorktreeCreator {
 
 struct OverviewWorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
+    var locationLabel: String? = nil
     var creator: OverviewWorktreeCreator? = nil
     let isPinned: Bool
     let isSelected: Bool
@@ -218,7 +225,7 @@ struct OverviewWorktreeRow: View {
                             }
                         }
                         HStack(spacing: 5) {
-                            Text(snapshot.worktree.rootURL.lastPathComponent)
+                            Text(location)
                             if let creator {
                                 Text("·")
                                 HStack(spacing: 4) {
@@ -267,7 +274,11 @@ struct OverviewWorktreeRow: View {
         .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(snapshot.worktree.displayName), \(snapshot.worktree.rootURL.lastPathComponent),\(creator.map { " created by \($0.provider.displayName) session \($0.title)," } ?? "") \(snapshot.status.changedFileCount) changed files, +\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount), \(syncLabel)")
+        .accessibilityLabel("\(snapshot.worktree.displayName), \(location),\(creator.map { " created by \($0.provider.displayName) session \($0.title)," } ?? "") \(snapshot.status.changedFileCount) changed files, +\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount), \(syncLabel)")
+    }
+
+    private var location: String {
+        locationLabel ?? snapshot.worktree.rootURL.lastPathComponent
     }
 
     private var syncLabel: String {

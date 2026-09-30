@@ -641,12 +641,14 @@ struct ContentView: View {
                     hiddenWorktreeCount: 0
                 )
             }
+            let locationLabels = worktreeLocationLabels(snapshot.worktrees.map(\.worktree))
             ForEach(presentation.visibleWorktrees) { worktree in
                 Button {
                     openWorktree(worktree.id)
                 } label: {
                     WorktreeRow(
                         snapshot: worktree,
+                        locationLabel: locationLabels[worktree.id],
                         isSelected: !showsOverview && model.selectedWorktreeID == worktree.id,
                         isPinned: model.isWorktreePinned(id: worktree.id)
                     )
@@ -1192,6 +1194,7 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 
 struct WorktreeRow: View {
     let snapshot: GitWorktreeSnapshot
+    var locationLabel: String? = nil
     var isSelected = false
     var isPinned = false
     @State private var isHovered = false
@@ -1212,7 +1215,7 @@ struct WorktreeRow: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Text(snapshot.worktree.rootURL.lastPathComponent)
+                    Text(location)
                         .font(.system(size: 10.5))
                         .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                         .lineLimit(1)
@@ -1366,9 +1369,26 @@ struct WorktreeRow: View {
                 "+\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount)"
             )
         }
-        components.append(snapshot.worktree.rootURL.lastPathComponent)
+        components.append(location)
         return components.joined(separator: ", ")
     }
+
+    private var location: String {
+        locationLabel ?? snapshot.worktree.rootURL.lastPathComponent
+    }
+}
+
+/// 列表第二行显示的目录名。同一项目里目录名重复时带上父目录，比如 `worktree-test/agentgit`。
+func worktreeLocationLabels(_ worktrees: [GitWorktree]) -> [GitWorktree.ID: String] {
+    let nameCounts = Dictionary(grouping: worktrees, by: \.rootURL.lastPathComponent)
+        .mapValues(\.count)
+    return Dictionary(uniqueKeysWithValues: worktrees.map { worktree in
+        let name = worktree.rootURL.lastPathComponent
+        guard nameCounts[name, default: 0] > 1 else {
+            return (worktree.id, name)
+        }
+        return (worktree.id, worktree.rootURL.deletingLastPathComponent().lastPathComponent + "/" + name)
+    })
 }
 
 func worktreeRowHelpText(_ snapshot: GitWorktreeSnapshot) -> String {

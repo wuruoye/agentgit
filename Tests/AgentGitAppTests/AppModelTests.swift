@@ -1603,6 +1603,30 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(visibleIDs(selecting: recent[0].id), unselected)
     }
 
+    func testDuplicateWorktreeDirectoryNamesShowParentDirectory() {
+        func worktree(_ path: String) -> GitWorktree {
+            GitWorktree(
+                rootURL: URL(fileURLWithPath: path, isDirectory: true),
+                headOID: nil,
+                branchRef: nil,
+                isBare: false,
+                isDetached: false,
+                lockedReason: nil,
+                prunableReason: nil
+            )
+        }
+        let worktrees = [
+            worktree("/Users/developer/Documents/github/agentgit"),
+            worktree("/Users/developer/.codex/worktrees/worktree-test/agentgit"),
+            worktree("/Users/developer/Documents/github/agentgit-feature")
+        ]
+
+        XCTAssertEqual(
+            worktreeLocationLabels(worktrees).values.sorted(),
+            ["agentgit-feature", "github/agentgit", "worktree-test/agentgit"]
+        )
+    }
+
     func testWorktreesSortByDisplayedActivityTime() {
         let now = Date(timeIntervalSince1970: 200_000)
         let recentClean = makeWorktreeSnapshot(

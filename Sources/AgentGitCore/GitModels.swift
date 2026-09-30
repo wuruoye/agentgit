@@ -75,6 +75,12 @@ public struct GitWorktree: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var displayName: String {
-        branchName ?? (isDetached ? "Detached HEAD" : rootURL.lastPathComponent)
+        if let branchName {
+            return branchName
+        }
+        guard isDetached else {
+            return rootURL.lastPathComponent
+        }
+        return shortHeadOID.map { "Detached · \($0)" } ?? "Detached HEAD"
     }
 }
