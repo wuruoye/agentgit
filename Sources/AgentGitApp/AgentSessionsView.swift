@@ -32,14 +32,10 @@ struct AgentSessionsButton: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("\(sortedAssociations.count) Sessions")
-                            .font(.system(size: 10.5, weight: .semibold))
-                    }
+                    Label("\(sortedAssociations.count) Sessions", systemImage: "sparkles")
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.automatic)
+                .labelStyle(.titleAndIcon)
                 .fixedSize()
                 .help("Agent sessions registered for this worktree")
                 .accessibilityLabel(
@@ -92,37 +88,18 @@ private struct AgentSessionShortcutButton: View {
     let isCreator: Bool
     let openSession: () -> Void
     let removeSession: (() -> Void)?
-    @State private var isHovered = false
 
     var body: some View {
         Button(action: openSession) {
-            HStack(spacing: 5) {
-                Image(systemName: association.provider.systemImageName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tintColor)
-
-                Text(compactAgentSessionTitle(association.displayTitle, maximumCharacterCount: 24))
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 28)
-            .fixedSize()
-            .background(
-                isHovered
-                    ? Color(nsColor: AgentGitPalette.reviewHover)
-                    : Color(nsColor: AgentGitPalette.reviewControlBackground),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Label(
+                "\(association.provider.displayName) Session",
+                systemImage: association.provider.systemImageName
             )
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(tintColor.opacity(0.14), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .foregroundStyle(tintColor)
+            .lineLimit(1)
         }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
+        .buttonStyle(.automatic)
+        .labelStyle(.titleAndIcon)
         .help(
             (isCreator ? "Created this worktree\n" : "")
                 + association.hoverDescription(availability: availability)

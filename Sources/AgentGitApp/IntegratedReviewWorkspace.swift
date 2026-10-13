@@ -262,8 +262,6 @@ struct IntegratedReviewWorkspace: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            workspaceHeader
-            Divider()
             if let remoteOperationError {
                 remoteOperationErrorBar(remoteOperationError)
             }
@@ -290,6 +288,7 @@ struct IntegratedReviewWorkspace: View {
                 workspaceSplitView
             }
         }
+        .toolbar { workspaceToolbar }
         .onChange(of: snapshot.id) {
             resetWorkspace()
         }
@@ -469,81 +468,91 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private var workspaceHeader: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 1) {
-                Button(action: navigateBack) { Image(systemName: "chevron.left") }
+    @ToolbarContentBuilder
+    private var workspaceToolbar: some ToolbarContent {
+        if isReviewVisible {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: navigateBack) {
+                    Label("Back", systemImage: "chevron.left")
+                }
                     .disabled(!canNavigateReviewBack)
                     .help("Navigate Back (⌘←)")
                     .accessibilityLabel("Navigate Back")
-                Button(action: navigateForward) { Image(systemName: "chevron.right") }
+                Button(action: navigateForward) {
+                    Label("Forward", systemImage: "chevron.right")
+                }
                     .disabled(!navigationHistory.canNavigateForward)
                     .help("Navigate Forward (⌘→)")
                     .accessibilityLabel("Navigate Forward")
             }
-            .buttonStyle(WorkspaceIconButtonStyle())
-            Button {
-                isHistoryVisible.toggle()
-                if !isHistoryVisible { focusNavigator(.files) }
-            } label: {
-                Label { Text("History") } icon: { ReviewIconView(icon: .history) }
+            ToolbarItemGroup(placement: .automatic) {
+                Toggle(isOn: Binding(
+                    get: { isHistoryVisible },
+                    set: { visible in
+                        isHistoryVisible = visible
+                        if !visible { focusNavigator(.files) }
+                    }
+                )) {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                        .labelStyle(.titleAndIcon)
+                }
+                .toggleStyle(.button)
+                .help(isHistoryVisible ? "Hide commit history" : "Show commit history")
+                .accessibilityLabel("Toggle Commit History")
+                .accessibilityValue(isHistoryVisible ? "Shown" : "Hidden")
+
+                Toggle(isOn: $isReviewFocused) {
+                    Label("Focus", systemImage: "viewfinder")
+                        .labelStyle(.titleAndIcon)
+                }
+                .toggleStyle(.button)
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .help(isReviewFocused ? "Exit focused review (⇧⌘F)" : "Hide the project sidebar and commit history (⇧⌘F)")
+                .accessibilityLabel("Toggle Review Focus")
+                .accessibilityValue(isReviewFocused ? "On" : "Off")
             }
-            .buttonStyle(ReviewToolbarButtonStyle(kind: isHistoryVisible ? .selected : .normal))
-            .help(isHistoryVisible ? "Hide commit history" : "Show commit history")
-            .accessibilityLabel("Toggle Commit History")
-            .accessibilityValue(isHistoryVisible ? "Shown" : "Hidden")
-            Button {
-                isReviewFocused.toggle()
-            } label: {
-                Label { Text(isReviewFocused ? "Exit Focus" : "Focus") } icon: { ReviewIconView(icon: .focus) }
+            ToolbarItem(placement: .automatic) {
+                AgentSessionsButton(worktree: snapshot.worktree)
             }
-            .buttonStyle(ReviewToolbarButtonStyle(kind: isReviewFocused ? .selected : .normal))
-            .keyboardShortcut("f", modifiers: [.command, .shift])
-            .help("Focus Review (⇧⌘F)")
-            .accessibilityLabel("Toggle Review Focus")
-            .accessibilityValue(isReviewFocused ? "On" : "Off")
-            if let toolbarActivityLabel {
-                Text(toolbarActivityLabel)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
-                    .lineLimit(1)
+            ToolbarItem(placement: .status) {
+                if let toolbarActivityLabel {
+                    ProgressView().controlSize(.small)
+                        .help(toolbarActivityLabel)
+                        .accessibilityLabel(toolbarActivityLabel)
+                } else if let remoteOperationFeedback {
+                    RemoteOperationFeedbackView(feedback: remoteOperationFeedback)
+                }
             }
-            Spacer(minLength: 4)
-            AgentSessionsButton(worktree: snapshot.worktree)
-            Button {
-                Task { await model.refreshSelectedProject() }
-            } label: { ReviewIconView(icon: .refresh) }
-                .buttonStyle(WorkspaceIconButtonStyle())
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    Task { await model.refreshSelectedProject() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .labelStyle(.titleAndIcon)
                 .help("Refresh Current Project (⌘R)")
                 .accessibilityLabel("Refresh Current Project")
-            if runningRemoteAction != nil {
-                Button(action: cancelRemoteOperation) { Image(systemName: "xmark.circle") }
-                    .buttonStyle(WorkspaceIconButtonStyle())
+                if runningRemoteAction != nil {
+                    Button(action: cancelRemoteOperation) {
+                        Label("Cancel", systemImage: "xmark.circle")
+                    }
                     .disabled(isCancellingRemoteOperation)
                     .accessibilityLabel("Cancel Git Operation")
-            } else if let remoteOperationFeedback {
-                RemoteOperationFeedbackView(feedback: remoteOperationFeedback)
-            }
-            HStack(spacing: 8) {
-                Button { performRemoteAction(.pull) } label: {
-                    Label { Text(pullActionTitle) } icon: { ReviewIconView(icon: .stage) }
                 }
-                .buttonStyle(ReviewToolbarButtonStyle())
+                Button { performRemoteAction(.pull) } label: {
+                    Label(pullActionTitle, systemImage: "arrow.down")
+                }
+                .labelStyle(.titleAndIcon)
                 .disabled(!canRunRemoteOperation(.pull))
                 .help(remoteActionHelp(.pull))
                 Button { performRemoteAction(.push) } label: {
-                    Label { Text(pushActionTitle) } icon: { ReviewIconView(icon: .unstage) }
+                    Label(pushActionTitle, systemImage: "arrow.up")
                 }
-                .buttonStyle(ReviewToolbarButtonStyle(kind: .primary))
+                .labelStyle(.titleAndIcon)
                 .disabled(!canRunRemoteOperation(.push))
                 .help(remoteActionHelp(.push))
             }
-            .controlSize(.regular)
-            .font(.system(size: 12, weight: .medium))
         }
-        .padding(.horizontal, 16)
-        .frame(height: 44)
-        .background(Color(nsColor: AgentGitPalette.card))
     }
 
     private var workspaceSplitView: some View {
@@ -671,18 +680,18 @@ struct IntegratedReviewWorkspace: View {
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.accentColor)
                         }
-                        .font(.caption)
+                        .font(.agentGitInterface(.caption))
                     } else if hunkHistoryCommits.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("No Hunk History")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(.agentGitInterface(size: 12, weight: .medium))
                             Text("No earlier commit changed these lines.")
                                 .foregroundStyle(.secondary)
                             Button("Show All Commits", action: clearHunkHistory)
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color.accentColor)
                         }
-                        .font(.caption)
+                        .font(.agentGitInterface(.caption))
                     } else {
                         ForEach(hunkHistoryCommits) { commit in
                             IntegratedCommitRow(
@@ -715,7 +724,7 @@ struct IntegratedReviewWorkspace: View {
                 } else {
                 if isHistorySearchActive {
                     Text("Search Results")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.agentGitInterface(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .listRowBackground(Color.clear)
                 }
@@ -743,7 +752,7 @@ struct IntegratedReviewWorkspace: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
                     }
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                 } else if !isHistorySearchActive, historyError == nil, !isHistorySettled,
                           commits.isEmpty {
                     HStack(spacing: 8) {
@@ -769,7 +778,7 @@ struct IntegratedReviewWorkspace: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
                     }
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                 } else {
                     if visibleCommits.isEmpty {
                         if commitFilterText.isEmpty {
@@ -928,7 +937,7 @@ struct IntegratedReviewWorkspace: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .font(.caption)
+        .font(.agentGitInterface(.caption))
         .task(id: model.isApplicationActive ? trigger : nil) {
             guard model.isApplicationActive,
                   trigger.automaticallyLoads,
@@ -1018,7 +1027,7 @@ struct IntegratedReviewWorkspace: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .font(.caption)
+        .font(.agentGitInterface(.caption))
         .task(id: model.isApplicationActive ? trigger : nil) {
             guard model.isApplicationActive,
                   trigger.automaticallyLoads,
@@ -1276,7 +1285,6 @@ struct IntegratedReviewWorkspace: View {
         let groups = reviewDocumentStackGroups
         return VStack(spacing: 0) {
             reviewToolbar
-            Divider()
             reviewComparisonBar(groups: groups)
             Divider()
             if selectedReviewDocument == .summary, isContextMessageExpanded {
@@ -1330,7 +1338,7 @@ struct IntegratedReviewWorkspace: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(reviewToolbarTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.agentGitInterface(size: 15, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 HStack(spacing: 8) {
@@ -1341,7 +1349,7 @@ struct IntegratedReviewWorkspace: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-                .font(.system(size: 11))
+                .font(.agentGitInterface(size: 11))
                 .lineLimit(1)
                 .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
             }
@@ -1352,7 +1360,7 @@ struct IntegratedReviewWorkspace: View {
             )
         }
         .padding(.horizontal, 16)
-        .frame(height: 62)
+        .frame(height: 54)
         .background(Color(nsColor: AgentGitPalette.card))
     }
 
@@ -1374,9 +1382,9 @@ struct IntegratedReviewWorkspace: View {
             reviewComparisonControls(compact: true, groups: groups)
         }
         .buttonStyle(WorkspaceIconButtonStyle())
-        .font(.system(size: 11).monospacedDigit())
+        .font(.agentGitInterface(size: 11).monospacedDigit())
         .padding(.horizontal, 16)
-        .frame(height: 38)
+        .frame(height: 32)
         .background(Color(nsColor: AgentGitPalette.card))
     }
 
@@ -1670,7 +1678,7 @@ struct IntegratedReviewWorkspace: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .help(message)
@@ -1693,7 +1701,7 @@ struct IntegratedReviewWorkspace: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .help(message)
@@ -1756,7 +1764,7 @@ struct IntegratedReviewWorkspace: View {
                     ProgressView()
                         .controlSize(.small)
                     Text("Loading files…")
-                        .font(.system(size: 12))
+                        .font(.agentGitInterface(size: 12))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1823,7 +1831,7 @@ struct IntegratedReviewWorkspace: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .help(message)
@@ -5335,7 +5343,7 @@ struct RemoteOperationFeedbackView: View {
 
     var body: some View {
         Label(feedback.compactTitle, systemImage: feedback.systemImage)
-            .font(.caption.weight(.medium))
+            .font(.agentGitInterface(.caption).weight(.medium))
             .foregroundStyle(feedback.tintColor)
             .lineLimit(1)
             .padding(.horizontal, 7)
@@ -5356,7 +5364,7 @@ struct BlockingGitRefreshErrorBar: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .help(message)
@@ -5367,7 +5375,7 @@ struct BlockingGitRefreshErrorBar: View {
                         .controlSize(.small)
                     Text("Refreshing…")
                 }
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .foregroundStyle(.secondary)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("blocking-refresh-progress")
@@ -6380,6 +6388,8 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
     private let defaults: UserDefaults
     private var hasAppliedInitialWidth = false
     private var isApplyingPersistedWidth = false
+    private var preferredNavigationWidth: CGFloat
+    private var lastLayoutWidth: CGFloat = 0
     private var pendingPersistedWidth: CGFloat?
     private var persistTimer: Timer?
 
@@ -6389,6 +6399,8 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
         review: AnyView
     ) {
         self.defaults = defaults
+        let savedWidth = CGFloat(defaults.double(forKey: ReviewSplitLayoutMetrics.widthDefaultsKey))
+        preferredNavigationWidth = savedWidth > 0 ? savedWidth : ReviewSplitLayoutMetrics.idealNavigationWidth
         navigationController = NSHostingController(rootView: navigation)
         reviewController = NSHostingController(rootView: review)
         super.init(nibName: nil, bundle: nil)
@@ -6441,25 +6453,26 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard !hasAppliedInitialWidth,
-              managedSplitView.bounds.width
+        guard managedSplitView.bounds.width
                 >= ReviewSplitLayoutMetrics.minimumNavigationWidth
                     + managedSplitView.dividerThickness,
               managedSplitView.subviews.count >= 2 else {
             return
         }
+        guard !hasAppliedInitialWidth
+            || abs(managedSplitView.bounds.width - lastLayoutWidth) > 0.5 else { return }
         hasAppliedInitialWidth = true
-        let savedWidth = CGFloat(
-            defaults.double(forKey: ReviewSplitLayoutMetrics.widthDefaultsKey)
-        )
-        let preferredWidth = savedWidth > 0
-            ? savedWidth
-            : ReviewSplitLayoutMetrics.idealNavigationWidth
+        applyPreferredNavigationWidth()
+    }
+
+    private func applyPreferredNavigationWidth() {
+        lastLayoutWidth = managedSplitView.bounds.width
         let width = ReviewSplitLayoutMetrics.clampedNavigationWidth(
-            preferredWidth,
+            preferredNavigationWidth,
             totalWidth: managedSplitView.bounds.width,
             dividerThickness: managedSplitView.dividerThickness
         )
+        guard abs(managedSplitView.subviews[0].frame.width - width) > 0.5 else { return }
         isApplyingPersistedWidth = true
         managedSplitView.setPosition(width, ofDividerAt: 0)
         isApplyingPersistedWidth = false
@@ -6528,9 +6541,34 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
             return
         }
         let width = managedSplitView.subviews[0].frame.width
+        if abs(managedSplitView.bounds.width - lastLayoutWidth) > 0.5 {
+            applyPreferredNavigationWidth()
+            return
+        }
+        let clampedWidth = ReviewSplitLayoutMetrics.clampedNavigationWidth(
+            width,
+            totalWidth: managedSplitView.bounds.width,
+            dividerThickness: managedSplitView.dividerThickness
+        )
+        if abs(width - clampedWidth) > 0.5 {
+            isApplyingPersistedWidth = true
+            managedSplitView.setPosition(clampedWidth, ofDividerAt: 0)
+            isApplyingPersistedWidth = false
+            return
+        }
+        let preferredWidth = ReviewSplitLayoutMetrics.clampedNavigationWidth(
+            preferredNavigationWidth,
+            totalWidth: managedSplitView.bounds.width,
+            dividerThickness: managedSplitView.dividerThickness
+        )
+        if abs(width - preferredWidth) < 0.5,
+           abs(width - preferredNavigationWidth) > 0.5 {
+            return
+        }
         guard width >= ReviewSplitLayoutMetrics.minimumNavigationWidth - 1 else {
             return
         }
+        preferredNavigationWidth = width
         pendingPersistedWidth = width
         persistTimer?.invalidate()
         let timer = Timer(
@@ -6567,7 +6605,7 @@ struct HunkHistoryFilterBar: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11, weight: .regular))
+                .font(.agentGitInterface(size: 11, weight: .regular))
                 .foregroundStyle(.secondary)
             Text(filter.path)
                 .lineLimit(1)
@@ -6580,7 +6618,7 @@ struct HunkHistoryFilterBar: View {
             Spacer(minLength: 2)
             Button(action: clear) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.agentGitInterface(size: 9, weight: .semibold))
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
@@ -6589,7 +6627,7 @@ struct HunkHistoryFilterBar: View {
             .help("Close Hunk History")
             .accessibilityLabel("Close Hunk History")
         }
-        .font(.system(size: 12, weight: .regular))
+        .font(.agentGitInterface(size: 12, weight: .regular))
         .padding(.horizontal, 8)
         .frame(height: 32)
         .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
@@ -6608,7 +6646,7 @@ struct DiffCountLabel: View {
             Text("−\(deleted)")
                 .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
         }
-        .font(.caption.monospacedDigit().weight(.medium))
+        .font(.agentGitInterface(.caption).monospacedDigit().weight(.medium))
     }
 }
 
@@ -6623,11 +6661,11 @@ struct NavigatorSectionHeader: View {
             Image(systemName: title == ReviewPane.commits.title ? "clock.arrow.circlepath" : "folder")
                 .foregroundStyle(.secondary)
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.agentGitInterface(size: 12, weight: .semibold))
                 .foregroundStyle(.primary)
             if let count {
                 Text(count.formatted())
-                    .font(.system(size: 11).monospacedDigit())
+                    .font(.agentGitInterface(size: 11).monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
@@ -6650,47 +6688,33 @@ struct NavigatorSectionHeader: View {
 private struct ReviewLayoutControls: View {
     @Binding var diffLayout: DiffLayoutMode
     @Binding var ignoresWhitespace: Bool
-    @State private var isDisplayHovered = false
 
     var body: some View {
         HStack(spacing: 8) {
             Menu {
                 Toggle("Ignore Whitespace Changes", isOn: $ignoresWhitespace)
             } label: {
-                Label { Text("Display") } icon: { ReviewIconView(icon: .display) }
-                    .padding(.horizontal, 9)
-                    .frame(height: 30)
-                    .background(Color(nsColor: isDisplayHovered ? AgentGitPalette.reviewHover : AgentGitPalette.card), in: RoundedRectangle(cornerRadius: 7))
-                    .overlay { RoundedRectangle(cornerRadius: 7).stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 0.7) }
+                Label("Display", systemImage: "slider.horizontal.3")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .onHover { isDisplayHovered = $0 }
             .foregroundStyle(ignoresWhitespace ? Color.accentColor : Color.primary)
             .help(ignoresWhitespace ? "Display options — whitespace changes hidden" : "Display options — all whitespace changes shown")
             .accessibilityLabel("Diff Display Options")
             .accessibilityValue(ignoresWhitespace ? "Ignoring whitespace" : "Showing whitespace")
 
-            HStack(spacing: 2) {
+            Picker("Diff Layout", selection: $diffLayout) {
                 ForEach(DiffLayoutMode.allCases) { mode in
-                    Button { diffLayout = mode } label: {
-                        Label { Text(mode.title) } icon: {
-                            ReviewIconView(icon: mode == .sideBySide ? .split : .unified)
-                        }
-                    }
-                    .buttonStyle(ReviewToolbarButtonStyle(kind: diffLayout == mode ? .selected : .normal))
-                    .accessibilityLabel(mode.title)
-                    .accessibilityAddTraits(diffLayout == mode ? .isSelected : [])
-                    .help("Show \(mode.title.lowercased()) diff")
+                    Text(mode.title).tag(mode)
                 }
             }
-            .padding(2)
-            .background(Color(nsColor: AgentGitPalette.inputBackground), in: RoundedRectangle(cornerRadius: 9))
-            .fixedSize()
-            .accessibilityElement(children: .contain)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 144)
             .accessibilityLabel("Diff Layout")
         }
-        .font(.system(size: 11.5, weight: .medium))
+        .controlSize(.small)
+        .font(.agentGitInterface(size: 11.5))
     }
 }
 
@@ -6703,11 +6727,11 @@ private struct IntegratedFilterField: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "magnifyingglass")
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.callout)
+                .font(.agentGitInterface(.callout))
                 .focused($isFocused)
                 .onExitCommand {
                     if text.isEmpty {
@@ -6721,7 +6745,7 @@ private struct IntegratedFilterField: View {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
+                        .font(.agentGitInterface(.caption))
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
@@ -6749,9 +6773,9 @@ struct NavigatorFilterEmptyState: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: "line.3.horizontal.decrease.circle")
-                .font(.caption.weight(.semibold))
+                .font(.agentGitInterface(.caption).weight(.semibold))
             Text("No result matches “\(query)”.")
-                .font(.caption2)
+                .font(.agentGitInterface(.caption2))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
             Button("Clear Filter", action: clearFilter)
@@ -6814,13 +6838,13 @@ private struct IntegratedReviewTitle: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.title3.weight(.semibold))
+                .font(.agentGitInterface(.title3).weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .textSelection(.enabled)
             if !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -6868,7 +6892,7 @@ struct CommitSummaryHeader: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(String(commit.oid.prefix(9)))
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.agentGitInterface(size: 11.5, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
@@ -6888,7 +6912,7 @@ struct CommitSummaryHeader: View {
                 statsBadges
                     .fixedSize()
             }
-            .font(.system(size: 11.5))
+            .font(.agentGitInterface(size: 11.5))
             .foregroundStyle(Color(nsColor: AgentGitPalette.codeText))
 
             HStack(spacing: 5) {
@@ -6897,7 +6921,7 @@ struct CommitSummaryHeader: View {
                 }
                 if commit.references.count > 3 {
                     Text("+\(commit.references.count - 3)")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.agentGitInterface(size: 10).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
@@ -6906,10 +6930,10 @@ struct CommitSummaryHeader: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: showsDetails ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(.agentGitInterface(size: 8, weight: .semibold))
                         Text("Details")
                     }
-                    .font(.system(size: 10.5))
+                    .font(.agentGitInterface(size: 10.5))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -6943,7 +6967,7 @@ struct CommitSummaryHeader: View {
                         .textSelection(.enabled)
                     }
                 }
-                .font(.system(size: 11.5, design: .monospaced))
+                .font(.agentGitInterface(size: 11.5, design: .monospaced))
                 .foregroundStyle(Color(nsColor: AgentGitPalette.codeText))
             }
 
@@ -6994,7 +7018,7 @@ struct CommitSummaryHeader: View {
     ) -> some View {
         GridRow {
             Text(title)
-                .font(.system(size: 11, weight: .medium))
+                .font(.agentGitInterface(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 82, alignment: .trailing)
             content()
@@ -7019,7 +7043,7 @@ struct CommitMessageSummary: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .font(.caption.weight(.medium))
+                .font(.agentGitInterface(.caption).weight(.medium))
                 .foregroundStyle(Color.accentColor)
                 .accessibilityIdentifier("commit-message-full-reader")
                 .accessibilityLabel("Show Full Commit Message")
@@ -7028,7 +7052,7 @@ struct CommitMessageSummary: View {
                     VStack(spacing: 0) {
                         HStack {
                             Text("Commit Message")
-                                .font(.headline)
+                                .font(.agentGitInterface(.headline))
                             Spacer()
                             Button("Copy") {
                                 copyToPasteboard(message)
@@ -7039,7 +7063,7 @@ struct CommitMessageSummary: View {
                         Divider()
                         ScrollView {
                             Text(message)
-                                .font(.body)
+                                .font(.agentGitInterface(.body))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(16)
@@ -7062,14 +7086,14 @@ struct CommitMessageSummary: View {
         )
         let subject = String(lines.first ?? "")
         let subjectText = Text(subject)
-            .font(.system(size: 13, weight: .semibold))
+            .font(.agentGitInterface(size: 13, weight: .semibold))
             .foregroundStyle(Color(nsColor: AgentGitPalette.commitPrimaryText))
         guard lines.count > 1 else {
             return subjectText
         }
         return subjectText
             + Text("\n" + String(lines[1]))
-                .font(.system(size: 12, weight: .regular))
+                .font(.agentGitInterface(size: 12, weight: .regular))
                 .foregroundStyle(Color(nsColor: AgentGitPalette.commitSecondaryText))
     }
 }
@@ -7088,20 +7112,20 @@ private struct NavigatorFolderRow: View {
         let fileCountLabel = countedLabel(fileCount, singular: "file")
         HStack(spacing: 7) {
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.agentGitInterface(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .frame(width: 10)
             Image(systemName: isExpanded ? "folder.fill" : "folder")
-                .font(.system(size: 12, weight: .medium))
+                .font(.agentGitInterface(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 14)
             Text(name)
-                .font(.callout.weight(.medium))
+                .font(.agentGitInterface(.callout).weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
             Text("\(fileCount)")
-                .font(.caption2.monospacedDigit())
+                .font(.agentGitInterface(.caption2).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
         .contentShape(Rectangle())
@@ -7129,11 +7153,11 @@ private struct NavigatorFileRow: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 fileName
-                    .font(.callout)
+                    .font(.agentGitInterface(.callout))
                     .lineLimit(1)
                 if showsPathDetail, !pathDetail.isEmpty {
                     Text(pathDetail)
-                        .font(.caption2)
+                        .font(.agentGitInterface(.caption2))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -7153,7 +7177,7 @@ private struct NavigatorFileRow: View {
                     .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
             }
         }
-        .font(.caption2.monospacedDigit())
+        .font(.agentGitInterface(.caption2).monospacedDigit())
         .padding(.vertical, 1)
         .help(helpText)
         .accessibilityElement(children: .ignore)
@@ -7280,26 +7304,31 @@ struct PendingOverviewRow: View {
             PendingCommitGraphMarker(width: graphWidth)
             VStack(alignment: .leading, spacing: 3) {
                 Text(totalCount == 0 ? "No Changes" : "Pending Changes")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(.agentGitInterface(size: 12, weight: .regular))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Group {
-                    if totalCount == 0 {
-                        Text("Working tree clean")
-                    } else {
-                        HStack(spacing: 6) {
-                            Text("Working \(workingCount)")
-                            if untrackedCount > 0 {
+                ViewThatFits(in: .horizontal) {
+                    Group {
+                        if totalCount == 0 {
+                            Text("Working tree clean")
+                        } else {
+                            HStack(spacing: 6) {
+                                Text("Working \(workingCount)")
+                                if untrackedCount > 0 {
+                                    Text("·")
+                                    Text("Untracked \(untrackedCount)")
+                                }
                                 Text("·")
-                                Text("Untracked \(untrackedCount)")
+                                Text("Staged \(stagedCount)")
                             }
-                            Text("·")
-                            Text("Staged \(stagedCount)")
                         }
                     }
+                    .fixedSize(horizontal: true, vertical: false)
+                    Text(countedLabel(totalCount, singular: "changed file"))
                 }
-                .font(.system(size: 11))
+                .font(.agentGitInterface(size: 11))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
@@ -7363,21 +7392,21 @@ struct IntegratedCommitRow: View {
                 )
             } else {
                 Image(systemName: isSearchResult ? "magnifyingglass" : "circle")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.agentGitInterface(size: 9, weight: .medium))
                     .foregroundStyle(.tertiary)
                     .frame(width: graphWidth, height: CommitGraphMetrics.rowHeight)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(commit.subject)
-                        .font(.system(size: 12, weight: .regular))
+                        .font(.agentGitInterface(size: 12, weight: .regular))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if let changedFileCount = commit.changedFileCount,
                        changedFileCount > 0 {
                         Text("\(changedFileCount)")
-                            .font(.system(size: 10).monospacedDigit())
+                            .font(.agentGitInterface(size: 10).monospacedDigit())
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
@@ -7405,7 +7434,7 @@ struct IntegratedCommitRow: View {
                             }
                         } label: {
                             Text("+\(references.count - 1)")
-                                .font(.system(size: 10).monospacedDigit())
+                                .font(.agentGitInterface(size: 10).monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 3)
                                 .padding(.vertical, 1)
@@ -7426,7 +7455,7 @@ struct IntegratedCommitRow: View {
                         .fixedSize()
                         .layoutPriority(2)
                 }
-                .font(.system(size: 11))
+                .font(.agentGitInterface(size: 11))
                 .foregroundStyle(.secondary)
             }
         }
@@ -7513,11 +7542,11 @@ private struct CommitReferenceBadge: View {
 
     var body: some View {
         Text(reference.label)
-            .font(.system(size: 11, weight: .regular))
+            .font(.agentGitInterface(size: 11, weight: .regular))
             .foregroundStyle(.primary)
             .lineLimit(1)
             .truncationMode(.middle)
-            .frame(width: badgeWidth, alignment: .leading)
+            .frame(maxWidth: badgeWidth, alignment: .leading)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(
@@ -7535,7 +7564,7 @@ private struct CommitReferenceBadge: View {
     }
 
     private var badgeWidth: CGFloat {
-        let font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        let font = AgentGitTypography.interface(ofSize: 11, weight: .regular)
         let textWidth = (reference.label as NSString).size(
             withAttributes: [.font: font]
         ).width

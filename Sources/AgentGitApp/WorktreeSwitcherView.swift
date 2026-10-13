@@ -96,13 +96,13 @@ struct WorktreeSwitcherView: View {
                                 VStack(spacing: 2) {
                                     HStack(spacing: 7) {
                                         Image(systemName: "folder.fill")
-                                            .font(.system(size: 11, weight: .medium))
+                                            .font(.agentGitInterface(size: 11, weight: .medium))
                                             .foregroundStyle(Color.accentColor.opacity(0.78))
                                         Text(project.project.displayName)
-                                            .font(.system(size: 12, weight: .semibold))
+                                            .font(.agentGitInterface(size: 12, weight: .semibold))
                                         Spacer()
                                         Text("\(project.worktrees.count)")
-                                            .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                                            .font(.agentGitInterface(size: 9.5, weight: .semibold).monospacedDigit())
                                             .foregroundStyle(.secondary)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
@@ -156,7 +156,7 @@ struct WorktreeSwitcherView: View {
             Divider()
             HStack(spacing: 10) {
                 Text("↑ ↓ to navigate · Return to open · Esc to close")
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel", action: dismiss.callAsFunction)
@@ -208,7 +208,7 @@ struct WorktreeSwitcherView: View {
     private var switcherHeader: some View {
         HStack(spacing: 11) {
             Image(systemName: "rectangle.stack.badge.person.crop")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.agentGitInterface(size: 14, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 34, height: 34)
                 .background(
@@ -217,14 +217,14 @@ struct WorktreeSwitcherView: View {
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text("Switch Worktree")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.agentGitInterface(size: 20, weight: .semibold))
                 Text("Jump to any branch across your projects.")
-                    .font(.system(size: 10.5))
+                    .font(.agentGitInterface(size: 10.5))
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             Text("\(projects.flatMap(\.worktrees).count)")
-                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                .font(.agentGitInterface(size: 10.5, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -239,7 +239,7 @@ struct WorktreeSwitcherView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.tertiary)
             TextField("Search projects and worktrees", text: $query)
-                .font(.system(size: 15))
+                .font(.agentGitInterface(size: 15))
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
                 .onMoveCommand { direction in
@@ -325,17 +325,17 @@ private struct WorktreeSwitcherEmptyState: View {
                     ? "point.3.connected.trianglepath.dotted"
                     : "line.3.horizontal.decrease.circle"
             )
-            .font(.system(size: 24, weight: .regular))
+            .font(.agentGitInterface(size: 24, weight: .regular))
             .foregroundStyle(.tertiary)
             .frame(width: 46, height: 46)
             .background(Color.secondary.opacity(0.055), in: Circle())
 
             Text(query.isEmpty ? "No Worktrees" : "No Matching Worktrees")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.agentGitInterface(size: 14, weight: .semibold))
 
             if !query.isEmpty {
                 Text("No project or worktree matches “\(query)”.")
-                    .font(.system(size: 11))
+                    .font(.agentGitInterface(size: 11))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
@@ -364,7 +364,7 @@ private struct WorktreeSwitcherRow: View {
                         .lineLimit(1)
                     if snapshot.status.changedFileCount > 0 {
                         Text("\(snapshot.status.changedFileCount)")
-                            .font(.caption2.monospacedDigit())
+                            .font(.agentGitInterface(.caption2).monospacedDigit())
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(.orange.opacity(0.16), in: Capsule())
@@ -385,7 +385,7 @@ private struct WorktreeSwitcherRow: View {
                             .monospacedDigit()
                     }
                 }
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
@@ -396,7 +396,7 @@ private struct WorktreeSwitcherRow: View {
                     Text("−\(snapshot.diffStat.deletedLineCount)")
                         .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
                 }
-                .font(.caption.monospacedDigit().weight(.medium))
+                .font(.agentGitInterface(.caption).monospacedDigit().weight(.medium))
             }
         }
         .padding(.horizontal, 10)

@@ -8,12 +8,17 @@ enum SidebarLayoutMetrics {
     static let navigationContentWidth = visibleWidth - 8
 }
 
+private enum SidebarDestination: Hashable {
+    case overview
+    case worktree(String)
+}
+
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.fontScaleSettings) private var suppliedFontSettings
     @State private var viewportWidth = CGFloat.infinity
     private var fontSettings: FontScaleSettings { suppliedFontSettings ?? .shared }
-    private var usesCompactFontLayout: Bool { viewportWidth / fontSettings.scale < 980 }
+    private var usesCompactFontLayout: Bool { viewportWidth / fontSettings.scale < 1_100 }
     @State private var sidebarBeforeFontScale: NavigationSplitViewVisibility?
     @State private var projectsShowingAllWorktrees: Set<GitProject.ID> = []
     @State private var sidebarFilterText = ""
@@ -41,45 +46,28 @@ struct ContentView: View {
                     showsOnlyPendingWorktrees: $showsOnlyPendingWorktrees
                 )
                 .padding(.horizontal, 14)
-                .padding(.top, 18)
-                .padding(.bottom, 14)
-
-                Button {
-                    showsOverview = true
-                } label: {
-                    HStack(spacing: 9) {
-                        Image(systemName: "square.grid.2x2")
-                        Text("All Worktrees").fontWeight(.medium)
-                        Spacer()
-                        Text(sidebarWorktrees.count.formatted()).foregroundStyle(.secondary)
-                    }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 12)
-                    .frame(height: 36)
-                    .background(showsOverview ? Color(nsColor: AgentGitPalette.sidebarSelection) : .clear, in: RoundedRectangle(cornerRadius: 8))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 5)
                 SidebarSearchField(text: $sidebarFilterText)
-                HStack {
-                    Text("PROJECTS").font(.system(size: 10, weight: .semibold)).tracking(1)
-                    Spacer()
-                    Button(action: model.chooseProject) { Image(systemName: "plus") }
-                        .buttonStyle(.plain)
-                        .help("Add Project (⌘O)")
-                        .accessibilityLabel("Add Project")
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 6)
 
-                ScrollView {
-                    LazyVStack(spacing: 12) {
+                List(selection: sidebarSelection) {
+                    Label {
+                        HStack {
+                            Text("All Worktrees")
+                            Spacer()
+                            Text(sidebarWorktrees.count.formatted())
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    } icon: {
+                        Image(systemName: "square.grid.2x2")
+                    }
+                    .tag(SidebarDestination.overview)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 8))
+
+                    Section {
                         ForEach(Array(filteredProjects.enumerated()), id: \.element.id) {
                             projectIndex, projectState in
-                            VStack(spacing: 0) {
                                 ProjectHeader(
                                     projectState: projectState,
                                     isCollapsed: model.collapsedProjectIDs.contains(projectState.id),
@@ -96,7 +84,6 @@ struct ContentView: View {
                                                 : Color.clear
                                         )
                                 )
-                                .padding(.horizontal, 7)
                                 .draggable(projectState.id) {
                                     Label(
                                         projectState.project.displayName,
@@ -131,21 +118,29 @@ struct ContentView: View {
                                 .contextMenu {
                                     projectContextMenu(projectState)
                                 }
+                                .listRowInsets(EdgeInsets(top: 6, leading: 2, bottom: 0, trailing: 2))
 
                                 if !model.collapsedProjectIDs.contains(projectState.id)
                                     || !sidebarFilterQuery.isEmpty {
-                                    VStack(spacing: 0) {
-                                        projectContents(projectState)
-                                    }
-                                    .padding(.bottom, 4)
+                                    projectContents(projectState)
                                 }
+                        }
+                    } header: {
+                        HStack {
+                            Text("Projects")
+                            Spacer()
+                            Button(action: model.chooseProject) {
+                                Image(systemName: "plus")
                             }
-                            .padding(.horizontal, 8)
+                            .buttonStyle(.plain)
+                            .help("Add Project (⌘O)")
+                            .accessibilityLabel("Add Project")
                         }
                     }
-                    .padding(.top, 6)
-                    .padding(.bottom, 10)
                 }
+                .listStyle(.sidebar)
+                .listRowSeparator(.hidden)
+                .environment(\.defaultMinListRowHeight, 28)
                 .overlay {
                     if !sidebarFilterQuery.isEmpty, filteredProjects.isEmpty {
                         SidebarNoResultsView(query: sidebarFilterQuery) {
@@ -156,7 +151,6 @@ struct ContentView: View {
                 sidebarFooter
             }
             }
-            .background(Color(nsColor: AgentGitPalette.sidebarBackground))
             .navigationSplitViewColumnWidth(
                 min: 240 * fontSettings.scale,
                 ideal: SidebarLayoutMetrics.navigationContentWidth * fontSettings.scale,
@@ -188,19 +182,16 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .navigationTitle("")
+        .navigationTitle(windowTitle)
+        .navigationSubtitle(windowSubtitle)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("AgentGit Workspace")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     model.isWorktreeSwitcherPresented = true
                 } label: {
-                    Label("Switch Worktree", systemImage: "rectangle.on.rectangle")
+                    Label("Worktrees", systemImage: "rectangle.on.rectangle")
                 }
+                .labelStyle(.titleAndIcon)
                 .help("Switch Worktree (⌘P)")
                 .disabled(!model.hasAvailableWorktrees)
             }
@@ -314,6 +305,34 @@ struct ContentView: View {
         }
     }
 
+    private var sidebarSelection: Binding<SidebarDestination?> {
+        Binding(
+            get: {
+                showsOverview ? .overview : model.selectedWorktreeID.map(SidebarDestination.worktree)
+            },
+            set: { destination in
+                switch destination {
+                case .overview: showsOverview = true
+                case let .worktree(id): openWorktree(id)
+                case nil: break
+                }
+            }
+        )
+    }
+
+    private var windowTitle: String {
+        guard !showsOverview, let worktree = model.selectedWorktree else {
+            return showsOverview ? "All Worktrees" : "AgentGit"
+        }
+        return model.projects.first(where: {
+            $0.snapshot?.worktrees.contains(where: { $0.id == worktree.id }) == true
+        })?.project.displayName ?? worktree.worktree.rootURL.lastPathComponent
+    }
+
+    private var windowSubtitle: String {
+        showsOverview ? "\(sidebarWorktrees.count) worktrees" : model.selectedWorktree?.worktree.displayName ?? "Git Workspace"
+    }
+
     @ViewBuilder
     private var reviewContent: some View {
             if let snapshot = model.selectedWorktree {
@@ -355,7 +374,7 @@ struct ContentView: View {
                 model.isWorktreeSwitcherPresented = true
             } label: {
                 Text("⌘ P")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.agentGitInterface(size: 10, weight: .medium, design: .monospaced))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
@@ -363,10 +382,10 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .help("Quick switch worktree")
         }
-        .font(.system(size: 11))
+        .font(.agentGitInterface(size: 11))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 19)
-        .frame(height: 48)
+        .frame(height: 36)
         .overlay(alignment: .top) { Color(nsColor: AgentGitPalette.separator).frame(height: 1) }
     }
 
@@ -382,19 +401,19 @@ struct ContentView: View {
     private func worktreePathBar(_ url: URL) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "folder")
-                .font(.system(size: 10))
+                .font(.agentGitInterface(size: 10))
                 .foregroundStyle(.secondary)
             Text((url.path as NSString).abbreviatingWithTildeInPath)
-                .font(.system(size: 11))
+                .font(.agentGitInterface(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
             Text(countedLabel(sidebarWorktrees.count, singular: "worktree"))
-                .font(.system(size: 10).monospacedDigit())
+                .font(.agentGitInterface(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)
             Circle().fill(Color(nsColor: AgentGitPalette.statusAdded)).frame(width: 5, height: 5)
-            Text("Local Git").font(.system(size: 10)).foregroundStyle(.secondary)
+            Text("Local Git").font(.agentGitInterface(size: 10)).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
         .frame(height: 28)
@@ -425,7 +444,7 @@ struct ContentView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .help(message)
@@ -652,7 +671,8 @@ struct ContentView: View {
                     )
                 }
                     .buttonStyle(.plain)
-                    .padding(.horizontal, 7)
+                    .tag(SidebarDestination.worktree(worktree.id))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
                     .contextMenu {
                         Button(
                             model.isWorktreePinned(id: worktree.id)
@@ -730,10 +750,10 @@ struct AgentGitSidebarBrandView: View {
             Image(nsImage: NSApplication.shared.applicationIconImage)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 30, height: 30)
+                .frame(width: 22, height: 22)
 
             Text("AgentGit")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.agentGitInterface(size: 13, weight: .semibold))
 
             Spacer(minLength: 6)
 
@@ -761,7 +781,7 @@ struct AgentGitSidebarBrandView: View {
                 showsOnlyPendingWorktrees.wrappedValue.toggle()
             } label: {
                 Text(title)
-                    .font(.system(size: 10.5).monospacedDigit())
+                    .font(.agentGitInterface(size: 10.5).monospacedDigit())
                     .foregroundStyle(
                         isOn ? Color.white : Color(nsColor: .systemOrange)
                     )
@@ -787,7 +807,7 @@ struct AgentGitSidebarBrandView: View {
             )
         } else {
             Text(title)
-                .font(.system(size: 10.5).monospacedDigit())
+                .font(.agentGitInterface(size: 10.5).monospacedDigit())
                 .foregroundStyle(Color(nsColor: .systemOrange))
         }
     }
@@ -813,18 +833,18 @@ struct SidebarSearchField: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12.5, weight: .regular))
+                .font(.agentGitInterface(size: 12.5, weight: .regular))
                 .foregroundStyle(.secondary)
             TextField("Filter worktrees…", text: $text)
                 .accessibilityLabel("Filter projects and worktrees")
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.agentGitInterface(size: 12))
             if !text.isEmpty {
                 Button {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(.agentGitInterface(size: 11))
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
@@ -893,16 +913,16 @@ struct AgentGitWorkspaceEmptyState: View {
                             .controlSize(.regular)
                     } else {
                         Image(systemName: systemImage)
-                            .font(.system(size: 22, weight: .regular))
+                            .font(.agentGitInterface(size: 22, weight: .regular))
                             .foregroundStyle(Color.accentColor)
                     }
                 }
                 .frame(width: 54, height: 54)
 
                 Text(title)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.agentGitInterface(size: 17, weight: .semibold))
                 Text(detail)
-                    .font(.system(size: 11.5))
+                    .font(.agentGitInterface(size: 11.5))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 340)
@@ -933,12 +953,12 @@ struct SidebarNoResultsView: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "line.3.horizontal.decrease.circle")
-                .font(.system(size: 25, weight: .regular))
+                .font(.agentGitInterface(size: 25, weight: .regular))
                 .foregroundStyle(.secondary)
             Text("No Matching Worktrees")
-                .font(.headline)
+                .font(.agentGitInterface(.headline))
             Text("No project or worktree matches “\(query)”.")
-                .font(.caption)
+                .font(.agentGitInterface(.caption))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
@@ -991,10 +1011,10 @@ private struct ProjectErrorRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.weight(.semibold))
+                .font(.agentGitInterface(.caption).weight(.semibold))
                 .foregroundStyle(.orange)
             Text(message)
-                .font(.caption2)
+                .font(.agentGitInterface(.caption2))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .textSelection(.enabled)
@@ -1083,10 +1103,10 @@ private struct ProjectWorktreeDisclosureRow: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.agentGitInterface(size: 9, weight: .medium))
                     .foregroundStyle(.tertiary)
                 Text(title)
-                    .font(.system(size: 10.5))
+                    .font(.agentGitInterface(size: 10.5))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1117,16 +1137,16 @@ struct ProjectHeader: View {
         Button(action: toggle) {
             HStack(spacing: 6) {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                    .font(.caption2.weight(.semibold))
+                    .font(.agentGitInterface(.caption2).weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 12)
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 10.5, weight: .medium))
+                Image(systemName: "folder")
+                    .font(.agentGitInterface(size: 10.5, weight: .medium))
                     .foregroundStyle(Color.accentColor.opacity(0.76))
                     .frame(width: 13)
                 Text(projectState.project.displayName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.84))
+                    .font(.agentGitInterface(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
                     .lineLimit(1)
                 if projectState.errorMessage != nil {
                     Image(
@@ -1134,7 +1154,7 @@ struct ProjectHeader: View {
                             ? "xmark.octagon.fill"
                             : "exclamationmark.triangle.fill"
                     )
-                    .font(.caption2)
+                    .font(.agentGitInterface(.caption2))
                     .foregroundStyle(
                         projectState.snapshot == nil ? Color.red : Color.orange
                     )
@@ -1151,7 +1171,7 @@ struct ProjectHeader: View {
                 Spacer(minLength: 4)
                 if let count = projectState.snapshot?.worktrees.count {
                     Text("\(count)")
-                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .font(.agentGitInterface(size: 9.5, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -1196,27 +1216,26 @@ struct WorktreeRow: View {
     var locationLabel: String? = nil
     var isSelected = false
     var isPinned = false
-    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 9) {
             worktreeStateIndicator.frame(width: 12)
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     Text(snapshot.worktree.displayName)
-                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
+                        .font(.agentGitInterface(size: 12.5, weight: isSelected ? .semibold : .medium))
                         .foregroundStyle(primaryForeground)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 0)
                     if isPinned {
-                        Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                        Image(systemName: "pin.fill").font(.agentGitInterface(size: 8)).foregroundStyle(.secondary)
                     }
                 }
                 HStack(spacing: 6) {
                     Text(location)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                        .font(.agentGitInterface(size: 10.5))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 2)
@@ -1224,36 +1243,11 @@ struct WorktreeRow: View {
                 }
             }
         }
-        .padding(.leading, 15)
-        .padding(.trailing, 10)
+        .padding(.leading, 7)
+        .padding(.trailing, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 50)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(
-                    isSelected
-                        ? Color(nsColor: AgentGitPalette.sidebarSelection)
-                        : isHovered
-                            ? Color(nsColor: AgentGitPalette.sidebarHover)
-                            : Color.clear
-                )
-        )
-        .overlay {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(Color.accentColor.opacity(0.11), lineWidth: 1)
-            }
-        }
-        .overlay(alignment: .leading) {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.76))
-                    .frame(width: 3, height: 28)
-                    .padding(.leading, 1)
-            }
-        }
+        .frame(height: 42)
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(worktreeAccessibilityLabel)
@@ -1264,7 +1258,7 @@ struct WorktreeRow: View {
     private var worktreeStateIndicator: some View {
         if snapshot.errorMessage != nil {
             Image(systemName: issueIconName)
-                .font(.system(size: 8, weight: .semibold))
+                .font(.agentGitInterface(size: 8, weight: .semibold))
                 .foregroundStyle(issueIconColor)
         } else {
             Circle()
@@ -1301,13 +1295,13 @@ struct WorktreeRow: View {
                 Text("−\(snapshot.diffStat.deletedLineCount)")
                     .foregroundStyle(Color(nsColor: AgentGitPalette.statusDeleted))
             }
-            .font(.system(size: 10.5).monospacedDigit())
+            .font(.agentGitInterface(size: 10.5).monospacedDigit())
             .accessibilityLabel(
                 "+\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount)"
             )
         } else if snapshot.status.changedFileCount > 0 {
             Text("\(snapshot.status.changedFileCount)")
-                .font(.system(size: 10.5).monospacedDigit())
+                .font(.agentGitInterface(size: 10.5).monospacedDigit())
                 .foregroundStyle(dirtyIndicatorForeground)
                 .accessibilityLabel(
                     countedLabel(
@@ -1318,16 +1312,16 @@ struct WorktreeRow: View {
                 )
         } else if let indicator = reviewStatus.compactIndicator {
             Text(indicator)
-                .font(.system(size: 10.5).monospacedDigit())
+                .font(.agentGitInterface(size: 10.5).monospacedDigit())
                 .foregroundStyle(Color(nsColor: AgentGitPalette.worktreeTracking))
                 .accessibilityLabel(reviewStatus.accessibilityDescription)
         } else if snapshot.lastActivityAt == .distantPast {
             Text("—")
-                .font(.system(size: 10.5))
+                .font(.agentGitInterface(size: 10.5))
                 .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
         } else {
             Text(compactRelativeTime(snapshot.lastActivityAt))
-                .font(.system(size: 10.5).monospacedDigit())
+                .font(.agentGitInterface(size: 10.5).monospacedDigit())
                 .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
         }
     }

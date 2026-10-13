@@ -19,6 +19,7 @@ struct AgentGitApp: App {
         WindowGroup("AgentGit") {
             ContentView()
                 .environment(model)
+                .font(.agentGitInterface(.body))
                 .frame(
                     minWidth: AgentGitWindowMetrics.minimumWidth,
                     minHeight: AgentGitWindowMetrics.minimumHeight
@@ -31,7 +32,7 @@ struct AgentGitApp: App {
             width: AgentGitWindowMetrics.defaultWidth,
             height: AgentGitWindowMetrics.defaultHeight
         )
-        .windowToolbarStyle(.unifiedCompact)
+        .windowToolbarStyle(.unified)
         .commands {
             AgentGitReviewCommands()
             FontScaleCommands()
@@ -72,6 +73,7 @@ struct AgentGitApp: App {
         Settings {
             AgentGitSettingsView()
                 .environment(model)
+                .font(.agentGitInterface(.body))
         }
     }
 }
@@ -89,6 +91,7 @@ final class AgentGitApplicationDelegate: NSObject, NSApplicationDelegate {
             "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
             "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
             "bundle": Bundle.main.bundleURL.path,
+            "interfaceFont": AgentGitTypography.interface().fontName,
             "executableModifiedAt": executableDate?.ISO8601Format() ?? "",
             "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString
         ])

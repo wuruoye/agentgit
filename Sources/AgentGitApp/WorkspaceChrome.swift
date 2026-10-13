@@ -33,13 +33,13 @@ struct WorktreeOverview: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("Worktrees").font(.system(size: 22, weight: .semibold))
+                Text("Worktrees").font(.agentGitInterface(size: 22, weight: .semibold))
                 Text(allWorktrees.count.formatted())
-                    .font(.system(size: 14, weight: .medium).monospacedDigit())
+                    .font(.agentGitInterface(size: 14, weight: .medium).monospacedDigit())
                     .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                 Spacer()
                 Text("\(model.projects.count) projects · \(allWorktrees.count { $0.status.changedFileCount > 0 }) with changes")
-                    .font(.system(size: 11))
+                    .font(.agentGitInterface(size: 11))
                     .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                 Button(action: model.chooseProject) {
                     Label("Add Project", systemImage: "plus")
@@ -72,7 +72,7 @@ struct WorktreeOverview: View {
                     .toggleStyle(.button)
                     .controlSize(.regular)
             }
-            .font(.system(size: 12))
+            .font(.agentGitInterface(size: 12))
             .padding(.horizontal, 22)
             .padding(.bottom, 16)
 
@@ -83,7 +83,7 @@ struct WorktreeOverview: View {
                 Text("SYNC").frame(width: 130, alignment: .leading)
                 Text("ACTIVITY").frame(width: 64, alignment: .trailing)
             }
-            .font(.system(size: 10, weight: .semibold))
+            .font(.agentGitInterface(size: 10, weight: .semibold))
             .tracking(0.5)
             .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
             .padding(.horizontal, 22)
@@ -138,12 +138,12 @@ struct WorktreeOverview: View {
                                 Text(project.worktrees.count.formatted()).foregroundStyle(.secondary)
                                 Spacer()
                                 Text((project.project.rootURL.path as NSString).abbreviatingWithTildeInPath)
-                                    .font(.system(size: 11))
+                                    .font(.agentGitInterface(size: 11))
                                     .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
-                            .font(.system(size: 12))
+                            .font(.agentGitInterface(size: 12))
                             .padding(.horizontal, 22)
                             .frame(height: 36)
                             .background(Color(nsColor: AgentGitPalette.canvas))
@@ -217,11 +217,11 @@ struct OverviewWorktreeRow: View {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(snapshot.worktree.displayName)
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.agentGitInterface(size: 13, weight: .medium))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             if isPinned {
-                                Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(.secondary)
+                                Image(systemName: "pin.fill").font(.agentGitInterface(size: 9)).foregroundStyle(.secondary)
                             }
                         }
                         HStack(spacing: 5) {
@@ -237,14 +237,14 @@ struct OverviewWorktreeRow: View {
                                 .help(creator.helpText)
                             }
                         }
-                        .font(.system(size: 11))
+                        .font(.agentGitInterface(size: 11))
                         .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                         .lineLimit(1)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Text(snapshot.hasUsableState ? snapshot.status.changedFileCount.formatted() : "—")
-                    .font(.system(size: 12, weight: snapshot.status.changedFileCount > 0 ? .semibold : .regular).monospacedDigit())
+                    .font(.agentGitInterface(size: 12, weight: snapshot.status.changedFileCount > 0 ? .semibold : .regular).monospacedDigit())
                     .foregroundStyle(snapshot.status.changedFileCount > 0 ? Color.primary : Color(nsColor: AgentGitPalette.sidebarMetadata))
                     .frame(width: 48, alignment: .trailing)
                 Group {
@@ -256,12 +256,12 @@ struct OverviewWorktreeRow: View {
                 }
                 .frame(width: 108, alignment: .trailing)
                 Text(syncLabel)
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .font(.agentGitInterface(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(syncColor)
                     .lineLimit(1)
                     .frame(width: 130, alignment: .leading)
                 Text(snapshot.lastActivityAt == .distantPast ? "—" : compactRelativeTime(snapshot.lastActivityAt))
-                    .font(.system(size: 11).monospacedDigit())
+                    .font(.agentGitInterface(size: 11).monospacedDigit())
                     .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                     .frame(width: 64, alignment: .trailing)
             }

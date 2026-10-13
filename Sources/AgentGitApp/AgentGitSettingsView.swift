@@ -52,13 +52,13 @@ private struct ReviewSettingsPreview: View {
                     .fill(Color.accentColor)
                     .frame(width: 3, height: 23)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.agentGitInterface(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Text("Sources/ReviewView.swift")
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.agentGitInterface(size: 11.5, weight: .semibold))
                 Spacer()
                 Text("−2  +4")
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.agentGitInterface(size: 10.5, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10)
@@ -67,10 +67,10 @@ private struct ReviewSettingsPreview: View {
 
             HStack {
                 Text("renderReview()")
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.agentGitInterface(size: 10.5, design: .monospaced))
                 Spacer()
                 Text(layout.title)
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(.agentGitInterface(size: 9.5, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
@@ -107,7 +107,7 @@ private struct ReviewSettingsPreview: View {
 
     private func codeLine(_ text: String, isAddition: Bool) -> some View {
         Text(text)
-            .font(.system(size: 10.5, design: .monospaced))
+            .font(.agentGitInterface(size: 10.5, design: .monospaced))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .frame(height: 34)
@@ -210,9 +210,9 @@ struct AgentGitSettingsView: View {
                     .frame(width: 42, height: 42)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("AgentGit")
-                        .font(.system(size: 13.5, weight: .semibold))
+                        .font(.agentGitInterface(size: 13.5, weight: .semibold))
                     Text("Preferences")
-                        .font(.system(size: 10.5))
+                        .font(.agentGitInterface(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -227,7 +227,7 @@ struct AgentGitSettingsView: View {
                             Image(systemName: section.systemImage)
                                 .frame(width: 20)
                             Text(section.title)
-                                .font(.system(size: 12.5, weight: .medium))
+                                .font(.agentGitInterface(size: 12.5, weight: .medium))
                             Spacer(minLength: 4)
                         }
                         .foregroundStyle(
@@ -258,7 +258,7 @@ struct AgentGitSettingsView: View {
             Spacer(minLength: 16)
 
             Label("Local configuration", systemImage: "lock.shield")
-                .font(.system(size: 10.5))
+                .font(.agentGitInterface(size: 10.5))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 6)
         }
@@ -272,9 +272,9 @@ struct AgentGitSettingsView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedSection.title)
-                    .font(.system(size: 26, weight: .semibold))
+                    .font(.agentGitInterface(size: 26, weight: .semibold))
                 Text(selectedSection.subtitle)
-                    .font(.system(size: 11.5))
+                    .font(.agentGitInterface(size: 11.5))
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
@@ -283,7 +283,7 @@ struct AgentGitSettingsView: View {
                     "\(model.agentAssociations.associations.count) sessions",
                     systemImage: "link"
                 )
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.agentGitInterface(size: 10.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
@@ -336,7 +336,7 @@ struct AgentGitSettingsView: View {
                             .toggleStyle(.switch)
                         }
                     }
-                    .font(.system(size: 12))
+                    .font(.agentGitInterface(size: 12))
                 }
             }
 
@@ -395,7 +395,7 @@ struct AgentGitSettingsView: View {
                         }
                     }
                     Text("Cleanup uses the activity time shown in the list. Main, pinned, selected, and locked worktrees are kept, as are worktrees with uncommitted changes or untracked files, including changes inside submodules. Clean worktrees with submodules can be removed. Ignored files are removed with eligible worktrees. Branches and referenced commits are preserved.")
-                        .font(.system(size: 11.5))
+                        .font(.agentGitInterface(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -415,9 +415,9 @@ struct AgentGitSettingsView: View {
                             )) {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(state.project.displayName)
-                                        .font(.system(size: 12, weight: .medium))
+                                        .font(.agentGitInterface(size: 12, weight: .medium))
                                     Text(state.project.rootURL.path)
-                                        .font(.system(size: 10.5))
+                                        .font(.agentGitInterface(size: 10.5))
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                         .truncationMode(.middle)
@@ -474,7 +474,7 @@ struct AgentGitSettingsView: View {
                         }
                     }
                 }
-                .font(.system(size: 11.5))
+                .font(.agentGitInterface(size: 11.5))
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -503,7 +503,7 @@ struct AgentGitSettingsView: View {
                 Text(creatorHookInstalled.map {
                     $0 ? "Installed in global git config" : "Not installed"
                 } ?? "Checking…")
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.agentGitInterface(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 Spacer()
                 if let installed = creatorHookInstalled {
@@ -525,7 +525,7 @@ struct AgentGitSettingsView: View {
 
             if let creatorHookError {
                 Text(creatorHookError)
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                     .foregroundStyle(.red)
                     .lineLimit(3)
                     .textSelection(.enabled)
@@ -546,11 +546,11 @@ struct AgentGitSettingsView: View {
 
             HStack {
                 Text("Registered")
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.agentGitInterface(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text("\(model.agentAssociations.associations.count)")
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .font(.agentGitInterface(size: 12, weight: .semibold).monospacedDigit())
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Color.secondary.opacity(0.07), in: Capsule())
@@ -563,7 +563,7 @@ struct AgentGitSettingsView: View {
                 )
                 .foregroundStyle(.red)
                 Text(persistenceError)
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .textSelection(.enabled)
@@ -576,7 +576,7 @@ struct AgentGitSettingsView: View {
 
             if let recoveryMessage = model.agentAssociations.recoveryMessage {
                 Text(recoveryMessage)
-                    .font(.caption)
+                    .font(.agentGitInterface(.caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
@@ -592,7 +592,7 @@ struct AgentGitSettingsView: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: image)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.agentGitInterface(size: 12, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 30, height: 30)
                 .background(
@@ -601,9 +601,9 @@ struct AgentGitSettingsView: View {
                 )
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.agentGitInterface(size: 13, weight: .semibold))
                 Text(detail)
-                    .font(.system(size: 10.5))
+                    .font(.agentGitInterface(size: 10.5))
                     .foregroundStyle(.secondary)
             }
         }
@@ -611,7 +611,7 @@ struct AgentGitSettingsView: View {
 
     private func settingsFieldLabel(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 11.5, weight: .medium))
+            .font(.agentGitInterface(size: 11.5, weight: .medium))
             .foregroundStyle(.secondary)
             .frame(width: 82, alignment: .leading)
     }

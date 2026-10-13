@@ -1,8 +1,48 @@
 import AppKit
+import CoreText
+import SwiftUI
 
 enum AgentGitTypography {
     static let interfaceSize: CGFloat = 13
     static let codeSize: CGFloat = 13
+
+    private static let hasClaudeInterfaceFont: Bool = {
+        let regularName = "AnthropicSansVariable-TextRegular"
+        if NSFont(name: regularName, size: interfaceSize) != nil { return true }
+        guard let claudeURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.anthropic.claudefordesktop"
+        ) else { return false }
+        let directory = claudeURL.appendingPathComponent("Contents/Resources/fonts")
+        let fontURLs = (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        )) ?? []
+        for url in fontURLs where url.lastPathComponent.hasPrefix("AnthropicSans-")
+            && ["ttf", "otf"].contains(url.pathExtension.lowercased()) {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+        return NSFont(name: regularName, size: interfaceSize) != nil
+    }()
+
+    static func interface(
+        ofSize size: CGFloat = interfaceSize,
+        weight: NSFont.Weight = .regular
+    ) -> NSFont {
+        guard hasClaudeInterfaceFont else {
+            return .systemFont(ofSize: size, weight: weight)
+        }
+        let style: String
+        switch weight {
+        case .heavy...: style = "Extrabold"
+        case .bold...: style = "Bold"
+        case .semibold...: style = "Semibold"
+        case .medium...: style = "Medium"
+        case ..<NSFont.Weight.regular: style = "Light"
+        default: style = "Regular"
+        }
+        return NSFont(name: "AnthropicSansVariable-Text\(style)", size: size)
+            ?? .systemFont(ofSize: size, weight: weight)
+    }
+
     static var code: NSFont {
         NSFont(name: "Menlo", size: codeSize)
             ?? NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
@@ -12,24 +52,68 @@ enum AgentGitTypography {
     }
 }
 
+extension Font {
+    static func agentGitInterface(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        guard design == .default else {
+            return .system(size: size, weight: weight, design: design)
+        }
+        let nativeWeight: NSFont.Weight
+        switch weight {
+        case .black: nativeWeight = .black
+        case .heavy: nativeWeight = .heavy
+        case .bold: nativeWeight = .bold
+        case .semibold: nativeWeight = .semibold
+        case .medium: nativeWeight = .medium
+        case .light: nativeWeight = .light
+        case .thin: nativeWeight = .thin
+        case .ultraLight: nativeWeight = .ultraLight
+        default: nativeWeight = .regular
+        }
+        return Font(AgentGitTypography.interface(ofSize: size, weight: nativeWeight))
+    }
+
+    static func agentGitInterface(_ style: Font.TextStyle) -> Font {
+        let nativeStyle: NSFont.TextStyle
+        switch style {
+        case .largeTitle: nativeStyle = .largeTitle
+        case .title: nativeStyle = .title1
+        case .title2: nativeStyle = .title2
+        case .title3: nativeStyle = .title3
+        case .headline: nativeStyle = .headline
+        case .subheadline: nativeStyle = .subheadline
+        case .callout: nativeStyle = .callout
+        case .footnote: nativeStyle = .footnote
+        case .caption: nativeStyle = .caption1
+        case .caption2: nativeStyle = .caption2
+        default: nativeStyle = .body
+        }
+        let size = NSFont.preferredFont(forTextStyle: nativeStyle).pointSize
+        return agentGitInterface(size: size, weight: style == .headline ? .semibold : .regular)
+    }
+}
+
 enum AgentGitPalette {
     static let cardCornerRadius: CGFloat = 10
-    static let canvas = adaptive(light: srgb(244, 246, 249), dark: srgb(24, 27, 33))
-    static let card = adaptive(light: srgb(255, 255, 255), dark: srgb(31, 35, 43))
-    static let cardBorder = adaptive(light: srgb(224, 229, 236), dark: srgb(48, 54, 65))
-    static let sidebarBackground = adaptive(light: srgb(239, 242, 247), dark: srgb(22, 25, 31))
-    static let inputBackground = adaptive(light: srgb(232, 237, 244), dark: srgb(37, 42, 52))
-    static let sidebarHover = adaptive(light: srgb(228, 234, 243), dark: srgb(37, 43, 54))
-    static let codeBackground = adaptive(light: srgb(255, 255, 255), dark: srgb(27, 31, 38))
+    static let canvas = NSColor.windowBackgroundColor
+    static let card = NSColor.textBackgroundColor
+    static let cardBorder = NSColor.separatorColor.withAlphaComponent(0.45)
+    static let sidebarBackground = NSColor.windowBackgroundColor
+    static let inputBackground = NSColor.controlBackgroundColor
+    static let sidebarHover = NSColor.quaternaryLabelColor.withAlphaComponent(0.10)
+    static let codeBackground = NSColor.textBackgroundColor
     static let reviewContextGap = adaptive(light: srgb(245, 247, 251), dark: srgb(30, 35, 43))
     static let reviewContextGapText = adaptive(light: srgb(114, 126, 145), dark: srgb(141, 154, 175))
-    static let fileHeader = adaptive(light: srgb(248, 250, 253), dark: srgb(33, 38, 47))
+    static let fileHeader = NSColor.controlBackgroundColor
     static let fileContext = adaptive(light: srgb(249, 250, 253), dark: srgb(29, 33, 41))
-    static let hunkHeader = adaptive(light: srgb(244, 247, 251), dark: srgb(30, 35, 43))
+    static let hunkHeader = blended(foreground: .controlBackgroundColor, background: .textBackgroundColor, fraction: 0.5)
     static let reviewActionConfirmationBackground = adaptive(light: srgb(255, 234, 234), dark: srgb(76, 41, 40))
     static let reviewActionConfirmationText = adaptive(light: srgb(181, 46, 44), dark: srgb(255, 133, 130))
-    static let commitPrimaryText = adaptive(light: srgb(32, 40, 53), dark: srgb(231, 236, 245))
-    static let commitSecondaryText = adaptive(light: srgb(88, 102, 121), dark: srgb(172, 183, 201))
+    static let commitPrimaryText = NSColor.labelColor
+    static let commitSecondaryText = NSColor.secondaryLabelColor
     static let chrome = card
     static let selectedChrome = canvas
     static let imagePanel = card
@@ -58,7 +142,7 @@ enum AgentGitPalette {
     static let fileListRow = card
     static let fileHeaderBoundary = cardBorder
     static let sidebarSelection = blended(foreground: .controlAccentColor, background: sidebarBackground, fraction: 0.12)
-    static let fileHeaderFocused = blended(foreground: .controlAccentColor, background: card, fraction: 0.055)
+    static let fileHeaderFocused = blended(foreground: .controlAccentColor, background: card, fraction: 0.035)
 
     static let codeText = adaptive(
         light: srgb(51, 51, 51),
