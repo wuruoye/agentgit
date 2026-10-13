@@ -308,10 +308,61 @@ public struct GitCommandRunner: Sendable {
         return environment
     }()
 
-    private let executableURL: URL
+    /// macOS 的 /usr/bin/git 会经 xcrun 转到开发工具里的 Git，整个进程只解析一次。
+    private static let defaultExecutableURL: URL = {
+        let environment = baseEnvironment
+        let fileManager = FileManager.default
+        var developerDirectory: URL?
+        if let configured = environment["DEVELOPER_DIR"] {
+            let url = URL(fileURLWithPath: configured, isDirectory: true)
+            developerDirectory = url.pathExtension == "app"
+                ? url.appendingPathComponent("Contents/Developer", isDirectory: true)
+                : url
+        } else {
+            let selected = URL(fileURLWithPath: "/var/db/xcode_select_link")
+            if let target = try? fileManager.destinationOfSymbolicLink(atPath: selected.path) {
+                developerDirectory = target.hasPrefix("/")
+                    ? URL(fileURLWithPath: target, isDirectory: true)
+                    : selected.deletingLastPathComponent().appendingPathComponent(target, isDirectory: true)
+            }
+        }
+        if let git = developerDirectory?.appendingPathComponent("usr/bin/git"),
+           fileManager.isExecutableFile(atPath: git.path) {
+            return git.standardizedFileURL
+        }
 
-    public init(executableURL: URL = URL(fileURLWithPath: "/usr/bin/git")) {
-        self.executableURL = executableURL
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["--find", "git"]
+        process.environment = environment
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        if (try? process.run()) != nil {
+            output.fileHandleForWriting.closeFile()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if process.terminationStatus == 0, path.hasPrefix("/"),
+               fileManager.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return URL(fileURLWithPath: "/usr/bin/git")
+    }()
+
+    let executableURL: URL
+    let diagnostics: AgentGitDiagnostics
+
+    public init(
+        executableURL: URL = URL(fileURLWithPath: "/usr/bin/git"),
+        diagnostics: AgentGitDiagnostics = .shared
+    ) {
+        self.executableURL = executableURL.path == "/usr/bin/git"
+            ? Self.defaultExecutableURL
+            : executableURL
+        self.diagnostics = diagnostics
     }
 
     public func run(
@@ -321,18 +372,63 @@ public struct GitCommandRunner: Sendable {
         maximumOutputBytes: Int? = nil,
         maximumErrorBytes: Int? = nil,
         environment: [String: String] = [:],
-        timeout: Duration? = nil
+        timeout: Duration? = nil,
+        standardOutputFile: URL? = nil
+    ) async throws -> Data {
+        let trace = GitCommandDiagnosticTrace(
+            diagnostics: diagnostics, executable: executableURL, arguments: arguments,
+            workingDirectory: workingDirectory, timeout: timeout,
+            maximumOutputBytes: maximumOutputBytes, maximumErrorBytes: maximumErrorBytes,
+            writesOutputFile: standardOutputFile != nil
+        )
+        defer { trace.finish() }
+        do {
+            return try await execute(
+                arguments: arguments, workingDirectory: workingDirectory, standardInput: standardInput,
+                maximumOutputBytes: maximumOutputBytes, maximumErrorBytes: maximumErrorBytes,
+                environment: environment, timeout: timeout, standardOutputFile: standardOutputFile,
+                trace: trace
+            )
+        } catch {
+            trace.fail(error)
+            throw error
+        }
+    }
+
+    private func execute(
+        arguments: [String], workingDirectory: URL, standardInput: Data?,
+        maximumOutputBytes: Int?, maximumErrorBytes: Int?, environment: [String: String],
+        timeout: Duration?, standardOutputFile: URL?, trace: GitCommandDiagnosticTrace
     ) async throws -> Data {
         if let timeout, timeout <= .zero {
             throw GitCommandTimeoutError(arguments: arguments)
         }
+        // 大型清单直接写入调用方的临时文件；该模式成功时返回空 Data。
+        let outputFileHandle: FileHandle?
+        if let standardOutputFile {
+            guard FileManager.default.createFile(
+                atPath: standardOutputFile.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            ) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            outputFileHandle = try FileHandle(forWritingTo: standardOutputFile)
+        } else {
+            outputFileHandle = nil
+        }
+        defer { try? outputFileHandle?.close() }
         let stdoutCapture = ProcessPipeCapture(
             maximumStoredByteCount: maximumOutputBytes
         )
         let stderrCapture = ProcessPipeCapture(
             maximumStoredByteCount: maximumErrorBytes
         )
-        stdoutCapture.start()
+        if outputFileHandle == nil {
+            stdoutCapture.start()
+        } else {
+            stdoutCapture.finish()
+        }
         stderrCapture.start()
         let stdinPipe = standardInput.map { _ in Pipe() }
         let nullInputHandle = standardInput == nil
@@ -344,11 +440,21 @@ public struct GitCommandRunner: Sendable {
         process.executableURL = executableURL
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
-        process.standardOutput = stdoutCapture.pipe
+        if let outputFileHandle {
+            process.standardOutput = outputFileHandle
+        } else {
+            process.standardOutput = stdoutCapture.pipe
+        }
         process.standardError = stderrCapture.pipe
         process.standardInput = stdinPipe ?? nullInputHandle
         var processEnvironment = Self.baseEnvironment
         processEnvironment.merge(environment) { _, configured in configured }
+        // 配置只影响本次 Git 及其子进程，不改仓库或全局配置。Git 2.54 的 geometric
+        // 自动维护不受 gc.auto=0 限制，且 detach 后不能靠父进程取消来结束维护。
+        let inheritedParameters = processEnvironment["GIT_CONFIG_PARAMETERS"] ?? ""
+        processEnvironment["GIT_CONFIG_PARAMETERS"] =
+            (inheritedParameters.isEmpty ? "" : inheritedParameters + " ")
+            + "'maintenance.auto=false' 'gc.auto=0'"
         // `--` 后是实际文件名。worktree 接受目录路径；stash 和 check-ignore 不使用此模式。
         if let separator = arguments.firstIndex(of: "--"),
            !arguments[..<separator].contains("worktree") {
@@ -364,6 +470,7 @@ public struct GitCommandRunner: Sendable {
         let inputTask: Task<Void, any Error>?
         do {
             try process.run()
+            trace.fields["gitProcessID"] = String(process.processIdentifier)
             stdoutCapture.pipe.fileHandleForWriting.closeFile()
             stderrCapture.pipe.fileHandleForWriting.closeFile()
             stdinPipe?.fileHandleForReading.closeFile()
@@ -409,9 +516,23 @@ public struct GitCommandRunner: Sendable {
         }
         timeoutTask?.cancel()
         let terminationReason = handle.finish()
-        let stdout = await stdoutCapture.value()
+        let stdout: CapturedProcessOutput
+        if let outputFileHandle {
+            stdout = CapturedProcessOutput(
+                data: Data(), byteCount: Int(clamping: try outputFileHandle.seekToEnd())
+            )
+        } else {
+            stdout = await stdoutCapture.value()
+        }
         let stderr = await stderrCapture.value()
         let inputResult = await inputTask?.result
+        trace.fields["exitCode"] = String(process.terminationStatus)
+        trace.fields["stdoutBytes"] = String(stdout.byteCount)
+        trace.fields["stderrBytes"] = String(stderr.byteCount)
+        trace.fields["stderrTruncated"] = String(stderr.byteCount > stderr.data.count)
+        if !stderr.data.isEmpty {
+            trace.fields["stderr"] = String(decoding: stderr.data, as: UTF8.self)
+        }
 
         // 被终止的 git 退出码非 0，先报取消，避免上层把它当成 git 失败弹错误。
         try Task.checkCancellation()
@@ -441,6 +562,7 @@ public struct GitCommandRunner: Sendable {
                 actualByteCount: stdout.byteCount
             )
         }
+        trace.fields["status"] = "success"
         return stdout.data
     }
 }

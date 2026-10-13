@@ -88,6 +88,7 @@ final class AppModel {
 
     private let defaults: UserDefaults
     private let repositoryService: GitRepositoryService
+    private let pendingDiffRequests = GitPendingDiffRequests()
     private let snapshotStore: ProjectSnapshotStore?
     private let reviewContentStore: ReviewContentStore?
     private var restoredStartupReviewContent: StartupReviewContent?
@@ -102,12 +103,27 @@ final class AppModel {
     private var snapshotCacheEventID: FSEventStreamEventId
     private var completeProjectSnapshotIDs: Set<GitProject.ID>
     private var snapshotCacheSaveTask: Task<Void, Never>?
+    @ObservationIgnored private var repositoryMonitor: RepositoryFileMonitor?
+    @ObservationIgnored private var monitoredRepositoryPaths: Set<String> = []
+    @ObservationIgnored private var repositoryMonitorUpdateTask: Task<Void, Never>?
+    @ObservationIgnored private var repositoryEventTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingRepositoryImpact = RepositoryChangeImpact()
+    @ObservationIgnored private var pendingRepositoryEventID: FSEventStreamEventId = 0
+    @ObservationIgnored private var repositoryEventNeedsRetry = false
     private let cleanupService: GitWorktreeCleanupService
     private var cleanupTimerTask: Task<Void, Never>?
     private var cleanupRunTask: Task<Void, Never>?
     private var isTerminating = false
-    private var mutationWorktreeIDs: Set<GitWorktree.ID> = []
-    private var cleanupRemovalWorktreeID: GitWorktree.ID?
+    private var mutationWorktreeIDs: Set<GitWorktree.ID> = [] {
+        didSet {
+            if mutationWorktreeIDs.isEmpty { scheduleRepositoryEventProcessing() }
+        }
+    }
+    private var cleanupRemovalWorktreeID: GitWorktree.ID? {
+        didSet {
+            if cleanupRemovalWorktreeID == nil { scheduleRepositoryEventProcessing() }
+        }
+    }
     private(set) var isCleaningWorktrees = false
     private(set) var cleanupReport: WorktreeCleanupReport?
     private(set) var cleanupExcludedProjectIDs: Set<GitProject.ID> {
@@ -153,11 +169,13 @@ final class AppModel {
     let reviewStates: ReviewStateStore
     let agentAssociations: AgentAssociationController
 
-    private(set) var projects: [ProjectState]
-    private(set) var repositoryMonitorError: String?
+    private(set) var projects: [ProjectState] {
+        didSet { scheduleRepositoryMonitorUpdate() }
+    }
     private(set) var projectAdditionError: String?
     private(set) var snapshotCacheError: String?
     private(set) var reviewContentCacheError: String?
+    private(set) var repositoryMonitorError: String?
     private(set) var blockingGitRefreshErrors: [
         GitWorktree.ID: String
     ] = [:]
@@ -378,6 +396,7 @@ final class AppModel {
             return
         }
         hasLoadedProjects = true
+        updateRepositoryMonitor()
         agentAssociations.start()
         agentAssociations.lookUpCreators(
             worktreePaths: Set(projects.compactMap(\.snapshot).flatMap(\.worktrees).map(\.id))
@@ -392,6 +411,8 @@ final class AppModel {
         }
         scheduleWorktreeCleanup()
         scheduleBackgroundRefresh()
+        scheduleRepositoryMonitorUpdate()
+        scheduleRepositoryEventProcessing()
     }
 
     func chooseProject() {
@@ -425,7 +446,7 @@ final class AppModel {
                 selectedWorktreeID = selected.id
             }
         } catch {
-            projectAdditionError = String(describing: error)
+            projectAdditionError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -436,7 +457,8 @@ final class AppModel {
     var cacheErrorMessage: String? {
         let messages = [
             snapshotCacheError.map { "Project snapshots: \($0)" },
-            reviewContentCacheError.map { "Review content: \($0)" }
+            reviewContentCacheError.map { "Review content: \($0)" },
+            repositoryMonitorError.map { "Repository updates: \($0)" }
         ].compactMap { $0 }
         return messages.isEmpty ? nil : messages.joined(separator: "\n")
     }
@@ -444,6 +466,7 @@ final class AppModel {
     func clearCacheErrors() {
         snapshotCacheError = nil
         reviewContentCacheError = nil
+        if repositoryMonitorError != nil { updateRepositoryMonitor() }
     }
 
     func blockingGitRefreshError(
@@ -456,6 +479,7 @@ final class AppModel {
         _ message: String?,
         for worktreeID: GitWorktree.ID
     ) {
+        guard blockingGitRefreshErrors[worktreeID] != message else { return }
         blockingGitRefreshErrors[worktreeID] = message
     }
 
@@ -540,7 +564,9 @@ final class AppModel {
             verifiedProjectIDs.insert(check.projectID)
             let discoveredIDs = Set(discoveredWorktrees.map(\.id))
             let currentIDs = Set(current.worktrees.map(\.id))
-            if currentIDs != discoveredIDs {
+            let currentWorktrees = Dictionary(uniqueKeysWithValues: current.worktrees.map { ($0.id, $0.worktree) })
+            if currentIDs != discoveredIDs
+                || discoveredWorktrees.contains(where: { currentWorktrees[$0.id] != $0 }) {
                 changedWorktreesByProjectID[check.projectID] = discoveredWorktrees
             }
         }
@@ -615,7 +641,7 @@ final class AppModel {
             return ProjectMembershipCheck(
                 projectID: project.id,
                 worktrees: nil,
-                errorMessage: String(describing: error),
+                errorMessage: GitErrorDescription.message(for: error),
                 wasCancelled: false
             )
         }
@@ -651,7 +677,7 @@ final class AppModel {
                         return ProjectResolutionResult(
                             index: index,
                             project: nil,
-                            errorMessage: String(describing: error)
+                            errorMessage: GitErrorDescription.message(for: error)
                         )
                     }
                 }
@@ -764,7 +790,6 @@ final class AppModel {
     }
 
     private func refreshProjectsMissingSnapshots() async {
-        let coverageEventID = FSEventsGetCurrentEventId()
         let missingProjects = projects
             .filter { $0.snapshot == nil }
             .sorted { lhs, rhs in
@@ -806,7 +831,7 @@ final class AppModel {
            missingProjectIDs.isSubset(of: completeProjectSnapshotIDs) {
             snapshotCacheSaveTask?.cancel()
             snapshotCacheSaveTask = nil
-            _ = await saveSnapshotCache(eventID: coverageEventID)
+            _ = await saveSnapshotCache()
         }
     }
 
@@ -871,12 +896,21 @@ final class AppModel {
         scope: GitDiffScope,
         options: GitDiffOptions? = nil
     ) async throws -> GitFileDiff {
-        try await repositoryService.loadDiff(
+        let resolvedOptions = options ?? diffOptions
+        let identities = (try? await repositoryService.pendingDiffIdentities(
+            worktree: worktree,
+            workingChanges: scope == .working ? [change] : [],
+            stagedChanges: scope == .staged ? [change] : [],
+            options: resolvedOptions
+        )) ?? []
+        try Task.checkCancellation()
+        let diff = try await repositoryService.loadDiff(
             worktree: worktree,
             change: change,
             scope: scope,
-            options: options ?? diffOptions
+            options: resolvedOptions
         )
+        return diff.withSourceIdentity(identities.first)
     }
 
     func loadDiffs(
@@ -911,13 +945,15 @@ final class AppModel {
         worktree: GitWorktree,
         workingChanges: [GitFileChange],
         stagedChanges: [GitFileChange],
-        options: GitDiffOptions? = nil
+        options: GitDiffOptions? = nil,
+        sourceIdentities: [GitPendingDiffIdentity] = []
     ) -> AsyncThrowingStream<GitPendingDiffBatch, any Error> {
         repositoryService.loadPendingDiffBatches(
             worktree: worktree,
             workingChanges: workingChanges,
             stagedChanges: stagedChanges,
-            options: options ?? diffOptions
+            options: options ?? diffOptions,
+            sourceIdentities: sourceIdentities
         )
     }
 
@@ -1107,12 +1143,25 @@ final class AppModel {
         guard let reviewContentStore else {
             return nil
         }
-        return await reviewContentStore.pendingDiffEntry(
+        let identities = await pendingDiffIdentities(snapshot: snapshot, options: options)
+        return await reviewContentStore.reusablePendingDiffEntry(
             for: PendingReviewContentCacheKey(
                 snapshot: snapshot,
                 options: options
-            )
+            ), identities: identities
         )
+    }
+
+    private func pendingDiffIdentities(
+        snapshot: GitWorktreeSnapshot, options: GitDiffOptions,
+        changes: [GitFileChange]? = nil
+    ) async -> [GitPendingDiffIdentity] {
+        let changes = changes ?? snapshot.status.changes
+        return (try? await repositoryService.pendingDiffIdentities(
+            worktree: snapshot.worktree,
+            workingChanges: changes.filter { $0.isUnstaged || $0.isUntracked },
+            stagedChanges: changes.filter(\.isStaged), options: options
+        )) ?? []
     }
 
     func cachePendingDiffs(
@@ -1124,6 +1173,11 @@ final class AppModel {
         guard let reviewContentStore else {
             return
         }
+        let currentIdentities = Set(await pendingDiffIdentities(snapshot: snapshot, options: options))
+        let reusable = diffs.filter { $0.sourceIdentity.map(currentIdentities.contains) == true }
+        let verifiedDiffs = diffs.map { diff in
+            diff.sourceIdentity.map(currentIdentities.contains) == true ? diff : diff.withSourceIdentity(nil)
+        }
         await cacheReviewContent {
             let key = PendingReviewContentCacheKey(
                 snapshot: snapshot,
@@ -1131,35 +1185,60 @@ final class AppModel {
             )
             if isComplete {
                 try await reviewContentStore.savePendingDiffs(
-                    diffs,
+                    verifiedDiffs,
                     for: key
                 )
             } else {
                 try await reviewContentStore.savePartialPendingDiffs(
-                    diffs,
+                    verifiedDiffs,
                     for: key
                 )
             }
+            try await reviewContentStore.saveReusablePendingDiffs(reusable)
         }
     }
 
-    func cachedPendingDiff(
+    func cachePendingDiffBatch(
+        _ diffs: [GitFileDiff], snapshot: GitWorktreeSnapshot, options: GitDiffOptions
+    ) async {
+        guard let reviewContentStore else { return }
+        let changes = Array(Set(diffs.map(\.change)))
+        let current = Set(await pendingDiffIdentities(snapshot: snapshot, options: options, changes: changes))
+        let reusable = diffs.filter { $0.sourceIdentity.map(current.contains) == true }
+        await cacheReviewContent { try await reviewContentStore.saveReusablePendingDiffs(reusable) }
+    }
+
+    func loadCachedPendingDiff(
         snapshot: GitWorktreeSnapshot,
-        changeID: GitFileChange.ID,
+        change: GitFileChange,
         scope: GitDiffScope,
         options: GitDiffOptions
-    ) async -> GitFileDiff? {
-        guard let reviewContentStore else {
-            return nil
+    ) async throws -> GitFileDiff {
+        let identities = (try? await repositoryService.pendingDiffIdentities(
+            worktree: snapshot.worktree,
+            workingChanges: scope == .working ? [change] : [],
+            stagedChanges: scope == .staged ? [change] : [], options: options
+        )) ?? []
+        try Task.checkCancellation()
+        let identity = identities.first
+        if let identity, let cached = await reviewContentStore?.reusablePendingDiff(for: identity) {
+            try Task.checkCancellation()
+            return cached.diff.withChange(change)
         }
-        return await reviewContentStore.pendingDiff(
-            changeID: changeID,
-            scope: scope,
-            for: PendingReviewContentCacheKey(
-                snapshot: snapshot,
-                options: options
-            )
-        )
+        let service = repositoryService
+        let operation: @Sendable () async throws -> GitFileDiff = {
+            let diff = try await service.loadDiff(
+                worktree: snapshot.worktree, change: change, scope: scope, options: options
+            ).withSourceIdentity(identity)
+            try Task.checkCancellation()
+            await self.cachePendingDiff(diff, snapshot: snapshot, options: options)
+            try Task.checkCancellation()
+            return diff
+        }
+        if let identity {
+            return try await pendingDiffRequests.value(for: identity, operation: operation).withChange(change)
+        }
+        return try await operation()
     }
 
     func cachePendingDiff(
@@ -1170,14 +1249,19 @@ final class AppModel {
         guard let reviewContentStore else {
             return
         }
+        let identities = await pendingDiffIdentities(snapshot: snapshot, options: options, changes: [diff.change])
+        let verified = diff.sourceIdentity.map(identities.contains) == true ? diff : diff.withSourceIdentity(nil)
         await cacheReviewContent {
             try await reviewContentStore.savePendingDiff(
-                diff,
+                verified,
                 for: PendingReviewContentCacheKey(
                     snapshot: snapshot,
                     options: options
                 )
             )
+            if let identity = diff.sourceIdentity, identities.contains(identity) {
+                try await reviewContentStore.saveReusablePendingDiffs([diff])
+            }
         }
     }
 
@@ -1301,7 +1385,7 @@ final class AppModel {
             try await operation()
             reviewContentCacheError = nil
         } catch {
-            reviewContentCacheError = String(describing: error)
+            reviewContentCacheError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -1492,6 +1576,172 @@ final class AppModel {
         persistProjects()
     }
 
+    private func scheduleRepositoryMonitorUpdate() {
+        guard hasLoadedProjects, !isTerminating else { return }
+        repositoryMonitorUpdateTask?.cancel()
+        repositoryMonitorUpdateTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            self?.updateRepositoryMonitor()
+        }
+    }
+
+    private func updateRepositoryMonitor() {
+        guard hasLoadedProjects, !isTerminating else { return }
+        if repositoryMonitor == nil {
+            repositoryMonitor = RepositoryFileMonitor(sinceWhen: snapshotCacheEventID) { [weak self] impact, eventID in
+                // 同一事件队列按收到的顺序转到主线程，保持历史回放的游标顺序。
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated {
+                        self?.receiveRepositoryEvents(impact, eventID: eventID)
+                    }
+                }
+            }
+        }
+        do {
+            let index = RepositoryWatchIndex(projects: projects)
+            let paths = Set(index.watchedPaths)
+            let addedPaths = paths.subtracting(monitoredRepositoryPaths)
+            let needsCoverage = !monitoredRepositoryPaths.isEmpty && !addedPaths.isEmpty
+            try repositoryMonitor?.update(index: index, acknowledgedEventID: snapshotCacheEventID)
+            monitoredRepositoryPaths = paths
+            if needsCoverage {
+                // 新路径在建立监听之后再读一次，覆盖加入监听前的文件与 index 变化。
+                receiveRepositoryEvents(
+                    RepositoryChangeImpact(metadataWorktreeIDs: index.worktreeIDs(watching: addedPaths)),
+                    eventID: 0
+                )
+            }
+            if repositoryMonitorError != nil { repositoryMonitorError = nil }
+            if isApplicationActive {
+                backgroundRefreshTask?.cancel()
+                backgroundRefreshTask = nil
+            }
+        } catch {
+            repositoryMonitorError = error.localizedDescription
+            scheduleBackgroundRefresh()
+        }
+    }
+
+    private func receiveRepositoryEvents(
+        _ impact: RepositoryChangeImpact, eventID: FSEventStreamEventId
+    ) {
+        guard !isTerminating else { return }
+        pendingRepositoryImpact.formUnion(impact)
+        pendingRepositoryEventID = max(pendingRepositoryEventID, eventID)
+        scheduleRepositoryEventProcessing()
+    }
+
+    private func scheduleRepositoryEventProcessing() {
+        guard hasLoadedProjects, isApplicationActive, !isTerminating,
+              mutationWorktreeIDs.isEmpty, cleanupRemovalWorktreeID == nil,
+              repositoryEventTask == nil,
+              !pendingRepositoryImpact.isEmpty || pendingRepositoryEventID > snapshotCacheEventID else { return }
+        repositoryEventTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) } catch {
+                self?.repositoryEventTask = nil
+                self?.scheduleRepositoryEventProcessing()
+                return
+            }
+            guard let self else { return }
+            self.repositoryEventNeedsRetry = false
+            var completedEventID = self.snapshotCacheEventID
+            defer {
+                if completedEventID > self.snapshotCacheEventID {
+                    self.pendingRepositoryEventID = max(self.pendingRepositoryEventID, completedEventID)
+                }
+                self.repositoryEventTask = nil
+                if self.isApplicationActive, Task.isCancelled || self.repositoryEventNeedsRetry {
+                    self.scheduleRepositoryEventProcessing()
+                }
+            }
+            while self.isApplicationActive, !self.isTerminating, !Task.isCancelled,
+                  !self.pendingRepositoryImpact.isEmpty || self.pendingRepositoryEventID > self.snapshotCacheEventID {
+                let impact = self.pendingRepositoryImpact
+                let eventID = self.pendingRepositoryEventID
+                self.pendingRepositoryImpact = RepositoryChangeImpact()
+                self.pendingRepositoryEventID = 0
+                guard await self.refreshForRepositoryEvents(impact) else {
+                    self.pendingRepositoryImpact.formUnion(impact)
+                    self.pendingRepositoryEventID = max(self.pendingRepositoryEventID, eventID)
+                    break
+                }
+                completedEventID = max(completedEventID, eventID)
+                self.updateRepositoryMonitor()
+                guard self.repositoryMonitorError == nil else { break }
+                // 新增监听范围的补读和已到达的事件一起完成后，再确认全局游标。
+                if self.pendingRepositoryImpact.isEmpty,
+                   self.pendingRepositoryEventID <= completedEventID {
+                    self.snapshotCacheEventID = max(self.snapshotCacheEventID, completedEventID)
+                    self.pendingRepositoryEventID = 0
+                    self.scheduleSnapshotCacheSave()
+                }
+            }
+        }
+    }
+
+    private func refreshForRepositoryEvents(_ impact: RepositoryChangeImpact) async -> Bool {
+        guard isApplicationActive, !isTerminating, !Task.isCancelled,
+              mutationWorktreeIDs.isDisjoint(with: impact.worktreeIDs),
+              cleanupRemovalWorktreeID.map({ !impact.worktreeIDs.contains($0) }) ?? true else { return false }
+        let affectedProjects = projects.filter { state in
+            impact.projectIDs.contains(state.id)
+                || state.snapshot?.worktrees.contains { impact.worktreeIDs.contains($0.id) } == true
+        }
+        for project in affectedProjects {
+            if let refresh = projectRefreshTasks[project.id] { _ = await refresh.task.value }
+        }
+        for id in impact.worktreeIDs {
+            if let refresh = worktreeRefreshTasks[id] { _ = await refresh.task.value }
+        }
+        guard isApplicationActive, !Task.isCancelled else { return false }
+        if !impact.projectIDs.isEmpty {
+            _ = await reconcileProjectWorktreeMembership(projectIDs: impact.projectIDs)
+            guard isApplicationActive, !Task.isCancelled,
+                  projects.filter({ impact.projectIDs.contains($0.id) }).allSatisfy({ $0.errorMessage == nil }) else {
+                return false
+            }
+        }
+        // 选中的工作区先更新，其余逐个读取，避免一次文件事件启动大量 Git 进程。
+        let ids = impact.worktreeIDs.sorted {
+            if ($0 == selectedWorktreeID) != ($1 == selectedWorktreeID) { return $0 == selectedWorktreeID }
+            return $0 < $1
+        }
+        for id in ids {
+            guard isApplicationActive, !Task.isCancelled,
+                  !mutationWorktreeIDs.contains(id) else { return false }
+            guard let worktree = projects.lazy.compactMap(\.snapshot).flatMap(\.worktrees)
+                .first(where: { $0.id == id })?.worktree else { continue }
+            if !impact.metadataWorktreeIDs.contains(id),
+               let paths = impact.contentPathsByWorktreeID[id],
+               !paths.contains(where: { [".gitignore", ".gitattributes"].contains(URL(fileURLWithPath: $0).lastPathComponent) }) {
+                do {
+                    let isRelevant = try await repositoryService.containsGitRelevantWorkingTreeEvent(
+                        worktree: worktree, absolutePaths: paths.sorted()
+                    )
+                    if !isRelevant { continue }
+                } catch is CancellationError { return false } catch {
+                    // ignore 查询失败时直接读取状态，避免漏掉真实变更。
+                }
+            }
+            guard isApplicationActive, !Task.isCancelled,
+                  !mutationWorktreeIDs.contains(id), cleanupRemovalWorktreeID != id else {
+                repositoryEventNeedsRetry = true
+                return false
+            }
+            switch await refreshWorktree(id: id) {
+            case .updated:
+                // 缓存会保留出错前的快照，有补充信息读取失败时不能推进持久化游标。
+                guard projects.lazy.compactMap(\.snapshot).flatMap(\.worktrees)
+                    .first(where: { $0.id == id })?.errorMessage == nil else { return false }
+            case .superseded:
+                repositoryEventNeedsRetry = true
+                return false
+            case .failed: return false
+            }
+        }
+        return isApplicationActive && !Task.isCancelled
+    }
+
     func setApplicationActive(_ isActive: Bool) {
         guard isApplicationActive != isActive else {
             return
@@ -1504,9 +1754,13 @@ final class AppModel {
             if !hasLoadedProjects {
                 Task { await loadProjectsIfNeeded() }
             }
+            updateRepositoryMonitor()
+            scheduleRepositoryEventProcessing()
+            scheduleBackgroundRefresh()
             return
         }
 
+        repositoryEventTask?.cancel()
         reviewStates.flush()
         snapshotCacheSaveTask?.cancel()
         snapshotCacheSaveTask = Task { [weak self] in
@@ -1522,7 +1776,7 @@ final class AppModel {
     }
 
     private func scheduleBackgroundRefresh() {
-        guard !isApplicationActive, !isTerminating,
+        guard (!isApplicationActive || repositoryMonitorError != nil), !isTerminating,
               backgroundRefreshTask == nil else { return }
         let interval = backgroundRefreshInterval
         backgroundRefreshTask = Task { [weak self] in
@@ -1532,11 +1786,11 @@ final class AppModel {
                 } catch {
                     return
                 }
-                guard let self, !self.isApplicationActive, !self.isTerminating else {
+                guard let self, (!self.isApplicationActive || self.repositoryMonitorError != nil), !self.isTerminating else {
                     return
                 }
                 await self.normalizeStoredProjects()
-                guard !Task.isCancelled, !self.isApplicationActive else { return }
+                guard !Task.isCancelled, (!self.isApplicationActive || self.repositoryMonitorError != nil) else { return }
                 await self.refreshAll()
             }
         }
@@ -1544,6 +1798,15 @@ final class AppModel {
 
     func prepareForTermination() async {
         isTerminating = true
+        repositoryMonitorUpdateTask?.cancel()
+        repositoryMonitorUpdateTask = nil
+        repositoryEventTask?.cancel()
+        for refresh in projectRefreshTasks.values { refresh.task.cancel() }
+        for refresh in worktreeRefreshTasks.values { refresh.task.cancel() }
+        await repositoryEventTask?.value
+        repositoryEventTask = nil
+        repositoryMonitor?.stop()
+        repositoryMonitor = nil
         backgroundRefreshTask?.cancel()
         backgroundRefreshTask = nil
         cleanupTimerTask?.cancel()
@@ -1562,6 +1825,8 @@ final class AppModel {
         snapshotCacheSaveTask?.cancel()
         snapshotCacheSaveTask = nil
         _ = await saveSnapshotCache()
+        AgentGitDiagnostics.shared.record("app.terminate")
+        await AgentGitDiagnostics.shared.flush()
     }
 
 
@@ -1627,24 +1892,71 @@ final class AppModel {
               immediately || (settings.isEnabled && isDue) else {
             return
         }
+        await AgentGitDiagnostics.$operationID.withValue(UUID().uuidString) {
+            await performWorktreeCleanup(now: now, immediately: immediately, settings: settings)
+        }
+    }
+
+    private func performWorktreeCleanup(
+        now: Date, immediately: Bool, settings: WorktreeCleanupSettings
+    ) async {
         isCleaningWorktrees = true
         defer {
             isCleaningWorktrees = false
             cleanupRemovalWorktreeID = nil
         }
         var report = WorktreeCleanupReport(checkedAt: now)
+        report.runID = AgentGitDiagnostics.operationID
+        let startedAt = ProcessInfo.processInfo.systemUptime
         let cutoff = now.addingTimeInterval(-settings.inactivity)
+        AgentGitDiagnostics.shared.record("cleanup.start", fields: [
+            "trigger": immediately ? "manual" : "automatic", "inactiveDays": String(settings.inactiveDays),
+            "intervalHours": String(settings.intervalHours), "cutoff": cutoff.ISO8601Format(),
+            "projectCount": String(projects.count), "selectedWorktree": selectedWorktreeID ?? "",
+            "pinnedWorktrees": pinnedWorktreeIDs.sorted().joined(separator: "\n"),
+            "excludedProjects": cleanupExcludedProjectIDs.sorted().joined(separator: "\n")
+        ])
         for project in projects.map(\.project) {
-            guard !isTerminating, cleanupSettings == settings else { break }
-            guard !isProjectExcludedFromCleanup(id: project.id) else { continue }
+            guard !isTerminating, cleanupSettings == settings else {
+                AgentGitDiagnostics.shared.record("cleanup.interrupted", fields: [
+                    "reason": isTerminating ? "Application is terminating" : "Cleanup settings changed"
+                ])
+                break
+            }
+            guard !isProjectExcludedFromCleanup(id: project.id) else {
+                AgentGitDiagnostics.shared.record("cleanup.project.skipped", fields: [
+                    "project": project.rootURL.path, "reason": "Project is excluded"
+                ])
+                continue
+            }
             do {
                 // 后台也直接读取 Git 成员与状态，不依赖界面缓存。
                 let worktrees = try await repositoryService.listWorktrees(at: project.rootURL)
-                for worktree in worktrees where worktree.id != project.id {
-                    guard !isTerminating, cleanupSettings == settings else { break }
+                AgentGitDiagnostics.shared.record("cleanup.project.members", fields: [
+                    "project": project.rootURL.path, "count": String(worktrees.count)
+                ])
+                for worktree in worktrees {
+                    guard !isTerminating, cleanupSettings == settings else {
+                        AgentGitDiagnostics.shared.record("cleanup.interrupted", fields: [
+                            "project": project.rootURL.path,
+                            "reason": isTerminating ? "Application is terminating" : "Cleanup settings changed"
+                        ])
+                        break
+                    }
+                    if worktree.id == project.id || worktree.id == worktrees.first?.id {
+                        AgentGitDiagnostics.shared.record("cleanup.worktree.skipped", fields: [
+                            "project": project.rootURL.path, "worktree": worktree.rootURL.path,
+                            "reason": "Main checkout"
+                        ])
+                        continue
+                    }
                     do {
-                        guard canCleanWorktree(worktree, project: project) else {
-                            report.skippedCount += 1
+                        if let reason = worktreeCleanupProtectionReason(worktree, project: project) {
+                            report.recordSkipped(path: worktree.id, reason: reason)
+                            AgentGitDiagnostics.shared.record("cleanup.worktree.skipped", fields: [
+                                "project": project.rootURL.path, "worktree": worktree.rootURL.path,
+                                "reason": reason
+                            ])
                             continue
                         }
                         let result = try await cleanupService.removeIfInactive(
@@ -1669,20 +1981,33 @@ final class AppModel {
                         case .removed:
                             report.removedPaths.append(worktree.id)
                             forgetRemovedWorktree(worktree.id, projectID: project.id)
-                        case .skipped:
-                            report.skippedCount += 1
+                        case let .skipped(reason):
+                            report.recordSkipped(path: worktree.id, reason: reason)
                         }
                     } catch {
                         cleanupRemovalWorktreeID = nil
                         report.errors.append("\(worktree.rootURL.path): \(error)")
+                        AgentGitDiagnostics.shared.record("cleanup.worktree.error", level: "error", fields: [
+                            "project": project.rootURL.path, "worktree": worktree.rootURL.path,
+                            "error": String(describing: error)
+                        ])
                     }
                 }
             } catch {
                 report.errors.append("\(project.rootURL.path): \(error)")
+                AgentGitDiagnostics.shared.record("cleanup.project.error", level: "error", fields: [
+                    "project": project.rootURL.path, "error": String(describing: error)
+                ])
             }
         }
         // 创建者记录没有删除 hook，随定期清理删掉已删除或重建过的 worktree 的记录。
         await agentAssociations.removeStaleCreators()
+        report.durationSeconds = ProcessInfo.processInfo.systemUptime - startedAt
+        AgentGitDiagnostics.shared.record("cleanup.finish", fields: [
+            "removed": String(report.removedPaths.count), "kept": String(report.skippedCount),
+            "errors": String(report.errors.count),
+            "durationSeconds": String(report.durationSeconds ?? 0)
+        ])
         cleanupReport = report
         if let data = try? JSONEncoder().encode(report) {
             defaults.set(data, forKey: Self.cleanupReportKey)
@@ -1695,15 +2020,21 @@ final class AppModel {
     private func canCleanWorktree(
         _ worktree: GitWorktree, project: GitProject
     ) -> Bool {
-        guard projects.contains(where: { $0.id == project.id }),
-              !isProjectExcludedFromCleanup(id: project.id),
-              worktree.id != selectedWorktreeID,
-              !pinnedWorktreeIDs.contains(worktree.id),
-              !mutationWorktreeIDs.contains(worktree.id),
-              blockingGitRefreshErrors[worktree.id] == nil else {
-            return false
+        worktreeCleanupProtectionReason(worktree, project: project) == nil
+    }
+
+    private func worktreeCleanupProtectionReason(
+        _ worktree: GitWorktree, project: GitProject
+    ) -> String? {
+        if !projects.contains(where: { $0.id == project.id }) { return "Project is no longer open" }
+        if isProjectExcludedFromCleanup(id: project.id) { return "Project is excluded" }
+        if worktree.id == selectedWorktreeID { return "Currently selected worktree" }
+        if pinnedWorktreeIDs.contains(worktree.id) { return "Pinned worktree" }
+        if mutationWorktreeIDs.contains(worktree.id) { return "Git operation in progress" }
+        if let error = blockingGitRefreshErrors[worktree.id] {
+            return "Git state could not be refreshed: \(error)"
         }
-        return true
+        return nil
     }
 
     private func forgetRemovedWorktree(_ id: GitWorktree.ID, projectID: GitProject.ID) {
@@ -1762,8 +2093,9 @@ final class AppModel {
             return
         }
 
+        let nextSnapshot: GitProjectSnapshot?
         if let snapshot {
-            projects[index].snapshot = mergedProjectSnapshot(
+            nextSnapshot = mergedProjectSnapshot(
                 snapshot,
                 preservingNewerWorktreesFrom: projects[index].snapshot,
                 token: token
@@ -1774,19 +2106,26 @@ final class AppModel {
                         worktree.id,
                         fromProject: token
                     ) {
-                blockingGitRefreshErrors[worktree.id] = nil
+                if blockingGitRefreshErrors[worktree.id] != nil {
+                    blockingGitRefreshErrors[worktree.id] = nil
+                }
             }
         } else if let baselineSnapshot {
-            projects[index].snapshot = mergedProjectSnapshot(
+            nextSnapshot = mergedProjectSnapshot(
                 baselineSnapshot,
                 preservingNewerWorktreesFrom: projects[index].snapshot,
                 token: token
             )
         } else {
-            projects[index].snapshot = nil
+            nextSnapshot = nil
         }
-        projects[index].errorMessage = errorMessage
-        scheduleSnapshotCacheSave()
+        if projects[index].snapshot != nextSnapshot {
+            projects[index].snapshot = nextSnapshot
+            scheduleSnapshotCacheSave()
+        }
+        if projects[index].errorMessage != errorMessage {
+            projects[index].errorMessage = errorMessage
+        }
     }
 
     private func mergedProjectSnapshot(
@@ -1822,6 +2161,9 @@ final class AppModel {
                 )
         })
         worktrees.sort(by: compareWorktreeSnapshots)
+        if incoming.project == current.project, worktrees == current.worktrees {
+            return current
+        }
         return GitProjectSnapshot(
             project: incoming.project,
             worktrees: worktrees,
@@ -1895,7 +2237,7 @@ final class AppModel {
             } catch {
                 return ProjectRefreshResult(
                     snapshot: nil,
-                    errorMessage: String(describing: error)
+                    errorMessage: GitErrorDescription.message(for: error)
                 )
             }
         }
@@ -1952,7 +2294,7 @@ final class AppModel {
             } catch {
                 return ProjectRefreshResult(
                     snapshot: nil,
-                    errorMessage: String(describing: error)
+                    errorMessage: GitErrorDescription.message(for: error)
                 )
             }
             let loadedByID = Dictionary(
@@ -2045,6 +2387,7 @@ final class AppModel {
         }
         let discoveredIDs = Set(discoveredWorktrees.map(\.id))
         let retained = current.worktrees.filter { discoveredIDs.contains($0.id) }
+        guard current.project != project || current.worktrees != retained else { return }
         projects[index].snapshot = GitProjectSnapshot(
             project: project,
             worktrees: retained,
@@ -2072,16 +2415,21 @@ final class AppModel {
             worktrees.append(worktree)
         }
         worktrees.sort(by: compareWorktreeSnapshots)
-        projects[index].snapshot = GitProjectSnapshot(
-            project: project,
-            worktrees: worktrees,
-            refreshedAt: Date()
-        )
-        projects[index].errorMessage = nil
-        if worktree.hasUsableState {
-            blockingGitRefreshErrors[worktree.id] = nil
+        let current = projects[index].snapshot
+        if current?.project != project || current?.worktrees != worktrees {
+            projects[index].snapshot = GitProjectSnapshot(
+                project: project,
+                worktrees: worktrees,
+                refreshedAt: Date()
+            )
+            scheduleSnapshotCacheSave()
         }
-        scheduleSnapshotCacheSave()
+        if projects[index].errorMessage != nil { projects[index].errorMessage = nil }
+        if worktree.hasUsableState, blockingGitRefreshErrors[worktree.id] != nil {
+            if blockingGitRefreshErrors[worktree.id] != nil {
+                blockingGitRefreshErrors[worktree.id] = nil
+            }
+        }
         if selectedWorktreeID == nil {
             selectedWorktreeID = worktree.id
         }
@@ -2127,6 +2475,7 @@ final class AppModel {
         if let index = projects.firstIndex(where: { $0.id == token.projectID }) {
             projects[index].isLoading = projectRefreshTasks[token.projectID] != nil
         }
+        scheduleRepositoryEventProcessing()
     }
 
     private func firstAvailableWorktreeID() -> GitWorktreeSnapshot.ID? {
@@ -2173,13 +2522,11 @@ final class AppModel {
     }
 
     @discardableResult
-    private func saveSnapshotCache(
-        eventID: FSEventStreamEventId? = nil
-    ) async -> Bool {
+    private func saveSnapshotCache() async -> Bool {
         guard let snapshotStore else {
             return true
         }
-        let targetEventID = eventID ?? snapshotCacheEventID
+        let targetEventID = snapshotCacheEventID
         let projectIDs = projects.map(\.id)
         let snapshots = projects.compactMap(\.snapshot)
         do {
@@ -2189,13 +2536,10 @@ final class AppModel {
                 eventID: targetEventID,
                 completeProjectIDs: completeProjectSnapshotIDs
             )
-            if let eventID {
-                snapshotCacheEventID = max(snapshotCacheEventID, eventID)
-            }
             snapshotCacheError = nil
             return true
         } catch {
-            snapshotCacheError = String(describing: error)
+            snapshotCacheError = GitErrorDescription.message(for: error)
             return false
         }
     }
@@ -2280,13 +2624,17 @@ final class AppModel {
             preserving: worktrees[worktreeIndex]
         )
         worktrees.sort(by: compareWorktreeSnapshots)
-        projects[currentProjectIndex].snapshot = GitProjectSnapshot(
-            project: currentSnapshot.project,
-            worktrees: worktrees,
-            refreshedAt: Date()
-        )
-        projects[currentProjectIndex].errorMessage = nil
-        scheduleSnapshotCacheSave()
+        if worktrees != currentSnapshot.worktrees {
+            projects[currentProjectIndex].snapshot = GitProjectSnapshot(
+                project: currentSnapshot.project,
+                worktrees: worktrees,
+                refreshedAt: Date()
+            )
+            scheduleSnapshotCacheSave()
+        }
+        if projects[currentProjectIndex].errorMessage != nil {
+            projects[currentProjectIndex].errorMessage = nil
+        }
         if refreshedWorktree.hasUsableState {
             blockingGitRefreshErrors[worktree.id] = nil
             return .updated
@@ -2298,35 +2646,22 @@ final class AppModel {
     }
 }
 
-func orderedRepositoryEventProjectIDs(
-    _ projectIDs: Set<GitProject.ID>,
-    projects: [ProjectState],
-    selectedWorktreeID: GitWorktree.ID?
-) -> [GitProject.ID] {
-    let selectedProjectID = projects.first(where: { project in
-        guard let selectedWorktreeID else {
-            return false
-        }
-        return project.snapshot?.worktrees.contains(where: {
-            $0.id == selectedWorktreeID
-        }) == true
-    })?.id
-    return projectIDs.sorted { lhs, rhs in
-        let lhsSelected = lhs == selectedProjectID
-        let rhsSelected = rhs == selectedProjectID
-        if lhsSelected != rhsSelected {
-            return lhsSelected
-        }
-        let lhsIndex = projects.firstIndex(where: { $0.id == lhs }) ?? .max
-        let rhsIndex = projects.firstIndex(where: { $0.id == rhs }) ?? .max
-        return lhsIndex < rhsIndex
-    }
-}
-
 func worktreeSnapshotByApplyingRefresh(
     _ incoming: GitWorktreeSnapshot,
     preserving current: GitWorktreeSnapshot?
 ) -> GitWorktreeSnapshot {
+    if let current,
+       let revision = incoming.pendingDiffRevision,
+       revision == current.pendingDiffRevision,
+       incoming.worktree == current.worktree,
+       incoming.status == current.status,
+       incoming.diffStat == current.diffStat,
+       incoming.lastActivityAt == current.lastActivityAt,
+       incoming.errorMessage == current.errorMessage,
+       incoming.hasUsableState == current.hasUsableState,
+       incoming.eventWatchURLs == current.eventWatchURLs {
+        return current
+    }
     guard let current,
           let errorMessage = incoming.errorMessage,
           !incoming.hasUsableState else {
@@ -2342,7 +2677,8 @@ func worktreeSnapshotByApplyingRefresh(
         refreshedAt: current.refreshedAt,
         errorMessage: errorMessage,
         hasUsableState: current.hasUsableState,
-        eventWatchURLs: eventWatchURLs
+        eventWatchURLs: eventWatchURLs,
+        pendingDiffRevision: current.pendingDiffRevision
     )
 }
 
@@ -2358,7 +2694,9 @@ func worktreeSnapshotByApplyingDiscovery(
         refreshedAt: current.refreshedAt,
         errorMessage: current.errorMessage,
         hasUsableState: current.hasUsableState,
-        eventWatchURLs: current.eventWatchURLs
+        eventWatchURLs: current.eventWatchURLs,
+        pendingDiffRevision: discovered.headOID == current.worktree.headOID
+            ? current.pendingDiffRevision : nil
     )
 }
 

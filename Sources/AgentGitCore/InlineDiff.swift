@@ -15,11 +15,17 @@ public struct GitDiffInlineRange: Hashable, Codable, Sendable {
 public enum InlineDiffCalculator {
     /// 中段超过这个 token 数就不再做 LCS，只保留粗粒度区间；避免长行退化成 O(n²)。
     private static let maximumRefinedTokens = 200
+    private static let maximumComparedScalars = 65_536
+    /// 整个 hunk 共用预算，避免每对行的上限随着行数累加。
+    private static let maximumComparedBytes = 1_048_576
+    private static let maximumComparedPairs = 1_024
+    private static let maximumRefinementCells = 200_000
 
     /// 统一 diff 里删除行成组、新增行成组，按下标一一配对是各家 diff 视图的通行做法。
     public static func annotate(_ lines: [GitDiffLine]) -> [GitDiffLine] {
         var result = lines
         var index = 0
+        var budget = WorkBudget()
 
         while index < result.count {
             guard !Task.isCancelled else {
@@ -42,14 +48,15 @@ public enum InlineDiffCalculator {
             let deletionCount = additionStart - deletionStart
             let additionCount = index - additionStart
             for offset in 0..<min(deletionCount, additionCount) {
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, budget.canCompare else {
                     return result
                 }
                 let oldIndex = deletionStart + offset
                 let newIndex = additionStart + offset
                 let (oldRanges, newRanges) = ranges(
                     old: result[oldIndex].content,
-                    new: result[newIndex].content
+                    new: result[newIndex].content,
+                    budget: &budget
                 )
                 result[oldIndex] = result[oldIndex].withInlineRanges(oldRanges)
                 result[newIndex] = result[newIndex].withInlineRanges(newRanges)
@@ -63,38 +70,110 @@ public enum InlineDiffCalculator {
         old: String,
         new: String
     ) -> (old: [GitDiffInlineRange], new: [GitDiffInlineRange]) {
-        let oldCharacters = Array(old)
-        let newCharacters = Array(new)
-        guard !oldCharacters.isEmpty, !newCharacters.isEmpty else {
+        var budget = WorkBudget()
+        return ranges(old: old, new: new, budget: &budget)
+    }
+
+    private struct WorkBudget {
+        var remainingBytes = InlineDiffCalculator.maximumComparedBytes
+        var remainingPairs = InlineDiffCalculator.maximumComparedPairs
+        var remainingRefinementCells = InlineDiffCalculator.maximumRefinementCells
+
+        var canCompare: Bool {
+            remainingBytes > 0 && remainingPairs > 0
+        }
+    }
+
+    private static func ranges(
+        old: String,
+        new: String,
+        budget: inout WorkBudget
+    ) -> (old: [GitDiffInlineRange], new: [GitDiffInlineRange]) {
+        guard !Task.isCancelled, budget.canCompare else {
+            return ([], [])
+        }
+        budget.remainingPairs -= 1
+        guard !old.isEmpty, !new.isEmpty,
+              let oldBytes = comparedBytes(old, budget: &budget),
+              let newBytes = comparedBytes(new, budget: &budget),
+              oldBytes != newBytes else {
             return ([], [])
         }
 
+        // CRLF 在 Character 中算一个字符，含 CR 的行继续走字符路径。
+        if oldBytes.allSatisfy({ $0 < 128 && $0 != 13 }),
+           newBytes.allSatisfy({ $0 < 128 && $0 != 13 }) {
+            guard oldBytes.count <= maximumComparedScalars,
+                  newBytes.count <= maximumComparedScalars else {
+                return ([], [])
+            }
+            let (oldSpans, newSpans) = changedSpans(
+                oldBytes, newBytes, isWord: isWordByte, budget: &budget
+            )
+            return (
+                oldSpans.map { GitDiffInlineRange(location: $0.start, length: $0.count) },
+                newSpans.map { GitDiffInlineRange(location: $0.start, length: $0.count) }
+            )
+        }
+
+        guard old.unicodeScalars.prefix(maximumComparedScalars + 1).count <= maximumComparedScalars,
+              new.unicodeScalars.prefix(maximumComparedScalars + 1).count <= maximumComparedScalars else {
+            return ([], [])
+        }
+        let oldCharacters = Array(old)
+        let newCharacters = Array(new)
+        let (oldSpans, newSpans) = changedSpans(
+            oldCharacters, newCharacters, isWord: isWordCharacter, budget: &budget
+        )
+        return (
+            inlineRanges(oldSpans, characters: oldCharacters),
+            inlineRanges(newSpans, characters: newCharacters)
+        )
+    }
+
+    /// UTF-8 每个 scalar 最多四个字节，读取到上限就停止，不先扫描完整长行。
+    private static func comparedBytes(_ text: String, budget: inout WorkBudget) -> [UInt8]? {
+        let limit = min(maximumComparedScalars * 4, budget.remainingBytes)
+        let bytes = Array(text.utf8.prefix(limit + 1))
+        budget.remainingBytes -= min(bytes.count, budget.remainingBytes)
+        guard bytes.count <= limit else {
+            return nil
+        }
+        return bytes
+    }
+
+    private static func changedSpans<Element: Hashable>(
+        _ oldElements: [Element],
+        _ newElements: [Element],
+        isWord: (Element) -> Bool,
+        budget: inout WorkBudget
+    ) -> (old: [Span], new: [Span]) {
         var prefix = 0
-        while prefix < oldCharacters.count,
-              prefix < newCharacters.count,
-              oldCharacters[prefix] == newCharacters[prefix] {
+        while prefix < oldElements.count,
+              prefix < newElements.count,
+              oldElements[prefix] == newElements[prefix] {
             prefix += 1
         }
 
         var suffix = 0
-        while suffix < oldCharacters.count - prefix,
-              suffix < newCharacters.count - prefix,
-              oldCharacters[oldCharacters.count - 1 - suffix]
-                == newCharacters[newCharacters.count - 1 - suffix] {
+        while suffix < oldElements.count - prefix,
+              suffix < newElements.count - prefix,
+              oldElements[oldElements.count - 1 - suffix]
+                == newElements[newElements.count - 1 - suffix] {
             suffix += 1
         }
 
-        // 裁剪不能停在单词中间，否则会highlight出 "be|ta" 这种半截 token。
+        // 裁剪不能停在单词中间，避免只高亮标识符的一部分。
         while prefix > 0,
-              isWordCharacter(oldCharacters[prefix - 1]),
-              isWordCharacter(oldCharacters, at: prefix)
-                || isWordCharacter(newCharacters, at: prefix) {
+              isWord(oldElements[prefix - 1]),
+              isWordElement(oldElements, at: prefix, matching: isWord)
+                || isWordElement(newElements, at: prefix, matching: isWord) {
             prefix -= 1
         }
         while suffix > 0,
-              isWordCharacter(oldCharacters, at: oldCharacters.count - suffix),
-              isWordCharacter(oldCharacters, at: oldCharacters.count - suffix - 1)
-                || isWordCharacter(newCharacters, at: newCharacters.count - suffix - 1) {
+              isWordElement(oldElements, at: oldElements.count - suffix, matching: isWord),
+              isWordElement(oldElements, at: oldElements.count - suffix - 1, matching: isWord)
+                || isWordElement(newElements, at: newElements.count - suffix - 1, matching: isWord) {
             suffix -= 1
         }
 
@@ -103,39 +182,34 @@ public enum InlineDiffCalculator {
             return ([], [])
         }
 
-        let oldMiddle = Array(oldCharacters[prefix..<(oldCharacters.count - suffix)])
-        let newMiddle = Array(newCharacters[prefix..<(newCharacters.count - suffix)])
-        guard !oldMiddle.isEmpty || !newMiddle.isEmpty else {
+        let oldEnd = oldElements.count - suffix
+        let newEnd = newElements.count - suffix
+        guard prefix < oldEnd || prefix < newEnd else {
             return ([], [])
         }
 
-        let oldTokens = tokenize(oldMiddle)
-        let newTokens = tokenize(newMiddle)
-        guard oldTokens.count <= maximumRefinedTokens,
-              newTokens.count <= maximumRefinedTokens else {
-            return (
-                [inlineRange(oldCharacters, from: prefix, count: oldMiddle.count)],
-                [inlineRange(newCharacters, from: prefix, count: newMiddle.count)]
-            )
+        let coarseSpans = (
+            old: prefix < oldEnd ? [Span(start: prefix, count: oldEnd - prefix)] : [],
+            new: prefix < newEnd ? [Span(start: prefix, count: newEnd - prefix)] : []
+        )
+        guard budget.remainingRefinementCells > 0,
+              let oldTokens = tokenize(oldElements, in: prefix..<oldEnd, isWord: isWord),
+              let newTokens = tokenize(newElements, in: prefix..<newEnd, isWord: isWord) else {
+            return coarseSpans
         }
 
         // 绝大多数改动就是一个 token 变了，没必要为此建 DP 表。
-        if oldTokens.count <= 1, newTokens.count <= 1 {
-            return (
-                oldMiddle.isEmpty
-                    ? []
-                    : [inlineRange(oldCharacters, from: prefix, count: oldMiddle.count)],
-                newMiddle.isEmpty
-                    ? []
-                    : [inlineRange(newCharacters, from: prefix, count: newMiddle.count)]
-            )
+        if oldTokens.isEmpty || newTokens.isEmpty
+            || (oldTokens.count <= 1 && newTokens.count <= 1) {
+            return coarseSpans
         }
 
-        let (oldSpans, newSpans) = differingSpans(oldTokens, newTokens)
-        return (
-            oldSpans.map { inlineRange(oldCharacters, from: prefix + $0.start, count: $0.count) },
-            newSpans.map { inlineRange(newCharacters, from: prefix + $0.start, count: $0.count) }
-        )
+        let cells = (oldTokens.count + 1) * (newTokens.count + 1)
+        guard cells <= budget.remainingRefinementCells, !Task.isCancelled else {
+            return coarseSpans
+        }
+        budget.remainingRefinementCells -= cells
+        return differingSpans(oldTokens, newTokens, oldElements: oldElements, newElements: newElements)
     }
 
     private struct Span {
@@ -146,27 +220,38 @@ public enum InlineDiffCalculator {
     private struct Token {
         let start: Int
         let count: Int
-        let text: ArraySlice<Character>
     }
 
     /// 按标识符切分：连续的字母数字下划线算一个 token，其余字符各自成一个。
-    private static func tokenize(_ characters: [Character]) -> [Token] {
+    private static func tokenize<Element>(
+        _ elements: [Element],
+        in bounds: Range<Int>,
+        isWord: (Element) -> Bool
+    ) -> [Token]? {
         var tokens: [Token] = []
-        var index = 0
-        while index < characters.count {
+        var index = bounds.lowerBound
+        while index < bounds.upperBound {
             let start = index
-            if isWordCharacter(characters[index]) {
-                while index < characters.count, isWordCharacter(characters[index]) {
+            if isWord(elements[index]) {
+                while index < bounds.upperBound, isWord(elements[index]) {
                     index += 1
                 }
             } else {
                 index += 1
             }
             tokens.append(
-                Token(start: start, count: index - start, text: characters[start..<index])
+                Token(start: start, count: index - start)
             )
+            guard tokens.count <= maximumRefinedTokens else {
+                return nil
+            }
         }
         return tokens
+    }
+
+    private static func isWordByte(_ byte: UInt8) -> Bool {
+        (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+            || (byte >= 48 && byte <= 57) || byte == 95
     }
 
     /// 只把 ASCII 标识符当“词”。CJK 没有词边界，整段连起来会让高亮退化成整句。
@@ -174,30 +259,53 @@ public enum InlineDiffCalculator {
         character.isASCII && (character.isLetter || character.isNumber || character == "_")
     }
 
-    private static func isWordCharacter(_ characters: [Character], at index: Int) -> Bool {
-        guard characters.indices.contains(index) else {
+    private static func isWordElement<Element>(
+        _ elements: [Element],
+        at index: Int,
+        matching isWord: (Element) -> Bool
+    ) -> Bool {
+        guard elements.indices.contains(index) else {
             return false
         }
-        return isWordCharacter(characters[index])
+        return isWord(elements[index])
     }
 
     /// token 级 LCS，未匹配上的连续 token 合并成一个高亮区间。
-    private static func differingSpans(
+    private static func differingSpans<Element: Hashable>(
         _ oldTokens: [Token],
-        _ newTokens: [Token]
+        _ newTokens: [Token],
+        oldElements: [Element],
+        newElements: [Element]
     ) -> (old: [Span], new: [Span]) {
+        // 先为 token 分配整数 ID，长标识符不会在每个 DP cell 重复扫描。
+        var tokenIDs: [[Element]: Int] = [:]
+        func identifiers(_ tokens: [Token], in elements: [Element]) -> [Int] {
+            tokens.map { token in
+                let text = Array(elements[token.start..<(token.start + token.count)])
+                if let identifier = tokenIDs[text] {
+                    return identifier
+                }
+                let identifier = tokenIDs.count
+                tokenIDs[text] = identifier
+                return identifier
+            }
+        }
+        let oldIDs = identifiers(oldTokens, in: oldElements)
+        let newIDs = identifiers(newTokens, in: newElements)
         let rows = oldTokens.count
         let columns = newTokens.count
-        var lengths = Array(
-            repeating: Array(repeating: 0, count: columns + 1),
-            count: rows + 1
-        )
+        let width = columns + 1
+        var lengths = Array(repeating: 0, count: (rows + 1) * width)
         for row in stride(from: rows - 1, through: 0, by: -1) {
+            let rowStart = row * width
+            let nextRowStart = rowStart + width
             for column in stride(from: columns - 1, through: 0, by: -1) {
-                if oldTokens[row].text.elementsEqual(newTokens[column].text) {
-                    lengths[row][column] = lengths[row + 1][column + 1] + 1
+                if oldIDs[row] == newIDs[column] {
+                    lengths[rowStart + column] = lengths[nextRowStart + column + 1] + 1
                 } else {
-                    lengths[row][column] = max(lengths[row + 1][column], lengths[row][column + 1])
+                    lengths[rowStart + column] = max(
+                        lengths[nextRowStart + column], lengths[rowStart + column + 1]
+                    )
                 }
             }
         }
@@ -207,12 +315,12 @@ public enum InlineDiffCalculator {
         var row = 0
         var column = 0
         while row < rows, column < columns {
-            if oldTokens[row].text.elementsEqual(newTokens[column].text) {
+            if oldIDs[row] == newIDs[column] {
                 oldChanged[row] = false
                 newChanged[column] = false
                 row += 1
                 column += 1
-            } else if lengths[row + 1][column] >= lengths[row][column + 1] {
+            } else if lengths[(row + 1) * width + column] >= lengths[row * width + column + 1] {
                 row += 1
             } else {
                 column += 1
@@ -242,14 +350,21 @@ public enum InlineDiffCalculator {
         return spans
     }
 
-    /// 字符下标换算成 UTF-16 偏移，渲染层可以直接当 NSRange 用。
-    private static func inlineRange(
-        _ characters: [Character],
-        from start: Int,
-        count: Int
-    ) -> GitDiffInlineRange {
-        let location = characters[0..<start].reduce(0) { $0 + $1.utf16.count }
-        let length = characters[start..<(start + count)].reduce(0) { $0 + $1.utf16.count }
-        return GitDiffInlineRange(location: location, length: length)
+    /// 一次建立字符到 UTF-16 的偏移表，多个区间共用，保持完整字符的边界。
+    private static func inlineRanges(_ spans: [Span], characters: [Character]) -> [GitDiffInlineRange] {
+        guard !spans.isEmpty else {
+            return []
+        }
+        var offsets = [0]
+        offsets.reserveCapacity(characters.count + 1)
+        for character in characters {
+            offsets.append(offsets[offsets.count - 1] + character.utf16.count)
+        }
+        return spans.map { span in
+            GitDiffInlineRange(
+                location: offsets[span.start],
+                length: offsets[span.start + span.count] - offsets[span.start]
+            )
+        }
     }
 }

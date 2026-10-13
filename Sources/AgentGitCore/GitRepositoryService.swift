@@ -10,6 +10,7 @@ public struct GitWorktreeSnapshot: Identifiable, Hashable, Codable, Sendable {
         case errorMessage
         case hasUsableState
         case eventWatchURLs
+        case pendingDiffRevision
     }
 
     public let worktree: GitWorktree
@@ -20,6 +21,7 @@ public struct GitWorktreeSnapshot: Identifiable, Hashable, Codable, Sendable {
     public let errorMessage: String?
     public let hasUsableState: Bool
     public let eventWatchURLs: [URL]
+    public let pendingDiffRevision: String?
 
     public init(
         worktree: GitWorktree,
@@ -29,7 +31,8 @@ public struct GitWorktreeSnapshot: Identifiable, Hashable, Codable, Sendable {
         refreshedAt: Date? = nil,
         errorMessage: String?,
         hasUsableState: Bool = true,
-        eventWatchURLs: [URL] = []
+        eventWatchURLs: [URL] = [],
+        pendingDiffRevision: String? = nil
     ) {
         self.worktree = worktree
         self.status = status
@@ -39,6 +42,7 @@ public struct GitWorktreeSnapshot: Identifiable, Hashable, Codable, Sendable {
         self.errorMessage = errorMessage
         self.hasUsableState = hasUsableState
         self.eventWatchURLs = eventWatchURLs
+        self.pendingDiffRevision = pendingDiffRevision
     }
 
     public init(from decoder: any Decoder) throws {
@@ -70,7 +74,8 @@ public struct GitWorktreeSnapshot: Identifiable, Hashable, Codable, Sendable {
             eventWatchURLs: try container.decodeIfPresent(
                 [URL].self,
                 forKey: .eventWatchURLs
-            ) ?? [worktree.rootURL]
+            ) ?? [worktree.rootURL],
+            pendingDiffRevision: try container.decodeIfPresent(String.self, forKey: .pendingDiffRevision)
         )
     }
 
@@ -240,11 +245,27 @@ private actor GitBranchStatusCache {
     }
 }
 
+private actor GitHeadCommitDateCache {
+    private var values: [String: Date] = [:]
+
+    func value(for oid: String) -> Date? { values[oid] }
+
+    func insert(_ value: Date, for oid: String) {
+        if values.count >= 512, values[oid] == nil { values.removeAll(keepingCapacity: true) }
+        values[oid] = value
+    }
+}
+
 private struct GitFileSystemFingerprint: Hashable, Sendable {
     let path: String
     let modificationDate: Date?
     let fileSize: UInt64?
     let fileNumber: UInt64?
+}
+
+private struct GitChangedFileMetadata {
+    let fingerprints: [GitFileSystemFingerprint]
+    let activityDates: [Date]
 }
 
 private struct GitDiffStatCacheKey: Hashable, Sendable {
@@ -282,9 +303,11 @@ private actor GitDiffStatCache {
     }
 }
 
-private enum GitBranchStatusLoadError: Error, CustomStringConvertible, Sendable {
+private enum GitBranchStatusLoadError: LocalizedError, CustomStringConvertible, Sendable {
     case malformedReferenceOutput
     case upstreamUnavailable(String)
+
+    var errorDescription: String? { description }
 
     var description: String {
         switch self {
@@ -302,8 +325,8 @@ private enum GitSupplementalLoadResult<Value: Sendable>: Sendable {
 }
 
 public struct GitRepositoryService: Sendable {
-    /// oid, short oid, author, author date, parents, refs, subject —— 与 GitLogParser 对应。
-    private static let historyFormat = "%x00%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%D%x1f%s"
+    /// refs 独立读取，仍保留旧格式的空字段以兼容 GitLogParser。
+    private static let historyFormat = "%x00%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%x1f%s"
     private static let diffBatchSize = 24
     private static let maximumPatchOutputBytes = 8 * 1_024 * 1_024
     private static let maximumHistoryOutputBytes = 8 * 1_024 * 1_024
@@ -316,9 +339,11 @@ public struct GitRepositoryService: Sendable {
     private static let repositoryScanTimeout: Duration = .seconds(30)
     private static let remoteOperationTimeout: Duration = .seconds(300)
 
-    private let runner: GitCommandRunner
+    let runner: GitCommandRunner
+    let pendingIdentityCache: GitPendingIdentityCache
     private let branchStatusCache: GitBranchStatusCache
     private let diffStatCache: GitDiffStatCache
+    private let headCommitDateCache: GitHeadCommitDateCache
     private let discardRecoveryStore: GitDiscardRecoveryStore
 
     public init(
@@ -326,8 +351,10 @@ public struct GitRepositoryService: Sendable {
         discardRecoveryStore: GitDiscardRecoveryStore = .systemTrash
     ) {
         self.runner = runner
+        self.pendingIdentityCache = GitPendingIdentityCache()
         self.branchStatusCache = GitBranchStatusCache()
         self.diffStatCache = GitDiffStatCache()
+        self.headCommitDateCache = GitHeadCommitDateCache()
         self.discardRecoveryStore = discardRecoveryStore
     }
 
@@ -377,24 +404,12 @@ public struct GitRepositoryService: Sendable {
 
                     if worktrees.first?.id == preferredID,
                        let preferred = worktrees.first {
-                        let initialSubmoduleScanMode: GitSubmoduleScanMode =
-                            prioritizedSubmoduleScanMode == .allChanges
-                                ? .commitsOnly
-                                : prioritizedSubmoduleScanMode
                         let snapshot = await service.loadWorktree(
                             preferred,
-                            submoduleScanMode: initialSubmoduleScanMode
+                            submoduleScanMode: prioritizedSubmoduleScanMode
                         )
                         try Task.checkCancellation()
                         continuation.yield(.worktree(snapshot))
-                        if prioritizedSubmoduleScanMode == .allChanges {
-                            let completeSnapshot = await service.loadWorktree(
-                                preferred,
-                                submoduleScanMode: .allChanges
-                            )
-                            try Task.checkCancellation()
-                            continuation.yield(.worktree(completeSnapshot))
-                        }
                         worktrees.removeFirst()
                     }
 
@@ -531,7 +546,7 @@ public struct GitRepositoryService: Sendable {
         return false
     }
 
-    public func loadDiff(
+    @concurrent public func loadDiff(
         worktree: GitWorktree,
         change: GitFileChange,
         scope: GitDiffScope,
@@ -737,7 +752,8 @@ public struct GitRepositoryService: Sendable {
         worktree: GitWorktree,
         workingChanges: [GitFileChange],
         stagedChanges: [GitFileChange],
-        options: GitDiffOptions = GitDiffOptions()
+        options: GitDiffOptions = GitDiffOptions(),
+        sourceIdentities: [GitPendingDiffIdentity] = []
     ) -> AsyncThrowingStream<GitPendingDiffBatch, any Error> {
         let workingStream = loadDiffBatches(
             worktree: worktree,
@@ -751,6 +767,17 @@ public struct GitRepositoryService: Sendable {
             scope: .staged,
             options: options
         )
+        let identities = options.ignoresWhitespace ? [] : sourceIdentities.filter {
+            $0.worktreeID == worktree.id && $0.context == options.context
+        }
+        let workingIdentities = Dictionary(
+            identities.filter { $0.scope == .working }.map { ($0.changeID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let stagedIdentities = Dictionary(
+            identities.filter { $0.scope == .staged }.map { ($0.changeID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -760,7 +787,9 @@ public struct GitRepositoryService: Sendable {
                                 for try await diffs in workingStream {
                                     try Task.checkCancellation()
                                     continuation.yield(
-                                        GitPendingDiffBatch(scope: .working, diffs: diffs)
+                                        GitPendingDiffBatch(scope: .working, diffs: diffs.map { diff in
+                                            diff.withSourceIdentity(workingIdentities[diff.change.id])
+                                        })
                                     )
                                 }
                             }
@@ -770,7 +799,9 @@ public struct GitRepositoryService: Sendable {
                                 for try await diffs in stagedStream {
                                     try Task.checkCancellation()
                                     continuation.yield(
-                                        GitPendingDiffBatch(scope: .staged, diffs: diffs)
+                                        GitPendingDiffBatch(scope: .staged, diffs: diffs.map { diff in
+                                            diff.withSourceIdentity(stagedIdentities[diff.change.id])
+                                        })
                                     )
                                 }
                             }
@@ -839,7 +870,7 @@ public struct GitRepositoryService: Sendable {
         }
     }
 
-    private func loadPatchBatches(
+    @concurrent private func loadPatchBatches(
         worktree: GitWorktree,
         changes: [GitFileChange],
         scope: GitDiffScope,
@@ -1134,8 +1165,13 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
-            "--shortstat",
-            "--decorate=full",
+            "--raw",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--diff-merges=off",
+            "--root",
+            "--no-decorate",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
             "--skip=\(offset)"
@@ -1143,14 +1179,18 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
+        async let loadedReferences = historyReferences(for: worktree)
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
             maximumOutputBytes: Self.maximumHistoryOutputBytes,
-            environment: ["LC_ALL": "C"],
+            environment: ["LC_ALL": "C", "GIT_NO_LAZY_FETCH": "1"],
             timeout: Self.repositoryScanTimeout
         )
-        let loaded = try GitLogParser.parse(data)
+        let references = try await loadedReferences
+        let loaded = try GitLogParser.parse(data, includesRawDiffs: true).map {
+            $0.withReferenceNames(references[$0.oid] ?? [])
+        }
         let commits = Array(loaded.prefix(pageSize))
         return GitHistoryPage(
             commits: commits,
@@ -1187,7 +1227,7 @@ public struct GitRepositoryService: Sendable {
             "log",
             "-z",
             "-L", "\(startLine),\(endLine):\(path)",
-            "--decorate=full",
+            "--no-decorate",
             "--format=\(Self.historyFormat)",
             "--no-patch",
             "--max-count=\(limit)"
@@ -1195,6 +1235,7 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
+        async let loadedReferences = historyReferences(for: worktree)
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
@@ -1202,7 +1243,10 @@ public struct GitRepositoryService: Sendable {
             environment: ["LC_ALL": "C"],
             timeout: Self.repositoryScanTimeout
         )
-        return try GitLogParser.parse(data)
+        let references = try await loadedReferences
+        return try GitLogParser.parse(data).map {
+            $0.withReferenceNames(references[$0.oid] ?? [])
+        }
     }
 
     public func historyContainsCommits(
@@ -1255,8 +1299,13 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
-            "--shortstat",
-            "--decorate=full",
+            "--raw",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--diff-merges=off",
+            "--root",
+            "--no-decorate",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
             "--skip=\(offset)",
@@ -1272,20 +1321,72 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
+        async let loadedReferences = historyReferences(for: worktree)
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
             maximumOutputBytes: Self.maximumHistoryOutputBytes,
-            environment: ["LC_ALL": "C"],
+            environment: ["LC_ALL": "C", "GIT_NO_LAZY_FETCH": "1"],
             timeout: Self.repositoryScanTimeout
         )
-        let loaded = try GitLogParser.parse(data)
+        let references = try await loadedReferences
+        let loaded = try GitLogParser.parse(data, includesRawDiffs: true).map {
+            $0.withReferenceNames(references[$0.oid] ?? [])
+        }
         let commits = Array(loaded.prefix(pageSize))
         return GitHistoryPage(
             commits: commits,
             nextOffset: offset + commits.count,
             hasMore: loaded.count > pageSize
         )
+    }
+
+    private func historyReferences(for worktree: GitWorktree) async throws -> [String: [String]] {
+        let data = try await runner.run(
+            arguments: [
+                "for-each-ref",
+                "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00",
+                "refs/heads", "refs/remotes", "refs/tags", "refs/stash"
+            ],
+            workingDirectory: worktree.rootURL,
+            maximumOutputBytes: Self.maximumHistoryOutputBytes,
+            environment: ["GIT_NO_LAZY_FETCH": "1"],
+            timeout: Self.repositoryScanTimeout
+        )
+        var references: [String: [String]] = [:]
+        var hasAttachedHead = false
+        for record in data.split(separator: 10) {
+            guard let text = String(data: Data(record), encoding: .utf8) else {
+                throw GitLogParseError.invalidUTF8
+            }
+            let fields = text.split(separator: "\0", omittingEmptySubsequences: false)
+            guard fields.count == 5, Self.isFullObjectID(String(fields[0])) else {
+                throw GitLogParseError.malformedRecord(text)
+            }
+            let oid = fields[1].isEmpty ? String(fields[0]) : String(fields[1])
+            let ref = String(fields[2])
+            let name: String
+            if fields[3] == "*" {
+                name = "HEAD -> \(ref)"
+                hasAttachedHead = true
+            } else {
+                name = ref.hasPrefix("refs/tags/") ? "tag: \(ref)" : ref
+            }
+            references[oid, default: []].append(name)
+        }
+        if !hasAttachedHead {
+            let headData = try await runner.run(
+                arguments: ["rev-parse", "--verify", "HEAD"],
+                workingDirectory: worktree.rootURL,
+                maximumOutputBytes: 1_024,
+                environment: ["GIT_NO_LAZY_FETCH": "1"],
+                timeout: Self.quickMetadataTimeout
+            )
+            let oid = String(decoding: headData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Self.isFullObjectID(oid) else { throw GitLogParseError.malformedRecord(oid) }
+            references[oid, default: []].append("HEAD")
+        }
+        return references
     }
 
     public func loadCommitMessage(
@@ -1360,7 +1461,7 @@ public struct GitRepositoryService: Sendable {
         return try GitNameStatusParser.parse(data)
     }
 
-    public func loadCommitDiff(
+    @concurrent public func loadCommitDiff(
         worktree: GitWorktree,
         commit: GitCommit,
         change: GitFileChange,
@@ -1619,7 +1720,7 @@ public struct GitRepositoryService: Sendable {
         )
     }
 
-    public func loadRangeDiff(
+    @concurrent public func loadRangeDiff(
         worktree: GitWorktree,
         baseOID: String,
         headOID: String,
@@ -2256,12 +2357,14 @@ public struct GitRepositoryService: Sendable {
         )
     }
 
-    public func loadWorktree(
+    @concurrent public func loadWorktree(
         _ worktree: GitWorktree,
         submoduleScanMode: GitSubmoduleScanMode = .commitsOnly
     ) async -> GitWorktreeSnapshot {
         do {
             async let loadedGitDirectories = absoluteGitDirectories(for: worktree.rootURL)
+            let reader = GitPendingIdentityReader(runner: runner, rootURL: worktree.rootURL)
+            let metadataStamp = try? await pendingIdentityCache.refreshMetadataStamp(reader: reader)
             let initialStatus = try await loadStatus(
                 for: worktree,
                 submoduleScanMode: submoduleScanMode
@@ -2270,6 +2373,9 @@ public struct GitRepositoryService: Sendable {
                 initialStatus,
                 to: worktree
             )
+            async let loadedPendingRevision = pendingDiffRevision(
+                reader: reader, status: initialStatus, metadataStamp: metadataStamp
+            )
             async let loadedBranch = supplementalResult(label: "Ahead/behind") {
                 try await loadBranchStatus(
                     for: refreshedWorktree,
@@ -2277,11 +2383,13 @@ public struct GitRepositoryService: Sendable {
                 )
             }
             let gitDirectories = await loadedGitDirectories
+            let fileMetadata = changedFileMetadata(for: refreshedWorktree, status: initialStatus)
             let diffStatCacheKey = diffStatCacheKey(
                 for: refreshedWorktree,
                 status: initialStatus,
                 gitDirectory: gitDirectories.gitDirectory,
-                commonGitDirectory: gitDirectories.commonGitDirectory
+                commonGitDirectory: gitDirectories.commonGitDirectory,
+                changedFiles: fileMetadata.fingerprints
             )
             async let loadedDiffStat = supplementalResult(label: "Diff statistics") {
                 try await self.diffStat(
@@ -2293,11 +2401,13 @@ public struct GitRepositoryService: Sendable {
             async let loadedActivityDate = activityDate(
                 for: refreshedWorktree,
                 status: initialStatus,
-                gitDirectory: gitDirectories.gitDirectory
+                gitDirectory: gitDirectories.gitDirectory,
+                changedFileDates: fileMetadata.activityDates
             )
             let branchResult = try await loadedBranch
             let diffStatResult = try await loadedDiffStat
             let lastActivityAt = await loadedActivityDate
+            let pendingRevision = await loadedPendingRevision
             var supplementalErrors: [String] = []
             let branch: GitBranchStatus?
             switch branchResult {
@@ -2344,7 +2454,8 @@ public struct GitRepositoryService: Sendable {
                 errorMessage: supplementalErrors.isEmpty
                     ? nil
                     : supplementalErrors.joined(separator: "\n"),
-                eventWatchURLs: eventWatchURLs
+                eventWatchURLs: eventWatchURLs,
+                pendingDiffRevision: pendingRevision
             )
         } catch {
             return GitWorktreeSnapshot(
@@ -2353,7 +2464,7 @@ public struct GitRepositoryService: Sendable {
                 diffStat: .zero,
                 lastActivityAt: .distantPast,
                 refreshedAt: nil,
-                errorMessage: String(describing: error),
+                errorMessage: GitErrorDescription.message(for: error),
                 hasUsableState: false,
                 eventWatchURLs: [worktree.rootURL]
             )
@@ -2369,7 +2480,7 @@ public struct GitRepositoryService: Sendable {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            return .failure("\(label): \(String(describing: error))")
+            return .failure("\(label): \(GitErrorDescription.message(for: error))")
         }
     }
 
@@ -2379,6 +2490,7 @@ public struct GitRepositoryService: Sendable {
     ) async throws -> GitStatusSnapshot {
         let statusData = try await runner.run(
             arguments: [
+                "--no-optional-locks",
                 "status",
                 "--porcelain=v2",
                 "-z",
@@ -2430,29 +2542,33 @@ public struct GitRepositoryService: Sendable {
               let headOID = status.headOID else {
             return nil
         }
-        let referenceData: Data
+        let upstreamOID: String
         do {
-            referenceData = try await runner.run(
-                arguments: [
-                    "rev-parse",
-                    "@{upstream}^{commit}"
-                ],
-                workingDirectory: worktree.rootURL,
-                timeout: Self.quickMetadataTimeout
+            upstreamOID = try await pendingIdentityCache.upstreamOID(
+                reader: GitPendingIdentityReader(runner: runner, rootURL: worktree.rootURL),
+                upstreamRef: upstreamRef
             )
         } catch is GitCommandFailure {
             throw GitBranchStatusLoadError.upstreamUnavailable(upstreamRef)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // 本地来源无法核对时仍用 Git 查询，不沿用缓存值。
+            let data = try await runner.run(
+                arguments: ["rev-parse", "@{upstream}^{commit}"],
+                workingDirectory: worktree.rootURL,
+                timeout: Self.quickMetadataTimeout
+            )
+            upstreamOID = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        let upstreamOIDs = String(decoding: referenceData, as: UTF8.self)
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
-        guard upstreamOIDs.count == 1 else {
+        guard Self.isFullObjectID(upstreamOID) else {
             throw GitBranchStatusLoadError.malformedReferenceOutput
         }
         let cacheKey = GitBranchStatusCacheKey(
             worktreePath: worktree.rootURL.standardizedFileURL.path,
             headOID: headOID,
-            upstreamOID: upstreamOIDs[0],
+            upstreamOID: upstreamOID,
             upstreamRef: upstreamRef
         )
         if let cached = await branchStatusCache.value(for: cacheKey) {
@@ -2463,7 +2579,7 @@ public struct GitRepositoryService: Sendable {
                 "rev-list",
                 "--left-right",
                 "--count",
-                "\(headOID)...\(upstreamOIDs[0])"
+                "\(headOID)...\(upstreamOID)"
             ],
             workingDirectory: worktree.rootURL,
             timeout: Self.repositoryScanTimeout
@@ -2471,6 +2587,16 @@ public struct GitRepositoryService: Sendable {
         let status = try GitAheadBehindParser.parse(data, upstreamRef: upstreamRef)
         await branchStatusCache.insert(status, for: cacheKey)
         return status
+    }
+
+    private func pendingDiffRevision(
+        reader: GitPendingIdentityReader, status: GitStatusSnapshot, metadataStamp: String?
+    ) async -> String? {
+        guard let metadataStamp, status.changes.allSatisfy({ $0.submoduleStatus == nil }) else { return nil }
+        let paths = Set(status.changes.flatMap { [$0.path, $0.originalPath].compactMap { $0 } }).sorted()
+        return try? await pendingIdentityCache.refreshRevision(
+            reader: reader, paths: paths, metadataStamp: metadataStamp
+        )
     }
 
     private func diffStat(
@@ -2493,7 +2619,8 @@ public struct GitRepositoryService: Sendable {
         for worktree: GitWorktree,
         status: GitStatusSnapshot,
         gitDirectory: URL?,
-        commonGitDirectory: URL?
+        commonGitDirectory: URL?,
+        changedFiles: [GitFileSystemFingerprint]
     ) -> GitDiffStatCacheKey {
         let metadataURLs = Set(
             [
@@ -2505,20 +2632,6 @@ public struct GitRepositoryService: Sendable {
                 worktree.rootURL.appendingPathComponent(".gitattributes")
             ].compactMap { $0?.standardizedFileURL }
         )
-        let changedURLs = Set(
-            status.changes.flatMap { change in
-                [change.path, change.originalPath].compactMap { path -> URL? in
-                    guard let path else {
-                        return nil
-                    }
-                    let url = worktree.rootURL.appendingPathComponent(path)
-                    if FileManager.default.fileExists(atPath: url.path) {
-                        return url.standardizedFileURL
-                    }
-                    return url.deletingLastPathComponent().standardizedFileURL
-                }
-            }
-        )
         return GitDiffStatCacheKey(
             worktreePath: worktree.rootURL.standardizedFileURL.path,
             headOID: status.headOID,
@@ -2526,9 +2639,40 @@ public struct GitRepositoryService: Sendable {
             gitMetadata: metadataURLs.map(fileSystemFingerprint).sorted {
                 $0.path < $1.path
             },
-            changedFiles: changedURLs.map(fileSystemFingerprint).sorted {
-                $0.path < $1.path
+            changedFiles: changedFiles
+        )
+    }
+
+    private func changedFileMetadata(
+        for worktree: GitWorktree, status: GitStatusSnapshot
+    ) -> GitChangedFileMetadata {
+        var inspected: [URL: GitFileSystemFingerprint] = [:]
+        func inspect(_ url: URL) -> GitFileSystemFingerprint {
+            if let value = inspected[url] { return value }
+            let value = fileSystemFingerprint(url)
+            inspected[url] = value
+            return value
+        }
+        var fingerprints: [String: GitFileSystemFingerprint] = [:]
+        var dates: [Date] = []
+        for change in status.changes {
+            for path in [change.path, change.originalPath].compactMap({ $0 }) {
+                let url = worktree.rootURL.appendingPathComponent(path).standardizedFileURL
+                let file = inspect(url)
+                let exists = file.modificationDate != nil || file.fileSize != nil || file.fileNumber != nil
+                let fingerprint = exists ? file : inspect(url.deletingLastPathComponent())
+                fingerprints[fingerprint.path] = fingerprint
+                guard path == change.path else { continue }
+                if let date = file.modificationDate {
+                    dates.append(date)
+                } else if change.indexStatus == "D" || change.worktreeStatus == "D",
+                          let date = inspect(url.deletingLastPathComponent()).modificationDate {
+                    dates.append(date)
+                }
             }
+        }
+        return GitChangedFileMetadata(
+            fingerprints: fingerprints.values.sorted { $0.path < $1.path }, activityDates: dates
         )
     }
 
@@ -2590,20 +2734,26 @@ public struct GitRepositoryService: Sendable {
     private func activityDate(
         for worktree: GitWorktree,
         status: GitStatusSnapshot,
-        gitDirectory: URL?
+        gitDirectory: URL?,
+        changedFileDates: [Date]? = nil
     ) async -> Date {
         var dates: [Date] = []
         async let loadedGitDates = gitDates(
             for: worktree.rootURL,
-            gitDirectory: gitDirectory
+            gitDirectory: gitDirectory,
+            headOID: status.headOID
         )
-        for change in status.changes {
-            let fileURL = worktree.rootURL.appendingPathComponent(change.path)
-            if let date = modificationDate(at: fileURL) {
-                dates.append(date)
-            } else if change.indexStatus == "D" || change.worktreeStatus == "D",
-                      let date = modificationDate(at: fileURL.deletingLastPathComponent()) {
-                dates.append(date)
+        if let changedFileDates {
+            dates.append(contentsOf: changedFileDates)
+        } else {
+            for change in status.changes {
+                let fileURL = worktree.rootURL.appendingPathComponent(change.path)
+                if let date = modificationDate(at: fileURL) {
+                    dates.append(date)
+                } else if change.indexStatus == "D" || change.worktreeStatus == "D",
+                          let date = modificationDate(at: fileURL.deletingLastPathComponent()) {
+                    dates.append(date)
+                }
             }
         }
         dates.append(contentsOf: await loadedGitDates)
@@ -2613,7 +2763,8 @@ public struct GitRepositoryService: Sendable {
 
     private func gitDates(
         for worktreeURL: URL,
-        gitDirectory: URL?
+        gitDirectory: URL?,
+        headOID: String?
     ) async -> [Date] {
         var dates: [Date] = []
         if let gitDirectory {
@@ -2623,7 +2774,7 @@ public struct GitRepositoryService: Sendable {
                 dates.append(headLogDate)
             }
         }
-        if let commitDate = await headCommitDate(for: worktreeURL) {
+        if let commitDate = await headCommitDate(for: worktreeURL, oid: headOID) {
             dates.append(commitDate)
         }
         return dates
@@ -2632,6 +2783,12 @@ public struct GitRepositoryService: Sendable {
     private func absoluteGitDirectories(
         for worktreeURL: URL
     ) async -> (gitDirectory: URL?, commonGitDirectory: URL?) {
+        if let directories = try? await pendingIdentityCache.gitDirectories(at: worktreeURL) {
+            return (
+                directories.gitDirectory.resolvingSymlinksInPath(),
+                directories.commonGitDirectory.resolvingSymlinksInPath()
+            )
+        }
         guard let data = try? await runner.run(
             arguments: [
                 "rev-parse",
@@ -2680,9 +2837,11 @@ public struct GitRepositoryService: Sendable {
         )
     }
 
-    private func headCommitDate(for worktreeURL: URL) async -> Date? {
+    private func headCommitDate(for worktreeURL: URL, oid: String?) async -> Date? {
+        guard let oid else { return nil }
+        if let cached = await headCommitDateCache.value(for: oid) { return cached }
         guard let data = try? await runner.run(
-            arguments: ["show", "-s", "--format=%cI", "HEAD"],
+            arguments: ["--no-replace-objects", "show", "-s", "--format=%ct", oid],
             workingDirectory: worktreeURL,
             timeout: Self.quickMetadataTimeout
         ) else {
@@ -2691,7 +2850,10 @@ public struct GitRepositoryService: Sendable {
 
         let value = String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return ISO8601DateFormatter().date(from: value)
+        guard let seconds = TimeInterval(value) else { return nil }
+        let date = Date(timeIntervalSince1970: seconds)
+        await headCommitDateCache.insert(date, for: oid)
+        return date
     }
 
     private static func uniqueChanges(

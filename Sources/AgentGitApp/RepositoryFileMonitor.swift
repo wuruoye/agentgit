@@ -23,6 +23,14 @@ struct RepositoryChangeImpact: Equatable, Sendable {
             contentPathsByWorktreeID[worktreeID, default: []].insert(path)
         }
     }
+
+    mutating func formUnion(_ other: Self) {
+        projectIDs.formUnion(other.projectIDs)
+        metadataWorktreeIDs.formUnion(other.metadataWorktreeIDs)
+        for (id, paths) in other.contentPathsByWorktreeID {
+            contentPathsByWorktreeID[id, default: []].formUnion(paths)
+        }
+    }
 }
 
 struct RepositoryWatchIndex: Sendable {
@@ -43,9 +51,6 @@ struct RepositoryWatchIndex: Sendable {
     private let commonMetadataEntries: [CommonMetadataEntry]
     private let knownWorktreeMetadataPaths: Set<String>
     private let worktreeIDsByRefMetadataPath: [String: Set<GitWorktree.ID>]
-    private let cachedGitIndexFingerprints: [String: RepositoryGitIndexFingerprint]
-    private let refreshedAtByWorktreeID: [GitWorktree.ID: Date]
-    private let cachedChangedPathsByWorktreeID: [GitWorktree.ID: Set<String>]
     private let projectIDs: Set<GitProject.ID>
 
     init(projects: [ProjectState]) {
@@ -55,9 +60,6 @@ struct RepositoryWatchIndex: Sendable {
         var projectIDsByCommonMetadataPath: [String: Set<GitProject.ID>] = [:]
         var worktreeIDsByReferencePath: [String: Set<GitWorktree.ID>] = [:]
         var allKnownWorktreeMetadataPaths: Set<String> = []
-        var gitIndexFingerprints: [String: RepositoryGitIndexFingerprint] = [:]
-        var worktreeRefreshDates: [GitWorktree.ID: Date] = [:]
-        var changedPathsByWorktreeID: [GitWorktree.ID: Set<String>] = [:]
         var loadedProjectIDs: Set<GitProject.ID> = []
         for project in projects {
             guard let snapshot = project.snapshot else {
@@ -68,20 +70,6 @@ struct RepositoryWatchIndex: Sendable {
             for worktree in snapshot.worktrees {
                 let rootPath = worktree.worktree.rootURL.standardizedFileURL.path
                 worktreeRootPaths.insert(rootPath)
-                if let refreshedAt = worktree.refreshedAt {
-                    worktreeRefreshDates[worktree.id] = refreshedAt
-                }
-                changedPathsByWorktreeID[worktree.id] = Set(
-                    worktree.status.changes.flatMap { change in
-                        [change.path, change.originalPath].compactMap { path in
-                            path.map {
-                                worktree.worktree.rootURL
-                                    .appendingPathComponent($0)
-                                    .standardizedFileURL.path
-                            }
-                        }
-                    }
-                )
                 let watchURLs = worktree.eventWatchURLs.isEmpty
                     ? [worktree.worktree.rootURL]
                     : worktree.eventWatchURLs
@@ -95,20 +83,8 @@ struct RepositoryWatchIndex: Sendable {
                     if watchPath == rootPath + "/.git" {
                         primaryWorktreeCandidates[watchPath] = worktree.id
                     }
-                    if watchPath != rootPath {
-                        let indexURL = url.appendingPathComponent(
-                            "index",
-                            isDirectory: false
-                        )
-                        if let refreshedAt = worktree.refreshedAt,
-                           let fingerprint = RepositoryGitIndexFingerprint(
-                               url: indexURL
-                           ), fingerprint.modificationDate <= refreshedAt {
-                            gitIndexFingerprints[fingerprint.path] = fingerprint
-                        }
-                    }
                 }
-                metadataPathsByWorktree.append(metadataPaths)
+                if !metadataPaths.isEmpty { metadataPathsByWorktree.append(metadataPaths) }
             }
             if var sharedMetadataPaths = metadataPathsByWorktree.first {
                 for metadataPaths in metadataPathsByWorktree.dropFirst() {
@@ -176,9 +152,6 @@ struct RepositoryWatchIndex: Sendable {
         }.sorted { $0.path.count > $1.path.count }
         knownWorktreeMetadataPaths = allKnownWorktreeMetadataPaths
         worktreeIDsByRefMetadataPath = worktreeIDsByReferencePath
-        cachedGitIndexFingerprints = gitIndexFingerprints
-        refreshedAtByWorktreeID = worktreeRefreshDates
-        cachedChangedPathsByWorktreeID = changedPathsByWorktreeID
         projectIDs = loadedProjectIDs
     }
 
@@ -192,6 +165,12 @@ struct RepositoryWatchIndex: Sendable {
         }
     }
 
+    func worktreeIDs(watching paths: Set<String>) -> Set<GitWorktree.ID> {
+        entries.reduce(into: []) { result, entry in
+            if paths.contains(entry.path) { result.formUnion(entry.worktreeIDs) }
+        }
+    }
+
     var fullRefreshImpact: RepositoryChangeImpact {
         RepositoryChangeImpact(
             projectIDs: projectIDs,
@@ -199,17 +178,10 @@ struct RepositoryWatchIndex: Sendable {
         )
     }
 
-    func affectedWorktreeIDs(for eventPaths: [String]) -> Set<GitWorktree.ID> {
-        impact(for: eventPaths).worktreeIDs
-    }
-
     func impact(for eventPaths: [String]) -> RepositoryChangeImpact {
         var impact = RepositoryChangeImpact()
         for eventPath in eventPaths {
             let path = URL(fileURLWithPath: eventPath).standardizedFileURL.path
-            if matchesCachedGitIndexState(path) {
-                continue
-            }
             if isGitMaintenancePath(path) {
                 continue
             }
@@ -234,10 +206,7 @@ struct RepositoryWatchIndex: Sendable {
                 if entry.isWorktreeRoot {
                     impact.addContentPath(
                         path,
-                        worktreeIDs: worktreeIDsNeedingContentRefresh(
-                            for: path,
-                            candidates: entry.worktreeIDs
-                        )
+                        worktreeIDs: entry.worktreeIDs
                     )
                 } else if let primaryWorktreeID =
                     primaryWorktreeIDBySharedMetadataPath[entry.path],
@@ -249,47 +218,6 @@ struct RepositoryWatchIndex: Sendable {
             }
         }
         return impact
-    }
-
-    private func worktreeIDsNeedingContentRefresh(
-        for path: String,
-        candidates: Set<GitWorktree.ID>
-    ) -> Set<GitWorktree.ID> {
-        let fileURL = URL(fileURLWithPath: path)
-        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
-        let modificationDate = attributes?[.modificationDate] as? Date
-            ?? modificationDateOfParent(for: fileURL)
-        guard let modificationDate else {
-            return candidates
-        }
-        // 快照完成时间已经覆盖的延迟文件事件只推进 FSEvents 游标。
-        return candidates.filter { worktreeID in
-            guard cachedChangedPathsByWorktreeID[worktreeID]?.contains(path) == true,
-                  let refreshedAt = refreshedAtByWorktreeID[worktreeID] else {
-                return true
-            }
-            return modificationDate > refreshedAt
-        }
-    }
-
-    private func modificationDateOfParent(for fileURL: URL) -> Date? {
-        let parentPath = fileURL.deletingLastPathComponent().path
-        let attributes = try? FileManager.default.attributesOfItem(atPath: parentPath)
-        return attributes?[.modificationDate] as? Date
-    }
-
-    private func matchesCachedGitIndexState(_ path: String) -> Bool {
-        let indexPath = path.hasSuffix("/index.lock")
-            ? String(path.dropLast(".lock".count))
-            : path
-        guard let cached = cachedGitIndexFingerprints[indexPath],
-              cached.matchesCurrentFile else {
-            return false
-        }
-        if path.hasSuffix("/index.lock") {
-            return !FileManager.default.fileExists(atPath: path)
-        }
-        return path == indexPath
     }
 
     private func projectIDsForWorktreeMembershipEvent(
@@ -369,35 +297,6 @@ struct RepositoryWatchIndex: Sendable {
     }
 }
 
-private struct RepositoryGitIndexFingerprint: Equatable, Sendable {
-    let path: String
-    let modificationDate: Date
-    let fileSize: UInt64
-    let fileNumber: UInt64
-
-    init?(url: URL) {
-        let standardizedURL = url.standardizedFileURL
-        guard let attributes = try? FileManager.default.attributesOfItem(
-            atPath: standardizedURL.path
-        ), let modificationDate = attributes[.modificationDate] as? Date,
-              let fileSize = (attributes[.size] as? NSNumber)?.uint64Value,
-              let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
-            return nil
-        }
-        self.path = standardizedURL.path
-        self.modificationDate = modificationDate
-        self.fileSize = fileSize
-        self.fileNumber = fileNumber
-    }
-
-    var matchesCurrentFile: Bool {
-        guard let current = Self(url: URL(fileURLWithPath: path)) else {
-            return false
-        }
-        return current == self
-    }
-}
-
 private extension Sequence where Element: Hashable {
     func uniqued() -> [Element] {
         var seen: Set<Element> = []
@@ -424,6 +323,7 @@ final class RepositoryFileMonitor: @unchecked Sendable {
     ) -> Void
 
     private let queue = DispatchQueue(label: "com.sigma.agentgit.repository-events")
+    private let queueKey = DispatchSpecificKey<Bool>()
     private let handler: Handler
     private let cursor: RepositoryEventCursor
     private var stream: FSEventStreamRef?
@@ -436,13 +336,14 @@ final class RepositoryFileMonitor: @unchecked Sendable {
     ) {
         self.cursor = RepositoryEventCursor(sinceWhen: sinceWhen)
         self.handler = handler
+        queue.setSpecific(key: queueKey, value: true)
     }
 
     deinit {
         stop()
     }
 
-    func update(index: RepositoryWatchIndex) throws {
+    func update(index: RepositoryWatchIndex, acknowledgedEventID: FSEventStreamEventId) throws {
         let nextWatchedPaths = index.watchedPaths
         if stream != nil,
            nextWatchedPaths == watchedPaths,
@@ -451,6 +352,7 @@ final class RepositoryFileMonitor: @unchecked Sendable {
             return
         }
         stop()
+        cursor.restart(from: acknowledgedEventID)
         guard !nextWatchedPaths.isEmpty else {
             return
         }
@@ -501,6 +403,7 @@ final class RepositoryFileMonitor: @unchecked Sendable {
         if let stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
+            if DispatchQueue.getSpecific(key: queueKey) == nil { queue.sync {} }
             FSEventStreamRelease(stream)
             self.stream = nil
         }
@@ -526,6 +429,10 @@ private final class RepositoryEventCursor: @unchecked Sendable {
         lock.withLock {
             latestEventID = max(latestEventID, eventID)
         }
+    }
+
+    func restart(from eventID: FSEventStreamEventId) {
+        lock.withLock { latestEventID = eventID }
     }
 }
 

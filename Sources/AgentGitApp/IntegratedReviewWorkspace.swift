@@ -30,6 +30,11 @@ struct IntegratedReviewWorkspace: View {
     @State private var contextMessage = ""
     @State private var contextCommitMetadata: GitCommitMetadata?
     @State private var diffsByFileID: [IntegratedFileID: GitFileDiff] = [:]
+    @State private var verifiedPendingDiffLoadKey: IntegratedDiffLoadKey?
+    @State private var verifiedPendingFileIDs: Set<IntegratedFileID> = []
+    @State private var deferredPendingMutation: DeferredPendingMutation?
+    @State private var diffMetadata = ReviewDiffMetadataCache()
+    @State private var whitespacePresentation = ReviewWhitespacePresentationCache()
     @State private var imageDiffsByFileID: [IntegratedFileID: GitImageDiff] = [:]
     @State private var wholeFileDiffsByFileID: [IntegratedFileID: GitFileDiff] = [:]
     @State private var loadingWholeFileIDs: Set<String> = []
@@ -205,23 +210,10 @@ struct IntegratedReviewWorkspace: View {
                 diffs: cachedDiffs,
                 items: items
             )
-            if !restored.isEmpty || items.isEmpty {
-                let key = IntegratedDiffLoadKey(
-                    worktreeID: snapshot.id,
-                    activityDate: snapshot.lastActivityAt,
-                    context: .pending,
-                    options: startupContent.pendingKey.options,
-                    fileIDs: items.map(\.id)
-                )
-                let expectedIDs = Set(items.map(\.id))
-                if startupContent.pendingDiffsAreComplete,
-                   Set(restored.keys) == expectedIDs {
-                    _diffsByFileID = State(initialValue: restored)
-                    _restoredBaseDiffLoadKey = State(initialValue: key)
-                } else {
-                    _diffsByFileID = State(initialValue: [:])
-                    _isLoadingDiffs = State(initialValue: true)
-                }
+            // 上次的结果先显示出来，核对完内容后才允许暂存或丢弃。
+            if !restored.isEmpty {
+                _diffsByFileID = State(initialValue: restored)
+                _isLoadingDiffs = State(initialValue: true)
             }
         }
 
@@ -312,31 +304,7 @@ struct IntegratedReviewWorkspace: View {
             )
             review = model.reviewStates.state(for: newKey)
             navigatorSelection = review.focusedFileID.map(NavigatorSelection.file)
-            fileFocusedFromDiffID = nil
-            contextChanges = []
-            contextMessage = ""
-            contextCommitMetadata = nil
-            diffsByFileID = [:]
-            restoredBaseDiffLoadKey = nil
-            completedDiffLoadKey = nil
-            imageDiffsByFileID = [:]
-            wholeFileDiffsByFileID = [:]
-            loadingWholeFileIDs = []
-            expandedContextDiffsByFileID = [:]
-            expandedContextLineCountByFileID = [:]
-            loadingContextGapIDs = []
-            existingWorkingFileIDs = []
-            supplementalDiffFailures = [:]
-            contextDetailError = nil
-            diffError = nil
-            mutationError = nil
-            remoteOperationError = nil
-            isLoadingContextDetail = false
-            isLoadingDiffs = false
-            selectedReviewDocument = .summary
-            contextMessageExpansionOverride = nil
-            collapsedDiffGroupIDs = newKey.context == .pending ? ["staged"] : []
-            diffCommand = nil
+            resetReviewContent(for: newKey.context)
         }
         .onChange(of: reviewFileExpansionSyncKey, initial: true) { _, key in
             let changedFiles = synchronizeReviewFileExpansion(
@@ -392,6 +360,9 @@ struct IntegratedReviewWorkspace: View {
                 for: snapshot.id
             )
         }
+        .onChange(of: pendingMutationsCanRun) { _, canRun in
+            if canRun { runDeferredPendingMutation() }
+        }
         // 下面六个 task 在选中的 worktree / commit / diff 变化时补齐内容，不跟随窗口激活状态。
         // 下面两个翻页触发器只在前台启用；AppModel 的定时仓库刷新只在后台执行。
         .task(id: historyLoadKey) {
@@ -413,6 +384,10 @@ struct IntegratedReviewWorkspace: View {
         }
         .task(id: diffLoadRetryKey) {
             await loadDiffs()
+        }
+        .task(id: whitespacePreparationKey) {
+            guard model.diffOptions.ignoresWhitespace else { return }
+            try? await whitespacePresentation.prepare(whitespacePresentationRequests)
         }
         .task(id: workingFileAvailabilityKey) {
             await loadWorkingFileAvailability(for: workingFileAvailabilityKey)
@@ -1154,7 +1129,7 @@ struct IntegratedReviewWorkspace: View {
                 )
                 NavigatorFileRow(
                     item: item,
-                    diff: diffsByFileID[item.id],
+                    diff: displayedDiff(for: item),
                     isReviewed: isReviewed(item),
                     primaryActionTitle: mutationMode?.fileActionTitle,
                     canDiscard: activeContext == .pending
@@ -1268,7 +1243,7 @@ struct IntegratedReviewWorkspace: View {
                     action: mutationMode.primaryAction
                 )
             }
-            .disabled(!allowsPendingMutations)
+            .disabled(!allowsPendingMutations || !pendingDiffWasVerified(for: item))
             Divider()
         }
         let canOpen = existingWorkingFileIDs.contains(item.id.stackID)
@@ -1298,17 +1273,18 @@ struct IntegratedReviewWorkspace: View {
     // MARK: - Review
 
     private var reviewPane: some View {
-        VStack(spacing: 0) {
+        let groups = reviewDocumentStackGroups
+        return VStack(spacing: 0) {
             reviewToolbar
+            Divider()
+            reviewComparisonBar(groups: groups)
             Divider()
             if selectedReviewDocument == .summary, isContextMessageExpanded {
                 contextSummaryHeader
                 Divider()
             }
-            reviewBody
+            reviewBody(groups: groups)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            reviewComparisonBar
         }
     }
 
@@ -1343,6 +1319,15 @@ struct IntegratedReviewWorkspace: View {
 
     private var reviewToolbar: some View {
         HStack(spacing: 16) {
+            if selectedReviewDocument != .summary {
+                Button { selectedReviewDocument = .summary } label: {
+                    Label { Text("All Files").fixedSize() } icon: { Image(systemName: "chevron.left") }
+                }
+                .buttonStyle(ReviewToolbarButtonStyle())
+                .keyboardShortcut(.cancelAction)
+                .help("Show every file in this review (Esc)")
+                .accessibilityLabel("Show All Files")
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Text(reviewToolbarTitle)
                     .font(.system(size: 15, weight: .semibold))
@@ -1383,10 +1368,10 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private var reviewComparisonBar: some View {
+    private func reviewComparisonBar(groups: [DiffStackGroup]) -> some View {
         ViewThatFits(in: .horizontal) {
-            reviewComparisonControls(compact: false)
-            reviewComparisonControls(compact: true)
+            reviewComparisonControls(compact: false, groups: groups)
+            reviewComparisonControls(compact: true, groups: groups)
         }
         .buttonStyle(WorkspaceIconButtonStyle())
         .font(.system(size: 11).monospacedDigit())
@@ -1395,23 +1380,28 @@ struct IntegratedReviewWorkspace: View {
         .background(Color(nsColor: AgentGitPalette.card))
     }
 
-    private func reviewComparisonControls(compact: Bool) -> some View {
+    private func reviewComparisonControls(compact: Bool, groups: [DiffStackGroup]) -> some View {
         HStack(spacing: compact ? 6 : 9) {
-            ReviewIconView(icon: reviewedFileCount == reviewDocumentFileItems.count && reviewedFileCount > 0 ? .reviewed : .review)
+            ReviewIconView(icon: reviewedFileCount == currentFileItems.count && reviewedFileCount > 0 ? .reviewed : .review)
                 .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
-            Text("\(reviewedFileCount) / \(reviewDocumentFileItems.count) reviewed")
+            Text("\(reviewedFileCount) / \(currentFileItems.count) reviewed")
                 .lineLimit(1)
                 .help("Files reviewed in the current comparison")
             if !compact {
-                ProgressView(value: Double(reviewedFileCount), total: Double(max(1, reviewDocumentFileItems.count)))
+                ProgressView(value: Double(reviewedFileCount), total: Double(max(1, currentFileItems.count)))
                     .progressViewStyle(.linear)
                     .tint(Color(nsColor: AgentGitPalette.statusAdded))
                     .frame(width: 44)
                     .accessibilityLabel("Review progress")
             }
             Spacer(minLength: 4)
-            if isApplyingMutation || (isLoadingDiffs && !isRefreshingSnapshot) {
+            if isApplyingMutation || deferredPendingMutation != nil || (isLoadingDiffs && !isRefreshingSnapshot) {
                 ProgressView().controlSize(.small)
+            }
+            if deferredPendingMutation != nil {
+                Text("Checking file before applying action…")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             if contextMessageSubject != nil {
                 Button {
@@ -1426,16 +1416,16 @@ struct IntegratedReviewWorkspace: View {
             .buttonStyle(ReviewToolbarButtonStyle())
             .help("Collapse all file diffs in this review")
             .accessibilityLabel("Collapse All Files")
-            .disabled(!reviewDocumentStackGroups.contains { $0.files.contains(where: \.isExpanded) })
+            .disabled(!groups.contains { $0.files.contains(where: \.isExpanded) })
             Button { setEntireFileListExpanded(true) } label: {
                 ReviewIconView(icon: .expand)
             }
             .help("Expand all file diffs in this review")
             .accessibilityLabel("Expand All Files")
-            .disabled(isEntireFileListExpanded || reviewDocumentFileItems.isEmpty)
+            .disabled(isEntireFileListExpanded(in: groups) || reviewDocumentFileItems.isEmpty)
             Divider().frame(height: 12)
             Button { moveHunk(by: -1) } label: { ReviewIconView(icon: .previous) }
-                .help("Previous hunk (Shift-Tab)")
+                .help("Previous hunk (⌥↑)")
                 .accessibilityLabel("Previous hunk")
                 .disabled(visibleHunkCount == 0)
             if !compact {
@@ -1444,7 +1434,7 @@ struct IntegratedReviewWorkspace: View {
                     .lineLimit(1)
             }
             Button { moveHunk(by: 1) } label: { ReviewIconView(icon: .next) }
-                .help("Next hunk (Tab)")
+                .help("Next hunk (⌥↓)")
                 .accessibilityLabel("Next hunk")
                 .disabled(visibleHunkCount == 0)
         }
@@ -1496,7 +1486,7 @@ struct IntegratedReviewWorkspace: View {
             guard isExpanded else {
                 return total
             }
-            return total + (diffsByFileID[item.id]?.hunks.count ?? 0)
+            return total + (displayedDiff(for: item)?.hunks.count ?? 0)
         }
     }
 
@@ -1600,12 +1590,71 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var allowsPendingMutations: Bool {
+        pendingMutationsCanRun && deferredPendingMutation == nil
+    }
+
+    private var pendingMutationsCanRun: Bool {
         model.isApplicationActive
             && !isApplyingMutation
             && mutationError == nil
             && blockingGitRefreshError == nil
             && runningRemoteAction == nil
             && !isRefreshingSnapshot
+    }
+
+    private func pendingDiffIsCurrent(for item: IntegratedFileItem) -> Bool {
+        activeContext != .pending
+            || (verifiedPendingDiffLoadKey == diffLoadKey && verifiedPendingFileIDs.contains(item.id))
+    }
+
+    /// 刷新后核对内容的这一小段时间里，按钮沿用上次的核对结果，免得每次刷新都闪一下；
+    /// 真正执行时仍要求本轮已核对。
+    private func pendingDiffWasVerified(for item: IntegratedFileItem) -> Bool {
+        activeContext != .pending || verifiedPendingFileIDs.contains(item.id)
+    }
+
+    private var allPendingDiffsAreCurrent: Bool {
+        verifiedPendingDiffLoadKey == diffLoadKey
+            && currentFileItems.allSatisfy { verifiedPendingFileIDs.contains($0.id) }
+    }
+
+    private var allChangesActionHandler: ((GitAllChangesAction) -> Void)? {
+        guard currentFileItems.allSatisfy(pendingDiffWasVerified) else { return nil }
+        return { performAllChangesAction($0) }
+    }
+
+    /// 核对期间点下的操作先记下，核对完内容没变再执行，变了就放弃并提示。
+    /// 返回 true 表示已经记下，调用方直接返回。
+    private func deferUntilVerified(
+        _ items: [IntegratedFileItem],
+        run: @escaping @MainActor () -> Void
+    ) -> Bool {
+        guard activeContext == .pending, verifiedPendingDiffLoadKey != diffLoadKey,
+              items.allSatisfy(pendingDiffWasVerified) else { return false }
+        if deferredPendingMutation == nil {
+            deferredPendingMutation = DeferredPendingMutation(
+                snapshotIDs: Dictionary(
+                    items.map { ($0.id, reviewSnapshotID(for: $0)) }, uniquingKeysWith: { first, _ in first }
+                ),
+                run: run
+            )
+        }
+        return true
+    }
+
+    private func runDeferredPendingMutation() {
+        guard pendingMutationsCanRun,
+              let mutation = deferredPendingMutation, verifiedPendingDiffLoadKey == diffLoadKey else { return }
+        deferredPendingMutation = nil
+        let isUnchanged = mutation.snapshotIDs.allSatisfy { id, snapshotID in
+            guard let item = currentFileItems.first(where: { $0.id == id }) else { return false }
+            return pendingDiffIsCurrent(for: item) && reviewSnapshotID(for: item) == snapshotID
+        }
+        if isUnchanged {
+            mutation.run()
+        } else {
+            mutationError = "The file changed before the action could run. Check the new diff and try again."
+        }
     }
 
     private var isRefreshingSnapshot: Bool {
@@ -1662,7 +1711,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     @ViewBuilder
-    private var reviewBody: some View {
+    private func reviewBody(groups: [DiffStackGroup]) -> some View {
         if let diffError, diffsByFileID.isEmpty {
             ContentUnavailableView {
                 Label("Unable to Read Diff", systemImage: "exclamationmark.triangle")
@@ -1737,7 +1786,7 @@ struct IntegratedReviewWorkspace: View {
                     // 规模、进度和 commit message 都由底部比较条承担，
                     // diff 从窗口上沿就是代码。
                     summary: nil,
-                    groups: reviewDocumentStackGroups,
+                    groups: groups,
                     layout: model.diffLayout,
                     scrollTarget: reviewScrollTarget,
                     scrollKey: stateKey,
@@ -1762,7 +1811,7 @@ struct IntegratedReviewWorkspace: View {
                     onFileAction: performFileAction,
                     onSelectionAction: performSelectionAction,
                     canStashAll: !snapshot.worktree.isUnborn,
-                    onAllChangesAction: performAllChangesAction
+                    onAllChangesAction: allChangesActionHandler
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1968,8 +2017,8 @@ struct IntegratedReviewWorkspace: View {
             canDiscard: activeContext == .pending
                 && item.scope == .working
                 && item.change.kind != .unmerged,
-            isMutationEnabled: true,
-            mutationSnapshotID: reviewSnapshotID(for: item),
+            isMutationEnabled: pendingDiffWasVerified(for: item),
+            mutationSnapshotID: pendingDiffWasVerified(for: item) ? reviewSnapshotID(for: item) : nil,
             contextGaps: contextGaps(for: item),
             mutationMode: activeContext == .pending
                 ? (item.scope == .working ? .working : .staged)
@@ -2057,6 +2106,10 @@ struct IntegratedReviewWorkspace: View {
 
     private func performAllChangesAction(_ action: GitAllChangesAction) {
         guard activeContext == .pending, allowsPendingMutations else { return }
+        guard allPendingDiffsAreCurrent else {
+            _ = deferUntilVerified(currentFileItems) { performAllChangesAction(action) }
+            return
+        }
         mutationSequence &+= 1
         let request = ReviewOperationRequest(worktreeID: snapshot.id, sequence: mutationSequence)
         let worktree = snapshot.worktree
@@ -2069,7 +2122,7 @@ struct IntegratedReviewWorkspace: View {
             } catch let error as GitMutationRefreshError {
                 refreshError = error.description
             } catch {
-                operationError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                operationError = (error as? LocalizedError)?.errorDescription ?? GitErrorDescription.message(for: error)
                 refreshError = mutationRefreshFailureMessage(await model.refreshWorktree(id: worktree.id))
             }
             model.setBlockingGitRefreshError(refreshError, for: request.worktreeID)
@@ -2122,13 +2175,18 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var focusedFilePrimaryCommand: PendingFilePrimaryCommand? {
-        allowsPendingMutations ? selectedFilePrimaryCommand : nil
+        guard allowsPendingMutations, let command = selectedFilePrimaryCommand,
+              let item = currentFileItems.first(where: { $0.id.stackID == command.fileID }),
+              pendingDiffWasVerified(for: item) else { return nil }
+        return command
     }
 
     private var focusedFileDiscardCommand: PendingFilePrimaryCommand? {
         guard isFilesNavigatorFocused,
               pane == .files,
-              allowsPendingMutations else {
+              allowsPendingMutations,
+              let item = currentFileItems.first(where: { $0.id.stackID == review.focusedFileID }),
+              pendingDiffWasVerified(for: item) else {
             return nil
         }
         return pendingFileDiscardCommand(
@@ -2186,6 +2244,10 @@ struct IntegratedReviewWorkspace: View {
               let item = currentFileItems.first(where: { $0.id.stackID == fileID }) else {
             return
         }
+        guard pendingDiffIsCurrent(for: item) else {
+            _ = deferUntilVerified([item]) { executeFileAction(fileID: fileID, action: action) }
+            return
+        }
         if item.change.kind == .unmerged, action != .stage {
             return
         }
@@ -2211,7 +2273,7 @@ struct IntegratedReviewWorkspace: View {
                 operationErrorMessage = nil
                 refreshErrorMessage = error.description
             } catch {
-                let message = String(describing: error)
+                let message = GitErrorDescription.message(for: error)
                 let refreshOutcome = await model.refreshWorktree(id: snapshot.id)
                 operationErrorMessage = message
                 refreshErrorMessage = mutationRefreshFailureMessage(
@@ -2249,9 +2311,18 @@ struct IntegratedReviewWorkspace: View {
     ) {
         guard activeContext == .pending,
               allowsPendingMutations,
-              let item = currentFileItems.first(where: { $0.id.stackID == fileID }),
-              item.change.kind != .unmerged,
-              let diff = displayedDiff(for: item),
+              let item = currentFileItems.first(where: { $0.id.stackID == fileID }) else {
+            return
+        }
+        guard pendingDiffIsCurrent(for: item) else {
+            _ = deferUntilVerified([item]) {
+                executeSelectionAction(fileID: fileID, lineIDs: lineIDs, action: action)
+            }
+            return
+        }
+        guard item.change.kind != .unmerged,
+              // 显示的 diff 保留原始改动行的 id，补丁仍从完整 diff 生成，被隐藏的空白改动不会带进去。
+              let diff = diffsByFileID[item.id],
               !lineIDs.isEmpty else {
             return
         }
@@ -2278,7 +2349,7 @@ struct IntegratedReviewWorkspace: View {
                 operationErrorMessage = nil
                 refreshErrorMessage = error.description
             } catch {
-                let message = String(describing: error)
+                let message = GitErrorDescription.message(for: error)
                 let refreshOutcome = await model.refreshWorktree(id: snapshot.id)
                 operationErrorMessage = message
                 refreshErrorMessage = mutationRefreshFailureMessage(
@@ -2435,9 +2506,8 @@ struct IntegratedReviewWorkspace: View {
 
     /// 按历史顺序（新 → 旧）排列，range 的 head/base 才有确定含义。
     private var selectedCommits: [GitCommit] {
-        displayedHistoryCommits.filter {
-            selectedCommitIDSet.contains($0.id)
-        }
+        let ids = selectedCommitIDSet
+        return displayedHistoryCommits.filter { ids.contains($0.id) }
     }
 
     private var selectedCommitIDSet: Set<GitCommit.ID> {
@@ -2654,32 +2724,74 @@ struct IntegratedReviewWorkspace: View {
         return reviewed == current
     }
 
+    /// 暂存、丢弃和审阅标记只认已核对过内容的 diff；显示可以沿用屏幕上的旧结果。
+    private func currentReviewSnapshotID(for item: IntegratedFileItem) -> DiffReviewSnapshotID? {
+        pendingDiffIsCurrent(for: item) ? reviewSnapshotID(for: item) : nil
+    }
+
     private func reviewSnapshotID(for item: IntegratedFileItem) -> DiffReviewSnapshotID? {
         guard let diff = diffsByFileID[item.id] else {
             return nil
         }
         let externalSeed: String?
         if activeContext == .pending, diff.state != .textual {
-            externalSeed = String(snapshot.lastActivityAt.timeIntervalSinceReferenceDate.bitPattern)
+            externalSeed = snapshot.pendingDiffRevision
+                ?? String(snapshot.lastActivityAt.timeIntervalSinceReferenceDate.bitPattern)
         } else {
             externalSeed = nil
         }
-        return DiffReviewSnapshotID(diff: diff, externalSeed: externalSeed)
+        return diffMetadata.snapshotID(for: diff, externalSeed: externalSeed)
     }
 
     private func displayedDiff(for item: IntegratedFileItem) -> GitFileDiff? {
-        return diffsByFileID[item.id]
+        presentedDiff(diffsByFileID[item.id], context: compactDiffOptions.context)
+    }
+
+    /// 忽略空白只影响显示：从已有的完整 diff 重切 hunk，不再为它单独跑 Git。
+    private func presentedDiff(_ diff: GitFileDiff?, context: GitDiffContext) -> GitFileDiff? {
+        guard let diff, model.diffOptions.ignoresWhitespace else { return diff }
+        return whitespacePresentation.presented(diff, context: context)
+    }
+
+    private var whitespacePresentationRequests: [ReviewWhitespacePresentationCache.Request] {
+        var requests = diffsByFileID.values.map {
+            ReviewWhitespacePresentationCache.Request(diff: $0, context: compactDiffOptions.context)
+        }
+        requests += wholeFileDiffsByFileID.values.map {
+            ReviewWhitespacePresentationCache.Request(diff: $0, context: .wholeFile)
+        }
+        requests += expandedContextDiffsByFileID.map { id, diff in
+            let context = baseContextLineCount.map {
+                GitDiffContext.lines($0 + (expandedContextLineCountByFileID[id] ?? 0))
+            } ?? compactDiffOptions.context
+            return ReviewWhitespacePresentationCache.Request(diff: diff, context: context)
+        }
+        return requests
+    }
+
+    private var whitespacePreparationKey: Set<ReviewWhitespacePresentationCache.Stamp> {
+        model.diffOptions.ignoresWhitespace ? Set(whitespacePresentationRequests.map(\.stamp)) : []
+    }
+
+    private func contextSourceDiff(for item: IntegratedFileItem) -> GitFileDiff? {
+        if let wholeFileDiff = wholeFileDiffsByFileID[item.id] {
+            return presentedDiff(wholeFileDiff, context: .wholeFile)
+        }
+        guard let expandedDiff = expandedContextDiffsByFileID[item.id] else { return nil }
+        let context = baseContextLineCount.map {
+            GitDiffContext.lines($0 + (expandedContextLineCountByFileID[item.id] ?? 0))
+        } ?? compactDiffOptions.context
+        return presentedDiff(expandedDiff, context: context)
     }
 
     private func contextGaps(for item: IntegratedFileItem) -> [DiffStackContextGap] {
-        guard let compactDiff = diffsByFileID[item.id] else {
+        guard let compactDiff = displayedDiff(for: item) else {
             return []
         }
-        return DiffContextGapBuilder.gaps(
+        return diffMetadata.contextGaps(
             fileID: item.id.stackID,
             compactDiff: compactDiff,
-            contextSourceDiff: wholeFileDiffsByFileID[item.id]
-                ?? expandedContextDiffsByFileID[item.id],
+            contextSourceDiff: contextSourceDiff(for: item),
             revealedLineCountByGapID: review.revealedContextLineCountByGapID,
             revealsWholeFile: showsWholeFile(item)
         )
@@ -2707,18 +2819,19 @@ struct IntegratedReviewWorkspace: View {
 
     private var totalAddedLineCount: Int {
         reviewDocumentFileItems.reduce(0) {
-            $0 + (diffsByFileID[$1.id]?.addedLineCount ?? 0)
+            $0 + (displayedDiff(for: $1)?.addedLineCount ?? 0)
         }
     }
 
     private var totalDeletedLineCount: Int {
         reviewDocumentFileItems.reduce(0) {
-            $0 + (diffsByFileID[$1.id]?.deletedLineCount ?? 0)
+            $0 + (displayedDiff(for: $1)?.deletedLineCount ?? 0)
         }
     }
 
+    /// 只看一个文件或带筛选词时，进度仍按整个 Review 计算。
     private var reviewedFileCount: Int {
-        reviewDocumentFileItems.count(where: isReviewed)
+        currentFileItems.count(where: isReviewed)
     }
 
     private func messageSubject(fallback: String) -> String {
@@ -2746,8 +2859,11 @@ struct IntegratedReviewWorkspace: View {
             worktreeID: snapshot.id,
             activityDate: snapshot.lastActivityAt,
             context: activeContext,
-            options: model.diffOptions,
-            fileIDs: currentFileItems.map(\.id)
+            options: loadedDiffOptions,
+            fileIDs: currentFileItems.map(\.id),
+            pendingRefreshDate: activeContext == .pending && snapshot.pendingDiffRevision == nil
+                ? snapshot.refreshedAt : nil,
+            pendingRevision: activeContext == .pending ? snapshot.pendingDiffRevision : nil
         )
     }
 
@@ -2767,12 +2883,15 @@ struct IntegratedReviewWorkspace: View {
             currentWorktreeID: currentSnapshot.id,
             currentActivityDate: currentSnapshot.lastActivityAt,
             currentContext: activeContext,
-            currentOptions: model.diffOptions,
+            currentOptions: loadedDiffOptions,
             currentFileIDs: currentFileIDs(
                 snapshot: currentSnapshot,
                 context: key.context
             ),
-            requested: key
+            requested: key,
+            currentPendingRefreshDate: key.context == .pending && currentSnapshot.pendingDiffRevision == nil
+                ? currentSnapshot.refreshedAt : nil,
+            currentPendingRevision: key.context == .pending ? currentSnapshot.pendingDiffRevision : nil
         )
     }
 
@@ -3002,6 +3121,43 @@ struct IntegratedReviewWorkspace: View {
         })
     }
 
+    private func resetReviewContent(for context: ReviewContext) {
+        contextChanges = []
+        contextMessage = ""
+        contextCommitMetadata = nil
+        completedContextDetailKey = nil
+        completedWorkingFileAvailabilityKey = nil
+        contextDetailLoadSequence &+= 1
+        diffLoadSequence &+= 1
+        diffsByFileID = [:]
+        verifiedPendingDiffLoadKey = nil
+        verifiedPendingFileIDs = []
+        deferredPendingMutation = nil
+        restoredBaseDiffLoadKey = nil
+        completedDiffLoadKey = nil
+        diffMetadata.removeAll()
+        whitespacePresentation.removeAll()
+        imageDiffsByFileID = [:]
+        wholeFileDiffsByFileID = [:]
+        loadingWholeFileIDs = []
+        expandedContextDiffsByFileID = [:]
+        expandedContextLineCountByFileID = [:]
+        loadingContextGapIDs = []
+        existingWorkingFileIDs = []
+        supplementalDiffFailures = [:]
+        contextDetailError = nil
+        diffError = nil
+        mutationError = nil
+        remoteOperationError = nil
+        isLoadingContextDetail = false
+        isLoadingDiffs = false
+        selectedReviewDocument = .summary
+        contextMessageExpansionOverride = nil
+        collapsedDiffGroupIDs = context == .pending ? ["staged"] : []
+        fileFocusedFromDiffID = nil
+        diffCommand = nil
+    }
+
     private func resetWorkspace() {
         remoteOperationSequence &+= 1
         remoteOperationTask?.cancel()
@@ -3033,6 +3189,7 @@ struct IntegratedReviewWorkspace: View {
         hunkHistoryCommits = []
         hunkHistoryError = nil
         isLoadingHunkHistory = false
+        completedHunkHistoryFilter = nil
         loadedHistorySearchKey = nil
         completedHistorySearchKey = nil
         historySearchNextOffset = 0
@@ -3040,36 +3197,17 @@ struct IntegratedReviewWorkspace: View {
         historySearchError = nil
         historySearchPaginationError = nil
         historySearchPageCache.removeAll()
-        contextChanges = []
-        contextMessage = ""
-        contextCommitMetadata = nil
-        diffsByFileID = [:]
-        restoredBaseDiffLoadKey = nil
-        completedDiffLoadKey = nil
-        imageDiffsByFileID = [:]
-        wholeFileDiffsByFileID = [:]
-        loadingWholeFileIDs = []
-        expandedContextDiffsByFileID = [:]
-        expandedContextLineCountByFileID = [:]
-        loadingContextGapIDs = []
-        existingWorkingFileIDs = []
-        supplementalDiffFailures = [:]
+        resetReviewContent(for: initialContext)
         review = model.reviewStates.state(
             for: ReviewStateKey(
                 worktreeID: snapshot.id,
-                context: .pending
+                context: initialContext
             )
         )
         navigatorSelection = review.focusedFileID.map(NavigatorSelection.file)
-        contextDetailError = nil
-        diffError = nil
-        mutationError = nil
-        remoteOperationError = nil
         runningRemoteAction = nil
         remoteOperationFeedback = nil
         isCancellingRemoteOperation = false
-        isLoadingContextDetail = false
-        isLoadingDiffs = false
         isLoadingMoreHistory = false
         isSearchingHistory = false
         isLoadingMoreHistorySearchResults = false
@@ -3077,8 +3215,6 @@ struct IntegratedReviewWorkspace: View {
         isApplyingMutation = false
         navigationHistory.removeAll()
         suppressedHistoryFilterValue = nil
-        fileFocusedFromDiffID = nil
-        diffCommand = nil
     }
 
     private func toggleFile(_ stackID: String) {
@@ -3105,8 +3241,7 @@ struct IntegratedReviewWorkspace: View {
         model.reviewStates.save(review, for: stateKey)
     }
 
-    private var isEntireFileListExpanded: Bool {
-        let groups = reviewDocumentStackGroups
+    private func isEntireFileListExpanded(in groups: [DiffStackGroup]) -> Bool {
         guard !groups.isEmpty else {
             return false
         }
@@ -3132,8 +3267,9 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func toggleReviewed(_ stackID: String) {
-        guard let item = currentFileItems.first(where: { $0.id.stackID == stackID }),
-              let snapshotID = reviewSnapshotID(for: item) else {
+        guard let item = currentFileItems.first(where: { $0.id.stackID == stackID }) else { return }
+        guard let snapshotID = currentReviewSnapshotID(for: item) else {
+            _ = deferUntilVerified([item]) { toggleReviewed(stackID) }
             return
         }
         if review.reviewedSnapshotByFileID[stackID] == snapshotID {
@@ -3274,8 +3410,15 @@ struct IntegratedReviewWorkspace: View {
         return count
     }
 
-    private var compactDiffOptions: GitDiffOptions {
+    /// 加载和缓存都用不忽略空白的完整 diff，切换忽略空白不用重新读取。
+    private var loadedDiffOptions: GitDiffOptions {
         var options = model.diffOptions
+        options.ignoresWhitespace = false
+        return options
+    }
+
+    private var compactDiffOptions: GitDiffOptions {
+        var options = loadedDiffOptions
         if options.context == .wholeFile {
             options.context = .lines(3)
         }
@@ -3413,7 +3556,7 @@ struct IntegratedReviewWorkspace: View {
             guard hunkHistoryFilter == filter else {
                 return
             }
-            hunkHistoryError = String(describing: error)
+            hunkHistoryError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -3500,7 +3643,7 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             completedHistoryKey = nil
-            historyError = String(describing: error)
+            historyError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -3569,7 +3712,7 @@ struct IntegratedReviewWorkspace: View {
             guard loadedHistoryKey == key else {
                 return
             }
-            historyPaginationError = String(describing: error)
+            historyPaginationError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -3668,7 +3811,7 @@ struct IntegratedReviewWorkspace: View {
                     return
                 } catch {
                     let message = "Unable to validate the saved History position: "
-                        + String(describing: error)
+                        + GitErrorDescription.message(for: error)
                     if GitHistorySearchQuery(requested.historyFilter) == nil {
                         historyPaginationError = message
                     } else {
@@ -3803,7 +3946,7 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             completedHistorySearchKey = nil
-            historySearchError = String(describing: error)
+            historySearchError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -3863,7 +4006,7 @@ struct IntegratedReviewWorkspace: View {
             guard loadedHistorySearchKey == key else {
                 return
             }
-            historySearchPaginationError = String(describing: error)
+            historySearchPaginationError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -4020,7 +4163,7 @@ struct IntegratedReviewWorkspace: View {
             }
             contextChanges = []
             contextCommitMetadata = nil
-            contextDetailError = String(describing: error)
+            contextDetailError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -4086,7 +4229,7 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             contextChanges = []
-            contextDetailError = String(describing: error)
+            contextDetailError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -4094,25 +4237,40 @@ struct IntegratedReviewWorkspace: View {
     private func loadDiffs() async {
         let requestedContext = activeContext
         let items = currentFileItems
+        let batchIndex = IntegratedDiffBatchIndex(items: items)
+        let nonTextSeed = requestedContext == .pending
+            ? (snapshot.pendingDiffRevision ?? String(snapshot.lastActivityAt.timeIntervalSinceReferenceDate.bitPattern)) : nil
         let requestedLoadKey = diffLoadKey
         guard completedDiffLoadKey != requestedLoadKey else {
             return
         }
         diffLoadSequence &+= 1
         let loadSequence = diffLoadSequence
-        let restoredBase = restoredBaseDiffLoadKey == requestedLoadKey
+        let restoredBase = requestedContext != .pending && restoredBaseDiffLoadKey == requestedLoadKey
             ? diffsByFileID
             : nil
         imageDiffsByFileID = [:]
-        wholeFileDiffsByFileID = [:]
+        if requestedContext != .pending { wholeFileDiffsByFileID = [:] }
         loadingWholeFileIDs = []
-        expandedContextDiffsByFileID = [:]
-        expandedContextLineCountByFileID = [:]
+        if requestedContext != .pending {
+            expandedContextDiffsByFileID = [:]
+            expandedContextLineCountByFileID = [:]
+        }
         loadingContextGapIDs = []
         supplementalDiffFailures = [:]
         guard !items.isEmpty else {
             diffsByFileID = [:]
+            verifiedPendingDiffLoadKey = requestedContext == .pending ? requestedLoadKey : nil
+            verifiedPendingFileIDs = []
+            if deferredPendingMutation != nil {
+                deferredPendingMutation = nil
+                mutationError = "The file changed before the action could run. Check the new diff and try again."
+            }
+            diffMetadata.removeAll()
             imageDiffsByFileID = [:]
+            wholeFileDiffsByFileID = [:]
+            expandedContextDiffsByFileID = [:]
+            expandedContextLineCountByFileID = [:]
             if activeContext == .pending {
                 invalidateReviewedState(using: [])
             }
@@ -4121,7 +4279,9 @@ struct IntegratedReviewWorkspace: View {
             return
         }
 
+        // 待提交的文件都已有上一份 diff 时先不显示加载中，核对后确实缺 diff 再显示。
         isLoadingDiffs = restoredBase == nil
+            && (requestedContext != .pending || items.contains { diffsByFileID[$0.id] == nil })
         defer {
             if acceptsDiffLoad(requestedLoadKey),
                diffLoadSequence == loadSequence {
@@ -4151,6 +4311,30 @@ struct IntegratedReviewWorkspace: View {
                     guard acceptsDiffLoad(requestedLoadKey) else {
                         return
                     }
+                    let identities = cachedEntry?.sourceIdentities ?? []
+                    func isCurrent(_ diff: GitFileDiff) -> Bool {
+                        guard let identity = diff.sourceIdentity else { return false }
+                        return identities.contains { identity.matchesContent(of: $0) }
+                    }
+                    wholeFileDiffsByFileID = wholeFileDiffsByFileID.filter { isCurrent($0.value) }
+                    expandedContextDiffsByFileID = expandedContextDiffsByFileID.filter { entry in
+                        guard isCurrent(entry.value),
+                              case let .lines(baseCount) = compactDiffOptions.context,
+                              let revealed = expandedContextLineCountByFileID[entry.key] else { return false }
+                        return entry.value.sourceIdentity?.context == .lines(baseCount + revealed)
+                    }
+                    expandedContextLineCountByFileID = expandedContextLineCountByFileID.filter {
+                        expandedContextDiffsByFileID[$0.key] != nil
+                    }
+                    try await diffMetadata.prepare(Array(incremental.values), nonTextSeed: nonTextSeed)
+                    try Task.checkCancellation()
+                    guard acceptsDiffLoad(requestedLoadKey) else { return }
+                    // 内容变了的文件先留着上一份 diff，新结果到了再按文件替换；替换前不能暂存或丢弃。
+                    diffsByFileID = diffsByFileID.filter { expectedIDs.contains($0.key) }
+                        .merging(incremental) { _, new in new }
+                    verifiedPendingDiffLoadKey = requestedLoadKey
+                    verifiedPendingFileIDs = Set(incremental.keys)
+                    runDeferredPendingMutation()
                     let missingWorking = integratedItemsMissingDiff(
                         working,
                         cached: incremental
@@ -4160,24 +4344,25 @@ struct IntegratedReviewWorkspace: View {
                         cached: incremental
                     )
                     if !missingWorking.isEmpty || !missingStaged.isEmpty {
+                        isLoadingDiffs = true
                         for try await batch in model.loadPendingDiffBatches(
                             worktree: snapshot.worktree,
                             workingChanges: missingWorking.map(\.change),
                             stagedChanges: missingStaged.map(\.change),
-                            options: compactDiffOptions
+                            options: compactDiffOptions,
+                            sourceIdentities: cachedEntry?.sourceIdentities ?? []
                         ) {
+                            try await diffMetadata.prepare(batch.diffs, nonTextSeed: nonTextSeed)
                             try Task.checkCancellation()
                             guard acceptsDiffLoad(requestedLoadKey) else {
                                 return
                             }
-                            let matchingItems = batch.scope == .working
-                                ? missingWorking
-                                : missingStaged
-                            merge(
-                                diffs: batch.diffs,
-                                into: &incremental,
-                                items: matchingItems
-                            )
+                            let mergedIDs = batchIndex.merge(batch.diffs, into: &incremental)
+                            var updated = diffsByFileID
+                            for id in mergedIDs { updated[id] = incremental[id] }
+                            diffsByFileID = updated
+                            verifiedPendingFileIDs.formUnion(mergedIDs)
+                            await model.cachePendingDiffBatch(batch.diffs, snapshot: snapshot, options: compactDiffOptions)
                         }
                         await model.cachePendingDiffs(
                             sortedIntegratedDiffs(incremental),
@@ -4235,7 +4420,7 @@ struct IntegratedReviewWorkspace: View {
                         guard acceptsDiffLoad(requestedLoadKey) else {
                             return
                         }
-                        merge(diffs: batch, into: &incremental, items: missingItems)
+                        batchIndex.merge(batch, into: &incremental)
                     }
                     await model.cacheHistoricalDiffs(
                         sortedIntegratedDiffs(incremental),
@@ -4290,7 +4475,7 @@ struct IntegratedReviewWorkspace: View {
                         guard acceptsDiffLoad(requestedLoadKey) else {
                             return
                         }
-                        merge(diffs: batch, into: &incremental, items: missingItems)
+                        batchIndex.merge(batch, into: &incremental)
                     }
                     await model.cacheHistoricalDiffs(
                         sortedIntegratedDiffs(incremental),
@@ -4316,7 +4501,17 @@ struct IntegratedReviewWorkspace: View {
             guard acceptsDiffLoad(requestedLoadKey) else {
                 return
             }
+            try await diffMetadata.prepare(Array(loaded.values), nonTextSeed: nonTextSeed)
+            try Task.checkCancellation()
+            guard acceptsDiffLoad(requestedLoadKey) else { return }
             diffsByFileID = loaded
+            if requestedContext == .pending {
+                verifiedPendingDiffLoadKey = requestedLoadKey
+                verifiedPendingFileIDs = Set(loaded.keys)
+                runDeferredPendingMutation()
+            }
+            diffMetadata.retain(Array(loaded.values))
+            diffMetadata.retainContexts(Set(items.map { $0.id.stackID }))
             invalidateReviewedState(using: items)
             let loadedImageDiffs = try await loadImageDiffs(
                 for: items,
@@ -4332,8 +4527,9 @@ struct IntegratedReviewWorkspace: View {
             let wholeFileItems = items.filter { item in
                 showsWholeFile(item) && canLoadWholeFileContext(item)
             }
-            loadingWholeFileIDs = Set(wholeFileItems.map { $0.id.stackID })
-            for item in wholeFileItems {
+            let missingWholeFileItems = wholeFileItems.filter { wholeFileDiffsByFileID[$0.id] == nil }
+            loadingWholeFileIDs = Set(missingWholeFileItems.map { $0.id.stackID })
+            for item in missingWholeFileItems {
                 do {
                     let diff = try await loadWholeFileDiff(
                         for: item,
@@ -4363,7 +4559,9 @@ struct IntegratedReviewWorkspace: View {
             }
             if let baseContextLineCount {
                 for item in items where !showsWholeFile(item) {
-                    guard let compactDiff = loaded[item.id] else {
+                    guard let compactDiff = presentedDiff(
+                        loaded[item.id], context: compactDiffOptions.context
+                    ) else {
                         continue
                     }
                     let requestedLineCount = DiffContextGapBuilder.gaps(
@@ -4377,6 +4575,8 @@ struct IntegratedReviewWorkspace: View {
                     guard requestedLineCount > 0 else {
                         continue
                     }
+                    if (expandedContextLineCountByFileID[item.id] ?? 0) >= requestedLineCount,
+                       expandedContextDiffsByFileID[item.id] != nil { continue }
                     var options = compactDiffOptions
                     options.context = .lines(baseContextLineCount + requestedLineCount)
                     do {
@@ -4422,9 +4622,11 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             diffsByFileID = [:]
+            verifiedPendingFileIDs = []
+            deferredPendingMutation = nil
             loadingWholeFileIDs = []
             loadingContextGapIDs = []
-            diffError = String(describing: error)
+            diffError = GitErrorDescription.message(for: error)
         }
     }
 
@@ -4439,7 +4641,7 @@ struct IntegratedReviewWorkspace: View {
             existingWorkingFileIDs = Set(items.compactMap { item in
                 guard workingFileURL(for: item) != nil,
                       item.change.submoduleStatus == nil,
-                      item.statusLabel != "D" else {
+                      item.gitStatus != "D" else {
                     return nil
                 }
                 return item.id.stackID
@@ -4472,7 +4674,7 @@ struct IntegratedReviewWorkspace: View {
     private func invalidateReviewedState(using items: [IntegratedFileItem]) {
         let currentByFileID = Dictionary(
             items.compactMap { item in
-                reviewSnapshotID(for: item).map { (item.id.stackID, $0) }
+                currentReviewSnapshotID(for: item).map { (item.id.stackID, $0) }
             },
             uniquingKeysWith: { first, _ in first }
         )
@@ -4680,7 +4882,7 @@ struct IntegratedReviewWorkspace: View {
     ) {
         supplementalDiffFailures[item.id] = SupplementalDiffFailure(
             operation: operation,
-            message: String(describing: error)
+            message: GitErrorDescription.message(for: error)
         )
     }
 
@@ -4688,7 +4890,7 @@ struct IntegratedReviewWorkspace: View {
         for item: IntegratedFileItem,
         context: ReviewContext
     ) async throws -> GitFileDiff {
-        var options = model.diffOptions
+        var options = loadedDiffOptions
         options.context = .wholeFile
         return try await loadFileDiff(for: item, context: context, options: options)
     }
@@ -4700,27 +4902,12 @@ struct IntegratedReviewWorkspace: View {
     ) async throws -> GitFileDiff {
         switch context {
         case .pending:
-            if let cached = await model.cachedPendingDiff(
+            return try await model.loadCachedPendingDiff(
                 snapshot: snapshot,
-                changeID: item.change.id,
-                scope: item.scope,
-                options: options
-            ) {
-                return cached
-            }
-            let diff = try await model.loadDiff(
-                worktree: snapshot.worktree,
                 change: item.change,
                 scope: item.scope,
                 options: options
             )
-            try Task.checkCancellation()
-            await model.cachePendingDiff(
-                diff,
-                snapshot: snapshot,
-                options: options
-            )
-            return diff
         case let .commit(commitID):
             guard let commit = commit(withID: commitID) else {
                 throw IntegratedReviewLoadError.commitUnavailable
@@ -5250,7 +5437,7 @@ func gitRemoteOperationFailureMessage(
        !errorDescription.isEmpty {
         detail = errorDescription
     } else {
-        detail = String(describing: error)
+        detail = GitErrorDescription.message(for: error)
     }
     let normalized = detail.trimmingCharacters(in: .whitespacesAndNewlines)
     return normalized.isEmpty
@@ -5419,21 +5606,34 @@ struct IntegratedFileItem: Identifiable, Hashable {
     let change: GitFileChange
     let scope: GitDiffScope
 
+    /// Git 给出的这一侧状态字母，判断文件是否还在时用它。
+    var gitStatus: Character {
+        scope == .staged ? change.indexStatus : change.worktreeStatus
+    }
+
+    /// 冲突的状态字母有 U、A、D 多种，统一显示成 !，避免和新增、删除、未跟踪混在一起。
     var statusLabel: String {
+        if change.kind == .unmerged {
+            return "!"
+        }
         if change.isUntracked {
             return "U"
         }
-        return String(scope == .staged ? change.indexStatus : change.worktreeStatus)
+        return String(gitStatus)
     }
 
     var stackStatus: DiffStackStatus {
-        switch statusLabel {
-        case "?": .untracked
-        case "A": .added
-        case "D": .deleted
-        case "R", "C": .renamed
-        case "U": change.isUntracked ? .untracked : .conflicted
-        default: .modified
+        if change.kind == .unmerged {
+            return .conflicted
+        }
+        if change.isUntracked {
+            return .untracked
+        }
+        switch gitStatus {
+        case "A": return .added
+        case "D": return .deleted
+        case "R", "C": return .renamed
+        default: return .modified
         }
     }
 }
@@ -5541,7 +5741,6 @@ final class NavigatorTreeCache {
     }
 
     private var entriesByNamespace: [String: Entry] = [:]
-    private(set) var buildCount = 0
 
     func nodes(
         items: [IntegratedFileItem],
@@ -5559,7 +5758,6 @@ final class NavigatorTreeCache {
             items: items,
             nodes: nodes
         )
-        buildCount += 1
         return nodes
     }
 }
@@ -5884,27 +6082,43 @@ func mergeIntegratedDiffBatch(
     into result: inout [IntegratedFileID: GitFileDiff],
     items: [IntegratedFileItem]
 ) {
-    let diffsByChangeID = Dictionary(
-        diffs.map { ($0.change.id, $0) },
-        uniquingKeysWith: { first, _ in first }
-    )
-    for item in items {
-        if let diff = diffsByChangeID[item.change.id] {
-            result[item.id] = diff
-        }
-    }
+    IntegratedDiffBatchIndex(items: items).merge(diffs, into: &result)
 }
 
-func completeIntegratedDiffCache(
-    diffs: [GitFileDiff],
-    items: [IntegratedFileItem]
-) -> [IntegratedFileID: GitFileDiff]? {
-    let result = integratedDiffCache(diffs: diffs, items: items)
-    let expectedIDs = Set(items.map(\.id))
-    guard Set(result.keys) == expectedIDs else {
-        return nil
+struct DeferredPendingMutation {
+    let snapshotIDs: [IntegratedFileID: DiffReviewSnapshotID?]
+    let run: @MainActor () -> Void
+}
+
+struct IntegratedDiffBatchIndex {
+    private struct Key: Hashable {
+        let changeID: GitFileChange.ID
+        let scope: GitDiffScope
     }
-    return result
+
+    private let itemIDs: [Key: [IntegratedFileID]]
+
+    init(items: [IntegratedFileItem]) {
+        itemIDs = Dictionary(grouping: items, by: { Key(changeID: $0.change.id, scope: $0.scope) })
+            .mapValues { $0.map(\.id) }
+    }
+
+    @discardableResult
+    func merge(
+        _ diffs: [GitFileDiff], into result: inout [IntegratedFileID: GitFileDiff]
+    ) -> [IntegratedFileID] {
+        var seen = Set<Key>()
+        var merged: [IntegratedFileID] = []
+        for diff in diffs {
+            let key = Key(changeID: diff.change.id, scope: diff.scope)
+            guard seen.insert(key).inserted else { continue }
+            for id in itemIDs[key] ?? [] {
+                result[id] = diff
+                merged.append(id)
+            }
+        }
+        return merged
+    }
 }
 
 func integratedDiffCache(
@@ -5953,6 +6167,8 @@ struct IntegratedDiffLoadKey: Hashable {
     let context: ReviewContext
     let options: GitDiffOptions
     let fileIDs: [IntegratedFileID]
+    var pendingRefreshDate: Date? = nil
+    var pendingRevision: String? = nil
 }
 
 func reviewDiffsAreReady(
@@ -5969,13 +6185,17 @@ func acceptsIntegratedDiffLoad(
     currentContext: ReviewContext,
     currentOptions: GitDiffOptions,
     currentFileIDs: [IntegratedFileID],
-    requested: IntegratedDiffLoadKey
+    requested: IntegratedDiffLoadKey,
+    currentPendingRefreshDate: Date? = nil,
+    currentPendingRevision: String? = nil
 ) -> Bool {
     currentWorktreeID == requested.worktreeID
         && currentActivityDate == requested.activityDate
         && currentContext == requested.context
         && currentOptions == requested.options
         && currentFileIDs == requested.fileIDs
+        && currentPendingRefreshDate == requested.pendingRefreshDate
+        && currentPendingRevision == requested.pendingRevision
 }
 
 struct WorkingFileAvailabilityKey: Hashable {
@@ -6561,14 +6781,6 @@ func runIndependentWorktreeRefresh(
         await operation()
     }
     return await refreshTask.value
-}
-
-func acceptedNavigatorFileSelection(
-    current: String?,
-    requested: String?,
-    hasVisibleFiles: Bool
-) -> String? {
-    requested ?? (hasVisibleFiles ? current : nil)
 }
 
 func reviewStateRequestMatches(

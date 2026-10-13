@@ -158,9 +158,9 @@ struct ContentView: View {
             }
             .background(Color(nsColor: AgentGitPalette.sidebarBackground))
             .navigationSplitViewColumnWidth(
-                min: 240,
-                ideal: SidebarLayoutMetrics.navigationContentWidth,
-                max: 360
+                min: 240 * fontSettings.scale,
+                ideal: SidebarLayoutMetrics.navigationContentWidth * fontSettings.scale,
+                max: 360 * fontSettings.scale
             )
             .tint(Color(nsColor: AgentGitPalette.sidebarSelectionBorder))
         } detail: {
@@ -267,8 +267,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // AppKit 的 split view 不认 SwiftUI 的 safe area inset，底栏必须是它的兄弟节点，
-            // 否则 diff 会盖到路径栏上。
+            // 路径和错误提示栏与 split view 并列，避免被 diff 覆盖。
             VStack(spacing: 0) {
                 if model.projectAdditionError != nil
                     || model.agentAssociations.errorMessage != nil
@@ -379,8 +378,7 @@ struct ContentView: View {
         }
     }
 
-    /// 完整路径从标题栏挪到窗口底部：标题只回答「在哪个 worktree」，
-    /// 路径是随时可查、偶尔要用的信息。
+    /// 显示当前 worktree 路径、数量和 Git 状态。
     private func worktreePathBar(_ url: URL) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "folder")
@@ -739,7 +737,8 @@ struct AgentGitSidebarBrandView: View {
 
             Spacer(minLength: 6)
 
-            if pendingWorktreeCount > 0 {
+            // 筛选开着时计数归零也要留着按钮，否则没有地方关掉筛选。
+            if pendingWorktreeCount > 0 || showsOnlyPendingWorktrees?.wrappedValue == true {
                 pendingCountLabel
             }
 

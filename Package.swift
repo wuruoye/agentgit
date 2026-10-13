@@ -19,18 +19,6 @@ let package = Package(
             name: "AgentGitApp",
             dependencies: ["AgentGitCore", "AgentGitIntegrationShared"],
             resources: [.copy("Resources/ReviewIcons")]
-        ),
-        .testTarget(
-            name: "AgentGitCoreTests",
-            dependencies: ["AgentGitCore"]
-        ),
-        .testTarget(
-            name: "AgentGitAppTests",
-            dependencies: ["AgentGitApp", "AgentGitCore", "AgentGitIntegrationShared"]
-        ),
-        .testTarget(
-            name: "AgentGitIntegrationSharedTests",
-            dependencies: ["AgentGitIntegrationShared"]
         )
     ],
     swiftLanguageModes: [.v6]

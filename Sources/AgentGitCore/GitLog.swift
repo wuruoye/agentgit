@@ -41,6 +41,14 @@ public struct GitCommit: Identifiable, Hashable, Codable, Sendable {
     public var references: [GitReferenceDecoration] {
         GitReferenceDecoration.parse(refNames)
     }
+
+    func withReferenceNames(_ names: [String]) -> Self {
+        Self(
+            oid: oid, shortOID: shortOID, authorName: authorName, authoredAt: authoredAt,
+            parentOIDs: parentOIDs, refNames: names, subject: subject,
+            changedFileCount: changedFileCount
+        )
+    }
 }
 
 public struct GitCommitMetadata: Codable, Equatable, Sendable {
@@ -196,15 +204,39 @@ public enum GitLogParseError: Error, Equatable, Sendable {
 }
 
 public enum GitLogParser {
-    /// 与 GitRepositoryService.historyFormat 对应：7 个 \u{1f} 分隔字段，记录以 NUL 分隔。
-    public static func parse(_ data: Data) throws -> [GitCommit] {
+    /// 7 个 \u{1f} 分隔字段；raw diff 的头和路径各占一条 NUL 记录。
+    /// 保留旧 shortstat 输入的解析，行历史等没有 diff 的调用不填文件数。
+    public static func parse(_ data: Data, includesRawDiffs: Bool = false) throws -> [GitCommit] {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
 
         var commits: [GitCommit] = []
+        var remainingRawPaths = 0
         for record in data.split(separator: 0, omittingEmptySubsequences: true) {
+            if remainingRawPaths > 0 {
+                remainingRawPaths -= 1
+                continue
+            }
             guard let text = String(data: Data(record), encoding: .utf8) else {
                 throw GitLogParseError.invalidUTF8
+            }
+
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix(":") {
+                let words = trimmed.split(separator: " ")
+                guard words.count == 5, let status = words.last?.first,
+                      var previous = commits.popLast() else {
+                    throw GitLogParseError.malformedRecord(text)
+                }
+                remainingRawPaths = status == "R" || status == "C" ? 2 : 1
+                previous = GitCommit(
+                    oid: previous.oid, shortOID: previous.shortOID, authorName: previous.authorName,
+                    authoredAt: previous.authoredAt, parentOIDs: previous.parentOIDs,
+                    refNames: previous.refNames, subject: previous.subject,
+                    changedFileCount: (previous.changedFileCount ?? 0) + 1
+                )
+                commits.append(previous)
+                continue
             }
 
             let fields = text.split(
@@ -213,7 +245,6 @@ public enum GitLogParser {
                 omittingEmptySubsequences: false
             )
             if fields.count != 7 {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty {
                     continue
                 }
@@ -250,9 +281,14 @@ public enum GitLogParser {
                         .split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty },
-                    subject: String(fields[6])
+                    subject: String(fields[6]),
+                    changedFileCount: includesRawDiffs && fields[4].split(separator: " ").count <= 1
+                        ? 0 : nil
                 )
             )
+        }
+        guard remainingRawPaths == 0 else {
+            throw GitLogParseError.malformedRecord("Missing raw diff path")
         }
         return commits
     }

@@ -150,7 +150,7 @@ public enum GitFileDiffState: Hashable, Codable, Sendable {
 }
 
 public struct GitFileDiff: Hashable, Codable, Sendable {
-    public let change: GitFileChange
+    public private(set) var change: GitFileChange
     public let scope: GitDiffScope
     public let hunks: [GitDiffHunk]
     public let state: GitFileDiffState
@@ -158,6 +158,7 @@ public struct GitFileDiff: Hashable, Codable, Sendable {
     /// 存储而非每次现算：文件头每次重绘都要读，现算等于把全文再走一遍。
     public let addedLineCount: Int
     public let deletedLineCount: Int
+    public var sourceIdentity: GitPendingDiffIdentity?
 
     public init(
         change: GitFileChange,
@@ -173,6 +174,7 @@ public struct GitFileDiff: Hashable, Codable, Sendable {
         self.state = state
         self.addedLineCount = addedLineCount
         self.deletedLineCount = deletedLineCount
+        sourceIdentity = nil
         renderID = gitDiffRenderID(
             hunks: hunks,
             state: state,
@@ -199,6 +201,18 @@ public struct GitFileDiff: Hashable, Codable, Sendable {
                 count + hunk.lines.count(where: { $0.kind == .deletion })
             }
         )
+    }
+
+    public func withSourceIdentity(_ identity: GitPendingDiffIdentity?) -> GitFileDiff {
+        var diff = self
+        diff.sourceIdentity = identity
+        return diff
+    }
+
+    public func withChange(_ change: GitFileChange) -> GitFileDiff {
+        var diff = self
+        diff.change = change
+        return diff
     }
 }
 
@@ -317,19 +331,24 @@ public enum UnifiedDiffParser {
             throw UnifiedDiffParseError.invalidUTF8
         }
 
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var changesByHeader: [String: GitFileChange] = [:]
+        for change in changes {
+            for oldPath in [change.path, change.originalPath].compactMap({ $0 }) {
+                let header = "diff --git a/\(oldPath) b/\(change.path)"
+                if changesByHeader[header] == nil { changesByHeader[header] = change }
+            }
+        }
         var currentChunk: [String] = []
+        var currentChange: GitFileChange?
+        var currentLineCount = 0
         var parsedByChangeID: [GitFileChange.ID: GitFileDiff] = [:]
 
         func finishCurrentChunk() throws {
-            guard let header = currentChunk.first,
-                  let change = changes.first(where: {
-                    header.hasSuffix(" b/\($0.path)")
-                  }) else {
+            guard let change = currentChange else {
                 currentChunk.removeAll(keepingCapacity: true)
                 return
             }
-            let outputLineCount = max(0, currentChunk.count - 1)
+            let outputLineCount = max(0, currentLineCount - 1)
             if currentChunk.last == "" {
                 currentChunk.removeLast()
             }
@@ -352,20 +371,36 @@ public enum UnifiedDiffParser {
             currentChunk.removeAll(keepingCapacity: true)
         }
 
-        for (index, line) in lines.enumerated() {
-            if index.isMultiple(of: 256) {
-                try Task.checkCancellation()
-            }
-            if line.hasPrefix("diff --git "), !currentChunk.isEmpty {
+        func consume(_ line: Substring) throws {
+            if line.hasPrefix("diff --git ") {
                 try finishCurrentChunk()
+                let header = String(line)
+                currentChange = changesByHeader[header] ?? changes.first(where: {
+                    header.hasSuffix(" b/\($0.path)")
+                })
+                currentLineCount = 0
             }
-            if !currentChunk.isEmpty || line.hasPrefix("diff --git ") {
-                currentChunk.append(line)
+            guard currentChange != nil else { return }
+            currentLineCount += 1
+            if currentLineCount <= maximumRenderedLines + 1 {
+                currentChunk.append(String(line))
+            } else if currentLineCount == maximumRenderedLines + 2 {
+                currentChunk.removeAll(keepingCapacity: false)
             }
         }
-        if !currentChunk.isEmpty {
-            try finishCurrentChunk()
+
+        let bytes = text.utf8
+        var start = bytes.startIndex
+        var lineIndex = 0
+        while start < bytes.endIndex {
+            if lineIndex.isMultiple(of: 256) { try Task.checkCancellation() }
+            let end = bytes[start...].firstIndex(of: 0x0A) ?? bytes.endIndex
+            try consume(text[start..<end])
+            start = end == bytes.endIndex ? end : bytes.index(after: end)
+            lineIndex += 1
         }
+        if bytes.last == 0x0A { try consume(text[text.endIndex...]) }
+        try finishCurrentChunk()
 
         return changes.map { change in
             parsedByChangeID[change.id] ?? GitFileDiff(

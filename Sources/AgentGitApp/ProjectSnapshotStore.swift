@@ -89,10 +89,12 @@ struct ProjectSnapshotCachePayload: Codable, Equatable, Sendable {
     }
 }
 
-enum ProjectSnapshotStoreError: Error, CustomStringConvertible, Sendable {
+enum ProjectSnapshotStoreError: LocalizedError, CustomStringConvertible, Sendable {
     case unsupportedVersion(Int)
     case duplicateProjectID(GitProject.ID)
     case duplicateWorktreeID(GitWorktree.ID)
+
+    var errorDescription: String? { description }
 
     var description: String {
         switch self {
@@ -293,7 +295,8 @@ actor ProjectSnapshotStore {
             refreshedAt: snapshot.refreshedAt,
             errorMessage: nil,
             hasUsableState: true,
-            eventWatchURLs: snapshot.eventWatchURLs
+            eventWatchURLs: snapshot.eventWatchURLs,
+            pendingDiffRevision: snapshot.pendingDiffRevision
         )
     }
 }

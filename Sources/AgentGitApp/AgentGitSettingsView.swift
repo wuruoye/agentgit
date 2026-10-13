@@ -394,7 +394,7 @@ struct AgentGitSettingsView: View {
                             .labelsHidden()
                         }
                     }
-                    Text("Cleanup uses the activity time shown in the list. Main, pinned, selected, and locked worktrees are kept, as are worktrees with uncommitted changes, untracked files, or submodules. Ignored files are removed with eligible worktrees. Branches and referenced commits are preserved.")
+                    Text("Cleanup uses the activity time shown in the list. Main, pinned, selected, and locked worktrees are kept, as are worktrees with uncommitted changes or untracked files, including changes inside submodules. Clean worktrees with submodules can be removed. Ignored files are removed with eligible worktrees. Branches and referenced commits are preserved.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -448,9 +448,30 @@ struct AgentGitSettingsView: View {
                         ForEach(report.errors, id: \.self) { error in
                             Text(error).foregroundStyle(.red).textSelection(.enabled)
                         }
+                        if let skipped = report.skippedWorktrees, !skipped.isEmpty {
+                            DisclosureGroup("Kept worktrees") {
+                                ForEach(skipped, id: \.path) { entry in
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(entry.path)
+                                        Text(entry.reason).foregroundStyle(.secondary)
+                                    }
+                                    .textSelection(.enabled)
+                                    .padding(.vertical, 3)
+                                }
+                            }
+                        }
+                        Button("Copy Cleanup Details") {
+                            copyToPasteboard(report.diagnosticText)
+                        }
                     } else {
                         Text(model.cleanupSettings.isEnabled ? "Waiting for the first check." : "Automatic cleanup is off.")
                             .foregroundStyle(.secondary)
+                    }
+                    Button("Show Logs in Finder") {
+                        Task {
+                            await AgentGitDiagnostics.shared.flush()
+                            revealInFinder(AgentGitDiagnostics.shared.directoryURL)
+                        }
                     }
                 }
                 .font(.system(size: 11.5))

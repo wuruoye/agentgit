@@ -1,5 +1,6 @@
 import AgentGitCore
 import Foundation
+import Observation
 
 /// 一次 Review 的上下文。Pending、单 commit、commit range 共用同一套状态与同一个 Review 流。
 enum ReviewContext: Hashable, Codable, Sendable {
@@ -78,18 +79,189 @@ struct DiffReviewSnapshotID: Hashable, Codable, Sendable {
             fingerprint.combine("unavailable")
             fingerprint.combine(reason)
         }
-        for line in diff.hunks.flatMap(\.lines) where line.kind != .context {
-            switch line.kind {
-            case .context: break
-            case .addition: fingerprint.combine(1)
-            case .deletion: fingerprint.combine(2)
-            case .metadata: fingerprint.combine(3)
+        for hunk in diff.hunks {
+            for line in hunk.lines where line.kind != .context {
+                switch line.kind {
+                case .context: break
+                case .addition: fingerprint.combine(1)
+                case .deletion: fingerprint.combine(2)
+                case .metadata: fingerprint.combine(3)
+                }
+                fingerprint.combine(line.oldLineNumber)
+                fingerprint.combine(line.newLineNumber)
+                fingerprint.combine(line.content)
             }
-            fingerprint.combine(line.oldLineNumber)
-            fingerprint.combine(line.newLineNumber)
-            fingerprint.combine(line.content)
         }
         rawValue = fingerprint.value
+    }
+}
+
+/// 只保留当前文件的内容版本和标记，界面重复绘制时不再遍历全部改动行。
+@MainActor
+final class ReviewDiffMetadataCache {
+    private struct Key: Hashable, Sendable {
+        let changeID: GitFileChange.ID
+        let scope: GitDiffScope
+    }
+
+    private struct Entry: Sendable {
+        let renderID: UInt64
+        let change: GitFileChange
+        let externalSeed: String?
+        let snapshotID: DiffReviewSnapshotID
+    }
+
+    private struct ContextStamp: Equatable {
+        let compactRenderID: UInt64
+        let sourceRenderID: UInt64?
+        let revealsWholeFile: Bool
+        let revealedCounts: [Int]
+    }
+
+    private var entries: [Key: Entry] = [:]
+    private var contextEntries: [String: (stamp: ContextStamp, gaps: [DiffStackContextGap])] = [:]
+
+    func prepare(_ diffs: [GitFileDiff], nonTextSeed: String?) async throws {
+        let missing = diffs.filter { diff in
+            let entry = entries[Key(changeID: diff.change.id, scope: diff.scope)]
+            return entry?.renderID != diff.renderID || entry?.change != diff.change
+                || entry?.externalSeed != (diff.state == .textual ? nil : nonTextSeed)
+        }
+        guard !missing.isEmpty else { return }
+        let prepared = try await Self.buildEntries(missing, nonTextSeed: nonTextSeed)
+        try Task.checkCancellation()
+        entries.merge(prepared) { _, new in new }
+    }
+
+    @concurrent nonisolated private static func buildEntries(
+        _ diffs: [GitFileDiff], nonTextSeed: String?
+    ) async throws -> [Key: Entry] {
+        var prepared: [Key: Entry] = [:]
+        for diff in diffs {
+            try Task.checkCancellation()
+            let seed = diff.state == .textual ? nil : nonTextSeed
+            prepared[Key(changeID: diff.change.id, scope: diff.scope)] = Entry(
+                renderID: diff.renderID, change: diff.change, externalSeed: seed,
+                snapshotID: DiffReviewSnapshotID(diff: diff, externalSeed: seed)
+            )
+        }
+        return prepared
+    }
+
+    func snapshotID(for diff: GitFileDiff, externalSeed: String? = nil) -> DiffReviewSnapshotID {
+        let key = Key(changeID: diff.change.id, scope: diff.scope)
+        if let entry = entries[key], entry.renderID == diff.renderID,
+           entry.change == diff.change, entry.externalSeed == externalSeed {
+            return entry.snapshotID
+        }
+        let snapshotID = DiffReviewSnapshotID(diff: diff, externalSeed: externalSeed)
+        entries[key] = Entry(
+            renderID: diff.renderID, change: diff.change, externalSeed: externalSeed, snapshotID: snapshotID
+        )
+        return snapshotID
+    }
+
+    func retain(_ diffs: [GitFileDiff]) {
+        let keys = Set(diffs.map { Key(changeID: $0.change.id, scope: $0.scope) })
+        entries = entries.filter { keys.contains($0.key) }
+    }
+
+    func contextGaps(
+        fileID: String, compactDiff: GitFileDiff, contextSourceDiff: GitFileDiff?,
+        revealedLineCountByGapID: [String: Int], revealsWholeFile: Bool
+    ) -> [DiffStackContextGap] {
+        let counts = revealsWholeFile ? [] : zip(compactDiff.hunks, compactDiff.hunks.dropFirst()).map {
+            revealedLineCountByGapID["\(fileID):context:\($0.id)->\($1.id)"] ?? 0
+        }
+        let stamp = ContextStamp(
+            compactRenderID: compactDiff.renderID, sourceRenderID: contextSourceDiff?.renderID,
+            revealsWholeFile: revealsWholeFile, revealedCounts: counts
+        )
+        if let entry = contextEntries[fileID], entry.stamp == stamp { return entry.gaps }
+        let gaps = DiffContextGapBuilder.gaps(
+            fileID: fileID, compactDiff: compactDiff, contextSourceDiff: contextSourceDiff,
+            revealedLineCountByGapID: revealedLineCountByGapID, revealsWholeFile: revealsWholeFile
+        )
+        contextEntries[fileID] = (stamp, gaps)
+        return gaps
+    }
+
+    func retainContexts(_ fileIDs: Set<String>) {
+        contextEntries = contextEntries.filter { fileIDs.contains($0.key) }
+    }
+
+    func removeAll() {
+        entries.removeAll(keepingCapacity: true)
+        contextEntries.removeAll(keepingCapacity: true)
+    }
+}
+
+/// 忽略空白后的 diff 按文件记住；原始 diff 没变就直接复用，不再重切 hunk。
+@MainActor
+@Observable
+final class ReviewWhitespacePresentationCache {
+    struct Stamp: Hashable, Sendable {
+        let changeID: GitFileChange.ID
+        let scope: GitDiffScope
+        let context: GitDiffContext
+        let renderID: UInt64
+        let recomputesSectionHeadings: Bool
+    }
+
+    struct Request: Sendable {
+        let diff: GitFileDiff
+        let context: GitDiffContext
+
+        var stamp: Stamp {
+            Stamp(
+                changeID: diff.change.id, scope: diff.scope, context: context,
+                renderID: diff.renderID,
+                recomputesSectionHeadings: diff.sourceIdentity?.usesDefaultFunctionNames ?? false
+            )
+        }
+    }
+
+    @ObservationIgnored private var entries: [Stamp: GitFileDiff] = [:]
+    private(set) var generation: UInt64 = 0
+
+    func presented(_ diff: GitFileDiff, context: GitDiffContext) -> GitFileDiff {
+        _ = generation
+        if let entry = entries[Request(diff: diff, context: context).stamp] {
+            return entry.change == diff.change ? entry : entry.withChange(diff.change)
+        }
+        return diff
+    }
+
+    func prepare(_ requests: [Request]) async throws {
+        let missing = requests.filter { entries[$0.stamp] == nil }
+        guard !missing.isEmpty else { return }
+        let task = Task.detached(priority: .userInitiated) {
+            var prepared: [Stamp: GitFileDiff] = [:]
+            for request in missing {
+                try Task.checkCancellation()
+                let stamp = request.stamp
+                guard prepared[stamp] == nil else { continue }
+                prepared[stamp] = GitDiffWhitespaceFilter.ignoringWhitespace(
+                    request.diff, context: request.context,
+                    recomputesSectionHeadings: stamp.recomputesSectionHeadings
+                )
+            }
+            return prepared
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        try Task.checkCancellation()
+        let stamps = Set(requests.map(\.stamp))
+        entries = entries.filter { stamps.contains($0.key) }.merging(prepared) { _, new in new }
+        generation &+= 1
+    }
+
+    func removeAll() {
+        entries.removeAll(keepingCapacity: true)
+        generation &+= 1
     }
 }
 
@@ -347,21 +519,6 @@ func synchronizeNavigatorFolderExpansion(
 ) -> Bool {
     let previous = state.expandedNavigatorFolderIDs
     state.expandedNavigatorFolderIDs.formIntersection(validFolderIDs)
-    return state.expandedNavigatorFolderIDs != previous
-}
-
-@discardableResult
-func setNavigatorFolderExpansion(
-    in state: inout ReviewState,
-    folderIDs: Set<String>,
-    isExpanded: Bool
-) -> Bool {
-    let previous = state.expandedNavigatorFolderIDs
-    if isExpanded {
-        state.expandedNavigatorFolderIDs.formUnion(folderIDs)
-    } else {
-        state.expandedNavigatorFolderIDs.subtract(folderIDs)
-    }
     return state.expandedNavigatorFolderIDs != previous
 }
 

@@ -1,4 +1,5 @@
 import AppKit
+import AgentGitCore
 import SwiftUI
 
 enum AgentGitWindowMetrics {
@@ -81,6 +82,16 @@ final class AgentGitApplicationDelegate: NSObject, NSApplicationDelegate {
     private var isPreparingTermination = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        let executableDate = try? Bundle.main.executableURL?.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate
+        AgentGitDiagnostics.shared.record("app.start", fields: [
+            "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
+            "bundle": Bundle.main.bundleURL.path,
+            "executableModifiedAt": executableDate?.ISO8601Format() ?? "",
+            "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString
+        ])
         guard let appearanceName = requestedVisualTestAppearance(
             environment: ProcessInfo.processInfo.environment
         ) else {

@@ -110,29 +110,38 @@ struct StartupReviewContent: Sendable {
         )
     }
 
+    /// 与 Review 加载一致：忽略空白只在显示时处理，缓存里存的是完整 diff。
     static func compactOptions(_ options: GitDiffOptions) -> GitDiffOptions {
-        guard options.context == .wholeFile else {
-            return options
-        }
         var compact = options
-        compact.context = .lines(3)
+        compact.ignoresWhitespace = false
+        if compact.context == .wholeFile {
+            compact.context = .lines(3)
+        }
         return compact
     }
-}
-
-struct ReviewMemoryCacheStats: Equatable, Sendable {
-    let entryCount: Int
-    let serializedByteCount: Int
 }
 
 struct ReviewDiffCacheEntry: Equatable, Sendable {
     let diffs: [GitFileDiff]
     let isComplete: Bool
+    let sourceIdentities: [GitPendingDiffIdentity]
+    let serializedByteCount: Int
+
+    init(
+        diffs: [GitFileDiff], isComplete: Bool,
+        sourceIdentities: [GitPendingDiffIdentity] = [], serializedByteCount: Int = 0
+    ) {
+        self.diffs = diffs
+        self.isComplete = isComplete
+        self.sourceIdentities = sourceIdentities
+        self.serializedByteCount = serializedByteCount
+    }
 }
 
 private enum ReviewMemoryCacheKey: Hashable {
     case history(HistoryReviewContentCacheKey)
     case pending(PendingReviewContentCacheKey)
+    case pendingFile(GitPendingDiffIdentity)
     case historicalDetails(HistoricalReviewDetailsCacheKey)
     case historicalDiff(HistoricalReviewDiffCacheKey)
 }
@@ -213,6 +222,9 @@ actor ReviewContentStore {
     private static let maximumEntryByteCount = 32 * 1_024 * 1_024
     private static let maximumStartupEntryByteCount = 8 * 1_024 * 1_024
     private static let maximumCacheByteCount = 128 * 1_024 * 1_024
+    private static let cachePruningTargetByteCount = 112 * 1_024 * 1_024
+    private static let maximumIndexedCacheFileCount = 16_384
+    private static let cacheFileTouchInterval: TimeInterval = 15
     private static let defaultMaximumMemoryCacheByteCount = 16 * 1_024 * 1_024
     private static let defaultMaximumMemoryCacheEntryCount = 24
 
@@ -223,6 +235,13 @@ actor ReviewContentStore {
     private var historyPages: [HistoryReviewContentCacheKey: GitHistoryPage] = [:]
     private var pendingDiffsByKey: [PendingReviewContentCacheKey: [GitFileDiff]] = [:]
     private var pendingDiffCompletenessByKey: [PendingReviewContentCacheKey: Bool] = [:]
+    private var reusablePendingDiffs: [GitPendingDiffIdentity: GitFileDiff] = [:]
+    /// 同一份内容见过哪些上下文行数，键是把上下文清零后的身份。
+    private var pendingContextsByContent: [GitPendingDiffIdentity: Set<GitDiffContext>] = [:]
+    private var knownCacheByteCount: Int?
+    private var cacheFilesByURL: [URL: CacheFile]?
+    private var cacheDirectoryModifiedAt: Date?
+    private var lastCacheDirectoryScan = Date.distantPast
     private var historicalDetailsByKey: [
         HistoricalReviewDetailsCacheKey: HistoricalReviewDetails
     ] = [:]
@@ -248,19 +267,6 @@ actor ReviewContentStore {
         self.directoryURL = directoryURL.standardizedFileURL
         self.maximumMemoryCacheByteCount = max(0, maximumMemoryCacheByteCount)
         self.maximumMemoryCacheEntryCount = max(0, maximumMemoryCacheEntryCount)
-    }
-
-    func memoryCacheStats() -> ReviewMemoryCacheStats {
-        ReviewMemoryCacheStats(
-            entryCount: memoryCacheMetadata.count,
-            serializedByteCount: memoryCacheByteCount
-        )
-    }
-
-    func isHistoryPageInMemory(
-        for key: HistoryReviewContentCacheKey
-    ) -> Bool {
-        historyPages[key] != nil
     }
 
     nonisolated static var defaultDirectoryURL: URL {
@@ -501,10 +507,145 @@ actor ReviewContentStore {
         }
     }
 
-    func pendingDiffs(
-        for key: PendingReviewContentCacheKey
-    ) -> [GitFileDiff]? {
-        pendingDiffEntry(for: key)?.diffs
+    func reusablePendingDiffEntry(
+        for key: PendingReviewContentCacheKey,
+        identities: [GitPendingDiffIdentity]
+    ) -> ReviewDiffCacheEntry {
+        let aggregate = pendingDiffEntry(for: key)
+        let aggregateByIdentity = Dictionary(
+            (aggregate?.diffs ?? []).compactMap { diff in
+                diff.sourceIdentity.map { ($0, diff) }
+            }, uniquingKeysWith: { first, _ in first }
+        )
+        var diffs: [GitFileDiff] = []
+        var remainingBytes = max(0, Self.maximumCacheByteCount - (aggregate?.serializedByteCount ?? 0))
+        let changes = Dictionary(key.status.changes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for identity in identities {
+            guard let change = changes[identity.changeID] else { continue }
+            if let diff = aggregateByIdentity[identity] {
+                diffs.append(diff.withChange(change))
+                continue
+            }
+            guard let cached = reusablePendingDiff(for: identity, maximumByteCount: remainingBytes) else { continue }
+            remainingBytes -= cached.byteCount
+            diffs.append(cached.diff.withChange(change))
+        }
+        let expectedCount = key.status.changes.reduce(0) { count, change in
+            count + (change.isStaged ? 1 : 0) + (change.isUnstaged || change.isUntracked ? 1 : 0)
+        }
+        return ReviewDiffCacheEntry(
+            diffs: diffs, isComplete: diffs.count == expectedCount
+                && aggregate?.isComplete == true && aggregateByIdentity.count == expectedCount,
+            sourceIdentities: identities
+        )
+    }
+
+    func reusablePendingDiff(
+        for identity: GitPendingDiffIdentity,
+        maximumByteCount: Int = ReviewContentStore.maximumEntryByteCount
+    ) -> (diff: GitFileDiff, byteCount: Int)? {
+        storedReusablePendingDiff(for: identity, maximumByteCount: maximumByteCount)
+            ?? trimmedReusablePendingDiff(for: identity, maximumByteCount: maximumByteCount)
+    }
+
+    /// 上下文行数变少时，从同一份内容上下文更多的结果裁出来，不再跑 Git。
+    /// hunk 标题要按 Git 默认规则重算，指定了 diff 驱动的文件不裁。
+    private func trimmedReusablePendingDiff(
+        for identity: GitPendingDiffIdentity,
+        maximumByteCount: Int
+    ) -> (diff: GitFileDiff, byteCount: Int)? {
+        guard identity.usesDefaultFunctionNames, case .lines = identity.context else { return nil }
+        let known = pendingContextsByContent[identity.withContext(.lines(0))] ?? []
+        let candidates = known.union([.wholeFile, .lines(25), .lines(8)])
+            .filter { Self.context($0, covers: identity.context) }
+            .sorted { Self.context($1, covers: $0) }
+        for context in candidates {
+            guard let source = storedReusablePendingDiff(
+                for: identity.withContext(context), maximumByteCount: maximumByteCount
+            ) else { continue }
+            // 超过行数上限的结果和上下文有关，换成更少的上下文可能就不超了。
+            switch source.diff.state {
+            case .textual, .binary, .metadata: break
+            case .tooLarge, .unavailable: continue
+            }
+            let diff = GitDiffContextTrimmer.trimming(
+                source.diff, to: identity.context, recomputesSectionHeadings: true
+            ).withSourceIdentity(identity)
+            reusablePendingDiffs[identity] = diff
+            rememberMemoryCache(.pendingFile(identity), serializedByteCount: source.byteCount)
+            notePendingContext(of: identity)
+            return (diff, source.byteCount)
+        }
+        return nil
+    }
+
+    private nonisolated static func context(_ context: GitDiffContext, covers target: GitDiffContext) -> Bool {
+        switch (context, target) {
+        case (.wholeFile, .lines): true
+        case let (.lines(count), .lines(targetCount)): count > targetCount
+        default: false
+        }
+    }
+
+    private func notePendingContext(of identity: GitPendingDiffIdentity) {
+        let key = identity.withContext(.lines(0))
+        if pendingContextsByContent.count >= 16_384, pendingContextsByContent[key] == nil {
+            pendingContextsByContent.removeAll(keepingCapacity: true)
+        }
+        pendingContextsByContent[key, default: []].insert(identity.context)
+    }
+
+    private func storedReusablePendingDiff(
+        for identity: GitPendingDiffIdentity,
+        maximumByteCount: Int
+    ) -> (diff: GitFileDiff, byteCount: Int)? {
+        if let diff = reusablePendingDiffs[identity],
+           let metadata = memoryCacheMetadata[.pendingFile(identity)],
+           metadata.serializedByteCount <= maximumByteCount {
+            touchMemoryCache(.pendingFile(identity))
+            return (diff, metadata.serializedByteCount)
+        }
+        let fileURL = Self.reusablePendingFileURL(directoryURL: directoryURL, identity: identity)
+        let byteCount = Self.cacheFileByteCount(at: fileURL)
+        guard byteCount <= maximumByteCount,
+              let entry: PersistedReusablePendingFile = Self.loadEntry(
+                at: fileURL, maximumByteCount: min(maximumByteCount, Self.maximumEntryByteCount)
+              ), entry.version == Self.schemaVersion, entry.identity == identity,
+              entry.diff.sourceIdentity == identity else { return nil }
+        reusablePendingDiffs[identity] = entry.diff
+        rememberMemoryCache(.pendingFile(identity), serializedByteCount: byteCount)
+        notePendingContext(of: identity)
+        touchCacheFile(at: fileURL)
+        return (entry.diff, byteCount)
+    }
+
+    func saveReusablePendingDiffs(_ diffs: [GitFileDiff]) throws {
+        for diff in diffs {
+            guard let identity = diff.sourceIdentity else { continue }
+            let fileURL = Self.reusablePendingFileURL(directoryURL: directoryURL, identity: identity)
+            if storedReusablePendingDiff(
+                for: identity, maximumByteCount: Self.maximumEntryByteCount
+            )?.diff == diff,
+               FileManager.default.fileExists(atPath: fileURL.path) {
+                touchMemoryCache(.pendingFile(identity))
+                touchCacheFile(at: fileURL)
+                continue
+            }
+            let entry = PersistedReusablePendingFile(version: Self.schemaVersion, identity: identity, diff: diff)
+            guard let byteCount = try save(entry, to: fileURL, prunesCache: false) else { continue }
+            reusablePendingDiffs[identity] = diff
+            rememberMemoryCache(.pendingFile(identity), serializedByteCount: byteCount)
+            notePendingContext(of: identity)
+        }
+        try pruneIfNeeded()
+    }
+
+    private nonisolated static func reusablePendingFileURL(
+        directoryURL: URL, identity: GitPendingDiffIdentity
+    ) -> URL {
+        let data = (try? makeEncoder().encode(identity)) ?? Data()
+        let digest = Insecure.SHA1.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return directoryURL.appendingPathComponent("pending-content-\(digest).json")
     }
 
     func pendingDiffEntry(
@@ -514,7 +655,8 @@ actor ReviewContentStore {
             touchMemoryCache(.pending(key))
             return ReviewDiffCacheEntry(
                 diffs: diffs,
-                isComplete: pendingDiffCompletenessByKey[key] ?? true
+                isComplete: pendingDiffCompletenessByKey[key] ?? true,
+                serializedByteCount: memoryCacheMetadata[.pending(key)]?.serializedByteCount ?? 0
             )
         }
         let fileURL = Self.cacheFileURL(
@@ -525,16 +667,18 @@ actor ReviewContentStore {
         if let entry: PersistedPendingReviewContent = Self.loadEntry(at: fileURL),
            entry.version == Self.schemaVersion,
            entry.key == key {
+            let byteCount = Self.cacheFileByteCount(at: fileURL)
             pendingDiffsByKey[key] = entry.diffs
             pendingDiffCompletenessByKey[key] = true
             rememberMemoryCache(
                 .pending(key),
-                serializedByteCount: Self.cacheFileByteCount(at: fileURL)
+                serializedByteCount: byteCount
             )
             touchCacheFile(at: fileURL)
             return ReviewDiffCacheEntry(
                 diffs: entry.diffs,
-                isComplete: true
+                isComplete: true,
+                serializedByteCount: byteCount
             )
         }
         if FileManager.default.fileExists(atPath: fileURL.path) {
@@ -551,7 +695,8 @@ actor ReviewContentStore {
         )
         return ReviewDiffCacheEntry(
             diffs: segmented.diffs,
-            isComplete: segmented.isComplete
+            isComplete: segmented.isComplete,
+            serializedByteCount: segmented.serializedByteCount
         )
     }
 
@@ -575,14 +720,21 @@ actor ReviewContentStore {
             prefix: "pending",
             key: key
         )
-        let aggregateByteCount = try save(
+        let manifestURL = Self.cacheFileURL(
+            directoryURL: directoryURL, prefix: "pending-manifest", key: key
+        )
+        let manifest: PersistedPendingReviewManifest? = Self.loadEntry(at: manifestURL)
+        let hasSegments = manifest?.version == Self.schemaVersion && manifest?.key == key
+        // 已有分段继续增量更新；整份缓存只保留启动时可以直接读取的小条目。
+        let aggregateByteCount = hasSegments ? nil : try save(
             entry,
             to: fileURL,
-            prunesCache: false
+            prunesCache: false,
+            maximumByteCount: Self.maximumStartupEntryByteCount
         )
         let segmentedByteCount: Int?
-        if aggregateByteCount == nil
-            || aggregateByteCount ?? 0 > Self.maximumStartupEntryByteCount {
+        if aggregateByteCount == nil {
+            try removeCacheFileIfPresent(at: fileURL)
             segmentedByteCount = try savePendingSegments(
                 sortedDiffs,
                 for: key,
@@ -620,7 +772,7 @@ actor ReviewContentStore {
             prefix: "pending",
             key: key
         )
-        removeInvalidCacheFile(at: aggregateURL)
+        try removeCacheFileIfPresent(at: aggregateURL)
         let serializedByteCount = try savePendingSegments(
             sortedDiffs,
             for: key,
@@ -636,16 +788,6 @@ actor ReviewContentStore {
             )
         } else {
             removeMemoryCacheValue(for: .pending(key))
-        }
-    }
-
-    func pendingDiff(
-        changeID: GitFileChange.ID,
-        scope: GitDiffScope,
-        for key: PendingReviewContentCacheKey
-    ) -> GitFileDiff? {
-        pendingDiffs(for: key)?.first {
-            $0.change.id == changeID && $0.scope == scope
         }
     }
 
@@ -665,10 +807,17 @@ actor ReviewContentStore {
             }
             return lhs.change.id < rhs.change.id
         }
-        if existing?.isComplete == true {
-            try savePendingDiffs(sortedDiffs, for: key)
+        let isComplete = existing?.isComplete == true
+        let aggregateURL = Self.cacheFileURL(directoryURL: directoryURL, prefix: "pending", key: key)
+        try removeCacheFileIfPresent(at: aggregateURL)
+        let serializedByteCount = try savePendingSegments(sortedDiffs, for: key, isComplete: isComplete)
+        try pruneIfNeeded()
+        if let serializedByteCount {
+            pendingDiffsByKey[key] = sortedDiffs
+            pendingDiffCompletenessByKey[key] = isComplete
+            rememberMemoryCache(.pending(key), serializedByteCount: serializedByteCount)
         } else {
-            try savePartialPendingDiffs(sortedDiffs, for: key)
+            removeMemoryCacheValue(for: .pending(key))
         }
     }
 
@@ -703,11 +852,12 @@ actor ReviewContentStore {
         )
         var descriptors: [PendingReviewFileDescriptor] = []
         var writtenURLs: [URL] = []
+        var invalidatedPreviousManifest = false
         var completed = false
         defer {
             if !completed {
                 for fileURL in writtenURLs {
-                    try? FileManager.default.removeItem(at: fileURL)
+                    try? removeCacheFile(at: fileURL)
                 }
             }
         }
@@ -725,9 +875,18 @@ actor ReviewContentStore {
             )
             if let reusable = reusableDescriptors[fileKey],
                Self.cacheFileByteCount(at: fileURL)
-                    == reusable.serializedByteCount {
+                    == reusable.serializedByteCount,
+               let existing: PersistedPendingReviewFile = Self.loadEntry(at: fileURL),
+               existing.version == Self.schemaVersion, existing.key == fileKey,
+               existing.diff == diff {
                 descriptors.append(reusable)
+                touchCacheFile(at: fileURL)
                 continue
+            }
+            // 旧 manifest 不能在更新途中继续把新旧混合的段标为完整缓存。
+            if !invalidatedPreviousManifest {
+                try removeCacheFileIfPresent(at: manifestURL)
+                invalidatedPreviousManifest = true
             }
             let fileEntry = PersistedPendingReviewFile(
                 version: Self.schemaVersion,
@@ -769,6 +928,10 @@ actor ReviewContentStore {
             to: manifestURL,
             prunesCache: false
         ) else {
+            return nil
+        }
+        guard segmentByteCount + manifestByteCount <= Self.maximumCacheByteCount else {
+            removePendingSegments(for: key)
             return nil
         }
         let nextFileKeys = Set(descriptors.map {
@@ -825,8 +988,10 @@ actor ReviewContentStore {
                 prefix: "pending-file",
                 key: fileKey
             )
+            let remainingByteCount = Self.maximumCacheByteCount - serializedByteCount
             guard let entry: PersistedPendingReviewFile = Self.loadEntry(
-                at: fileURL
+                at: fileURL,
+                maximumByteCount: min(Self.maximumEntryByteCount, remainingByteCount)
             ), entry.version == Self.schemaVersion,
                   entry.key == fileKey else {
                 removePendingSegments(for: key)
@@ -1001,13 +1166,20 @@ actor ReviewContentStore {
             prefix: "historical-diff",
             key: key
         )
-        let aggregateByteCount = try save(
+        let manifestURL = Self.cacheFileURL(
+            directoryURL: directoryURL, prefix: "historical-diff-manifest", key: key
+        )
+        let manifest: PersistedHistoricalReviewManifest? = Self.loadEntry(at: manifestURL)
+        let hasSegments = manifest?.version == Self.schemaVersion && manifest?.key == key
+        let aggregateByteCount = hasSegments ? nil : try save(
             entry,
             to: fileURL,
-            prunesCache: false
+            prunesCache: false,
+            maximumByteCount: Self.maximumStartupEntryByteCount
         )
         let segmentedByteCount: Int?
         if aggregateByteCount == nil {
+            try removeCacheFileIfPresent(at: fileURL)
             segmentedByteCount = try saveHistoricalSegments(
                 sortedDiffs,
                 for: key,
@@ -1045,7 +1217,7 @@ actor ReviewContentStore {
             prefix: "historical-diff",
             key: key
         )
-        removeInvalidCacheFile(at: aggregateURL)
+        try removeCacheFileIfPresent(at: aggregateURL)
         let serializedByteCount = try saveHistoricalSegments(
             sortedDiffs,
             for: key,
@@ -1080,10 +1252,19 @@ actor ReviewContentStore {
         diffs.removeAll { $0.change.id == diff.change.id }
         diffs.append(diff)
         let sortedDiffs = diffs.sorted { $0.change.id < $1.change.id }
-        if existing?.isComplete == true {
-            try saveHistoricalDiffs(sortedDiffs, for: key)
+        let isComplete = existing?.isComplete == true
+        let aggregateURL = Self.cacheFileURL(
+            directoryURL: directoryURL, prefix: "historical-diff", key: key
+        )
+        try removeCacheFileIfPresent(at: aggregateURL)
+        let serializedByteCount = try saveHistoricalSegments(sortedDiffs, for: key, isComplete: isComplete)
+        try pruneIfNeeded()
+        if let serializedByteCount {
+            historicalDiffsByKey[key] = sortedDiffs
+            historicalDiffCompletenessByKey[key] = isComplete
+            rememberMemoryCache(.historicalDiff(key), serializedByteCount: serializedByteCount)
         } else {
-            try savePartialHistoricalDiffs(sortedDiffs, for: key)
+            removeMemoryCacheValue(for: .historicalDiff(key))
         }
     }
 
@@ -1118,11 +1299,12 @@ actor ReviewContentStore {
         )
         var descriptors: [HistoricalReviewFileDescriptor] = []
         var writtenURLs: [URL] = []
+        var invalidatedPreviousManifest = false
         var completed = false
         defer {
             if !completed {
                 for fileURL in writtenURLs {
-                    try? FileManager.default.removeItem(at: fileURL)
+                    try? removeCacheFile(at: fileURL)
                 }
             }
         }
@@ -1139,9 +1321,17 @@ actor ReviewContentStore {
             )
             if let reusable = reusableDescriptors[fileKey],
                Self.cacheFileByteCount(at: fileURL)
-                    == reusable.serializedByteCount {
+                    == reusable.serializedByteCount,
+               let existing: PersistedHistoricalReviewFile = Self.loadEntry(at: fileURL),
+               existing.version == Self.schemaVersion, existing.key == fileKey,
+               existing.diff == diff {
                 descriptors.append(reusable)
+                touchCacheFile(at: fileURL)
                 continue
+            }
+            if !invalidatedPreviousManifest {
+                try removeCacheFileIfPresent(at: manifestURL)
+                invalidatedPreviousManifest = true
             }
             let fileEntry = PersistedHistoricalReviewFile(
                 version: Self.schemaVersion,
@@ -1183,6 +1373,10 @@ actor ReviewContentStore {
             to: manifestURL,
             prunesCache: false
         ) else {
+            return nil
+        }
+        guard segmentByteCount + manifestByteCount <= Self.maximumCacheByteCount else {
+            removeHistoricalSegments(for: key)
             return nil
         }
         let nextFileKeys = Set(descriptors.map {
@@ -1239,8 +1433,10 @@ actor ReviewContentStore {
                 prefix: "historical-diff-file",
                 key: fileKey
             )
+            let remainingByteCount = Self.maximumCacheByteCount - serializedByteCount
             guard let entry: PersistedHistoricalReviewFile = Self.loadEntry(
-                at: fileURL
+                at: fileURL,
+                maximumByteCount: min(Self.maximumEntryByteCount, remainingByteCount)
             ), entry.version == Self.schemaVersion,
                   entry.key == fileKey else {
                 removeHistoricalSegments(for: key)
@@ -1409,7 +1605,9 @@ actor ReviewContentStore {
         at fileURL: URL,
         maximumByteCount: Int
     ) -> Data? {
-        guard let values = try? fileURL.resourceValues(forKeys: [
+        var uncachedURL = fileURL
+        uncachedURL.removeAllCachedResourceValues()
+        guard let values = try? uncachedURL.resourceValues(forKeys: [
             .isRegularFileKey,
             .fileSizeKey
         ]), values.isRegularFile == true,
@@ -1417,29 +1615,47 @@ actor ReviewContentStore {
               fileSize <= maximumByteCount else {
             return nil
         }
-        return try? Data(contentsOf: fileURL, options: .mappedIfSafe)
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe),
+              data.count <= maximumByteCount else {
+            return nil
+        }
+        return data
     }
 
     private nonisolated static func cacheFileByteCount(at fileURL: URL) -> Int {
-        (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 1
+        var uncachedURL = fileURL
+        uncachedURL.removeAllCachedResourceValues()
+        return (try? uncachedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 1
     }
 
     private func save<Value: Encodable>(
         _ value: Value,
         to fileURL: URL,
-        prunesCache: Bool = true
+        prunesCache: Bool = true,
+        maximumByteCount: Int = ReviewContentStore.maximumEntryByteCount
     ) throws -> Int? {
         let data = try Self.makeEncoder().encode(value)
-        guard data.count <= Self.maximumEntryByteCount else {
+        guard data.count <= maximumByteCount else {
             removeInvalidCacheFile(at: fileURL)
             return nil
+        }
+        if Self.existingCacheFileByteCount(at: fileURL) == data.count,
+           Self.loadCacheData(at: fileURL, maximumByteCount: data.count) == data {
+            touchCacheFile(at: fileURL)
+            if prunesCache {
+                try pruneIfNeeded()
+            }
+            return data.count
         }
         try FileManager.default.createDirectory(
             at: directoryURL,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        _ = try refreshCacheFileIndexIfNeeded()
+        let previousByteCount = Self.existingCacheFileByteCount(at: fileURL)
         try data.write(to: fileURL, options: .atomic)
+        recordCacheFileWrite(at: fileURL, byteCount: data.count, previousByteCount: previousByteCount)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: fileURL.path
@@ -1500,6 +1716,8 @@ actor ReviewContentStore {
         case let .pending(cacheKey):
             pendingDiffsByKey[cacheKey] = nil
             pendingDiffCompletenessByKey[cacheKey] = nil
+        case let .pendingFile(identity):
+            reusablePendingDiffs[identity] = nil
         case let .historicalDetails(cacheKey):
             historicalDetailsByKey[cacheKey] = nil
         case let .historicalDiff(cacheKey):
@@ -1509,6 +1727,45 @@ actor ReviewContentStore {
     }
 
     private func pruneIfNeeded() throws {
+        let scannedFiles = try refreshCacheFileIndexIfNeeded()
+        guard knownCacheByteCount ?? 0 > Self.maximumCacheByteCount else {
+            return
+        }
+        let files: [CacheFile]
+        if let cacheFilesByURL {
+            files = Array(cacheFilesByURL.values)
+        } else if let scannedFiles {
+            files = scannedFiles
+        } else {
+            // 外部目录文件过多时不把全部索引长期留在内存，按需扫描清理。
+            files = try scanCacheDirectory()
+        }
+        for file in files.sorted(by: { $0.modifiedAt < $1.modifiedAt }) {
+            do {
+                try removeCacheFile(at: file.url, refreshesIndex: false)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                forgetCacheFile(at: file.url, previousByteCount: file.size)
+            }
+            if knownCacheByteCount ?? 0 <= Self.cachePruningTargetByteCount {
+                break
+            }
+        }
+    }
+
+    /// 自身写入、删除后记录目录时间，下一次保存只检查一个目录属性。
+    /// 外部新增、删除会触发重建；原地修改已有文件由定期扫描核对。
+    private func refreshCacheFileIndexIfNeeded() throws -> [CacheFile]? {
+        let now = Date()
+        let age = now.timeIntervalSince(lastCacheDirectoryScan)
+        if knownCacheByteCount != nil, age >= 0, age < 60,
+           cacheDirectoryModifiedAt == currentCacheDirectoryModificationDate() {
+            return nil
+        }
+        return try scanCacheDirectory()
+    }
+
+    private func scanCacheDirectory() throws -> [CacheFile] {
+        let directoryModifiedAt = currentCacheDirectoryModificationDate()
         let keys: Set<URLResourceKey> = [
             .isRegularFileKey,
             .fileSizeKey,
@@ -1529,17 +1786,43 @@ actor ReviewContentStore {
                 modifiedAt: values.contentModificationDate ?? .distantPast
             )
         }
-        var totalByteCount = files.reduce(0) { $0 + $1.size }
-        guard totalByteCount > Self.maximumCacheByteCount else {
-            return
+        knownCacheByteCount = files.reduce(0) { $0 + $1.size }
+        cacheFilesByURL = files.count <= Self.maximumIndexedCacheFileCount
+            ? Dictionary(files.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+            : nil
+        lastCacheDirectoryScan = Date()
+        cacheDirectoryModifiedAt = directoryModifiedAt
+        return files
+    }
+
+    private func currentCacheDirectoryModificationDate() -> Date? {
+        var url = directoryURL
+        url.removeAllCachedResourceValues()
+        return try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
+    private func recordCacheFileWrite(at fileURL: URL, byteCount: Int, previousByteCount: Int) {
+        let previousSize = cacheFilesByURL?[fileURL]?.size ?? previousByteCount
+        if let knownCacheByteCount {
+            self.knownCacheByteCount = max(0, knownCacheByteCount - previousSize + byteCount)
         }
-        for file in files.sorted(by: { $0.modifiedAt < $1.modifiedAt }) {
-            try FileManager.default.removeItem(at: file.url)
-            totalByteCount -= file.size
-            if totalByteCount <= Self.maximumCacheByteCount {
-                break
+        if cacheFilesByURL != nil {
+            if cacheFilesByURL?[fileURL] == nil,
+               cacheFilesByURL?.count ?? 0 >= Self.maximumIndexedCacheFileCount {
+                cacheFilesByURL = nil
+            } else {
+                cacheFilesByURL?[fileURL] = CacheFile(url: fileURL, size: byteCount, modifiedAt: Date())
             }
         }
+        cacheDirectoryModifiedAt = currentCacheDirectoryModificationDate()
+    }
+
+    private func forgetCacheFile(at fileURL: URL, previousByteCount: Int) {
+        let previousSize = cacheFilesByURL?.removeValue(forKey: fileURL)?.size ?? previousByteCount
+        if let knownCacheByteCount {
+            self.knownCacheByteCount = max(0, knownCacheByteCount - previousSize)
+        }
+        cacheDirectoryModifiedAt = currentCacheDirectoryModificationDate()
     }
 
     private nonisolated static func cacheFileURL<Key: Encodable>(
@@ -1567,14 +1850,55 @@ actor ReviewContentStore {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             return
         }
-        try? FileManager.default.removeItem(at: fileURL)
+        try? removeCacheFile(at: fileURL)
+    }
+
+    private func removeCacheFileIfPresent(at fileURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return
+        }
+        try removeCacheFile(at: fileURL)
+    }
+
+    private nonisolated static func existingCacheFileByteCount(at fileURL: URL) -> Int {
+        var uncachedURL = fileURL
+        uncachedURL.removeAllCachedResourceValues()
+        return (try? uncachedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
+    private func removeCacheFile(at fileURL: URL, refreshesIndex: Bool = true) throws {
+        if refreshesIndex, knownCacheByteCount != nil {
+            _ = try refreshCacheFileIndexIfNeeded()
+        }
+        let byteCount = Self.existingCacheFileByteCount(at: fileURL)
+        try FileManager.default.removeItem(at: fileURL)
+        forgetCacheFile(at: fileURL, previousByteCount: byteCount)
     }
 
     private func touchCacheFile(at fileURL: URL) {
-        try? FileManager.default.setAttributes(
-            [.modificationDate: Date()],
-            ofItemAtPath: fileURL.path
-        )
+        let now = Date()
+        if let file = cacheFilesByURL?[fileURL] {
+            let age = now.timeIntervalSince(file.modifiedAt)
+            if age >= 0, age < Self.cacheFileTouchInterval {
+                return
+            }
+        }
+        do {
+            try FileManager.default.setAttributes(
+                [.modificationDate: now], ofItemAtPath: fileURL.path
+            )
+            if let file = cacheFilesByURL?[fileURL] {
+                let size = Self.existingCacheFileByteCount(at: fileURL)
+                if let knownCacheByteCount {
+                    self.knownCacheByteCount = max(0, knownCacheByteCount - file.size + size)
+                }
+                cacheFilesByURL?[fileURL] = CacheFile(url: fileURL, size: size, modifiedAt: now)
+            }
+        } catch {
+            // 外部删除或替换失败时，让下一次保存重新核对目录。
+            knownCacheByteCount = nil
+            cacheFilesByURL = nil
+        }
     }
 
     private static func makeEncoder() -> JSONEncoder {
@@ -1601,6 +1925,12 @@ private struct PersistedPendingReviewContent: Codable {
     let version: Int
     let key: PendingReviewContentCacheKey
     let diffs: [GitFileDiff]
+}
+
+private struct PersistedReusablePendingFile: Codable {
+    let version: Int
+    let identity: GitPendingDiffIdentity
+    let diff: GitFileDiff
 }
 
 private struct PersistedPendingReviewManifest: Codable {

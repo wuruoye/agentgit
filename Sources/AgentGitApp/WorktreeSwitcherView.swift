@@ -392,9 +392,9 @@ private struct WorktreeSwitcherRow: View {
             if !snapshot.diffStat.isEmpty {
                 HStack(spacing: 4) {
                     Text("+\(snapshot.diffStat.addedLineCount)")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
                     Text("−\(snapshot.diffStat.deletedLineCount)")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
                 }
                 .font(.caption.monospacedDigit().weight(.medium))
             }

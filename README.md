@@ -34,7 +34,6 @@ AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它
 运行需要 macOS 14 或更新版本，以及 Xcode Command Line Tools。编译需要 Swift 6.2 或更新版本。
 
 ```bash
-swift test
 scripts/build-app.sh debug
 open .build/debug/AgentGit.app
 ```
@@ -136,7 +135,8 @@ M1 不包含 commit、reset 或 worktree 创建。Git 写操作支持 Working / 
 Settings → Worktrees 提供自动清理开关，默认关闭。开启后默认每小时检查一次，清理闲置
 至少 7 天的干净 linked worktree；可选择每 1 / 6 / 24 小时检查、闲置 3 / 7 / 14 / 30 天。
 应用保持运行时在后台也会检查，退出后停止；最近检查时间跨启动保存，到期后自动补查。
-设置页面显示最近一次清理的数量、已删除路径和错误。
+设置页面显示最近一次清理的数量、已删除路径、保留原因和错误，可复制完整清理结果并在
+Finder 中打开诊断日志目录。
 Clean Up Now 按钮立即检查并清理符合条件的 worktree，跳过等待周期；自动清理关闭时也可
 执行一次，且不会打开自动清理。手动执行同样遵守闲置天数、项目排除与全部删除保护，运行中
 禁用按钮，完成后更新最近检查结果与下一次自动检查的计时。
@@ -152,12 +152,32 @@ Agent 会话登记、目录创建时间、干净文件和忽略文件的时间�
 
 主 checkout、置顶、当前选中、锁定以及正在执行 Git 操作的 worktree 会保留。主 worktree
 是强制保护项，自动和手动清理均不可删除，项目配置不会解除该保护。删除前重新检查 Git
-成员、状态、HEAD 与列表活动时间；包含 staged / unstaged / untracked 文件、submodule、
-隐藏本地改动的 index 标记，或无法确认状态的目录都跳过。
+成员、状态、HEAD 与列表活动时间；本地改动按 AgentGit Review 使用的 Git 状态判定，
+包含 staged / unstaged / untracked 改动或无法确认状态的目录都跳过。
 
-清理使用不带 `--force` 的 `git worktree remove`，保留本地分支（包括尚未推送的提交）；
+普通 worktree 使用不带 `--force` 的 `git worktree remove`；包含已初始化 submodule 时，在
+重新确认 Git 状态为空及目录保护条件后使用一次 `--force`。清理保留主仓库本地分支（包括尚未推送的提交）；
 detached HEAD 仅在提交仍被本地分支、远端跟踪分支或标签引用时允许清理。清理完成后立即
 更新列表与持久化快照。该功能会实际删除符合条件的目录，启用开关后无需逐项确认。
+tracked 文件清单写入权限受限的临时文件，删除前逐块比对重新读取的清单，
+避免大型仓库触及内存输出上限。detached HEAD 先检查直接指向它的引用，再按需检查提交历史；
+找到一个保留引用后停止，无法在时限内确认时继续保留 worktree。
+清理预检禁用 partial clone 的按需 fetch，缺少对象而无法确认引用时保留 worktree。
+子模块的修改、未跟踪文件和 HEAD 变化按完整 Git 状态检查。含已初始化 submodule 的
+worktree 符合清理条件时，目录和对应 worktree 元数据里的子模块仓库一起删除；不会解除
+主目录、选中、置顶、排除、锁定或正在执行 Git 操作的保护。移除前再次核对状态，日志记录
+是否使用 `--force` 及最终结果。Git 预检时限为 30 秒，大目录移除时限为 300 秒。
+
+## 诊断日志
+
+本机诊断日志写入 `~/Library/Logs/AgentGit/agentgit.jsonl`，Settings → Worktrees 中可通过
+Show Logs in Finder 打开。每轮清理带独立 ID，记录触发方式、闲置截止时间、项目与 worktree、
+检查阶段、活动时间、保留原因、删除结果和错误。Git 命令记录实际程序路径、参数、工作目录、
+进程 ID、耗时、退出码、输出字节数及 stderr，包括成功命令产生的警告。应用启动和退出也记录版本与时间。
+
+日志在独立串行队列写入，不记录 stdout、文件正文、stdin 或环境变量；URL 凭据和授权字段
+会被遮盖。每份日志最多 5 MiB，保留三份轮转备份；单条最多 256 KiB，超长参数和输出会注明
+截断及原始字节数。目录权限为 `0700`，文件权限为 `0600`。正常退出时等待已提交的日志写完。
 
 ## 最近活动时间
 
@@ -172,7 +192,8 @@ last_activity_at = max(
 )
 ```
 
-App 在后台每隔 10 分钟刷新全部项目，前台不自动刷新。活动时间不采用会被 `git status` 缓存写入改变的 index mtime。
+App 在前台通过 FSEvents 合并仓库文件变化并刷新受影响的 worktree，后台每隔 10 分钟刷新全部项目。
+活动时间不采用会被 `git status` 缓存写入改变的 index mtime。
 项目顺序由拖拽操作保存。项目内部使用 `last_activity_at` 倒序排列 worktree，
 排序时间与列表显示时间完全相同；时间相同后按名称排列。侧栏使用稳定的 `now / 5m / 3h /
 2d` 紧凑文本，仓库状态没有变化时不为相对秒数持续重绘列表。
@@ -205,7 +226,8 @@ Review 使用连续文件流，
 Settings 管理并跨启动保存。
 设置窗口使用独立的 Review / Worktrees / Agents 页面。
 Diff 正文使用 AppKit `NSTableView` 复用可见行，数万行变更不会交给 SwiftUI 为每行维护布局
-和无障碍节点；Diff 聚焦时可用 `Tab` / `Shift-Tab` 在 hunk 间导航。
+和无障碍节点；Diff 聚焦时可用 `⌥↓` / `⌥↑` 在 hunk 间导航，`Tab` / `Shift-Tab`
+在操作控件间切换。文件与 hunk 的常用操作按钮保持可见，键盘焦点有明确的描边。
 主窗口最小尺寸为 1040×680 点；项目侧栏和提交导航在窄窗口分别压缩到 240 与 200 点，
 Review 保留至少 490 点。离屏坐标检查要求文件、hunk 的 Stage、Unstage、Discard 全部位于
 窗口边界内。
@@ -315,13 +337,13 @@ Reviewed 标记和 Whole File 切换保持可用。操作完成后保留当前 R
 AgentGitCore       Git 命令、解析、领域模型、项目持久化
 AgentGitIntegrationShared  Agent 会话、Skill 登记与持久化
 AgentGitApp        SwiftUI App 外壳与 AppKit 高性能视图
-AgentGitCoreTests  porcelain / diff parser 与真实临时仓库测试
-AgentGitAppTests   AppKit Review 布局、交互与离屏快照测试
-AgentGitIntegrationSharedTests  Skill 与关联数据测试
 ```
 
 Git 命令异步执行，进程等待不阻塞并发线程池；stdout / stderr 使用持续排空的内存 pipe，
 大输出达到上限后只继续统计字节数，不再扩张内存，也不为每条命令创建临时文件。
+AgentGit 的 Git 命令及其子进程使用临时配置 `maintenance.auto=false` 和 `gc.auto=0`，
+避免操作过程中启动脱离应用的自动维护；不修改仓库或全局 Git 配置。同一 common gitdir 下的
+全部 worktree 都使用这项保护，兼容使用不同 Git 可执行文件的调用方。
 Pending、commit 与 range Diff 在进入批处理前按 `GitFileChange.ID` 稳定去重，避免异常重复输入
 造成重复 Git 工作或字典构造终止。
 UI 不直接创建 `Process`。所有路径
@@ -338,7 +360,8 @@ fsmonitor token、untracked cache 与 index stat cache，避免大型仓库每�
 `~/Library/Caches/com.sigma.agentgit/project-snapshots-v1.json`。缓存包含 worktree 清单、状态
 计数、增删行数、活动时间、branch 信息和项目成员完整标记，文件权限为
 `0600`。App 启动时立即恢复侧栏；完整缓存直接提供启动首帧，缺少的项目或成员按需加载。
-文件变化不触发刷新。后台定时刷新和手动刷新会更新项目清单与 worktree 状态。
+文件变化、后台定时刷新和手动刷新会更新 worktree 状态，成员事件同时更新项目清单。
+只在事件处理完成后保存对应游标，重启时继续读取未完成的仓库事件。
 旧版缓存自动迁移，缓存使用版本化 JSON 和原子写入，失败刷新保留此前
 的成功内容。每次更新前还会保留
 `~/Library/Caches/com.sigma.agentgit/project-snapshots-v1.backup.json`；主文件损坏或写入中断
@@ -349,25 +372,44 @@ fsmonitor token、untracked cache 与 index stat cache，避免大型仓库每�
 固定 HEAD 已经加载的 History 分页、Pending 基础 Diff，以及固定 commit / commit range 的
 message、文件列表和基础 Diff 保存在
 `~/Library/Caches/com.sigma.agentgit/review-content-v1/`。History 缓存键包含 worktree、HEAD
-和分页大小；Pending Diff 缓存键包含 HEAD、完整 status、增删统计、文件活动时间和 Diff
-设置；历史 Review 使用不可变 commit OID 或 range 端点与 Diff 设置。文件内容、index、HEAD
+和分页大小；Pending Diff 的聚合缓存键包含 HEAD、完整 status、增删统计、文件活动时间和 Diff
+设置，另有跨快照复用的文件缓存，校验两侧对象 ID、工作区内容、文件模式、Git 属性、有效配置、
+Git 版本、路径和 Diff 设置。只更改一个文件时，其他文件继续使用各自的结果；计算完成后再次
+校验身份，无法确认或超过读取预算的文件重新计算。历史 Review 使用不可变 commit OID 或 range 端点与 Diff 设置。文件内容、index、HEAD
 或设置变化都会使用新的缓存项。单项缓存上限为 32 MiB，总量上限为
-128 MiB，按最近使用时间清理；缓存文件使用原子写入和 `0600` 权限。用户已经展开的 Whole
+128 MiB，达到上限后按最近使用时间清理到 112 MiB；缓存文件使用原子写入和 `0600` 权限。用户已经展开的 Whole
 File 与额外上下文按文件和 Diff 设置保存，重启后恢复相同 Review 状态时直接读取缓存。图片
-预览继续按需读取。超过 8 MiB 的 Pending Diff 同时保存文件级清单；超过 32 MiB 的聚合内容
-直接使用这些文件级缓存。大型 commit 与 commit range Diff 同样按文件保存，重复进入历史
+预览继续按需读取。聚合内容最多保存 8 MiB，更大的 Diff 使用文件级清单，已有文件级清单
+继续按分段更新。相同内容不重写，变化分段完成后原子更新清单。大型 commit 与 commit range Diff 同样按文件保存，重复进入历史
 Review 时直接恢复。启动时在 8 MiB 预算内先恢复尽可能多的 Pending 文件，其他文件随后从
 本地缓存补齐，侧栏和窗口首帧不会等待整个大型 Review。Pending、commit 和 commit range
 Diff 每完成一个读取批次就保存文件级缓存和部分完成标记；应用退出或任务取消后，下次进入
 相同 Review 会直接显示已完成批次并读取缺少的文件，全部文件完成后再写入完整标记。分段
 损坏时保留已恢复内容并重新读取完整 Diff。
 当前进程读取过的 History、Pending Diff 和历史 Diff 会保留在内存中，重复切换页面
-无需再次解码缓存文件。四类内容共用最近使用淘汰策略，最多保留 24 项且序列化大小合计不超过
+无需再次解码缓存文件。文件缓存与原有四类内容共用最近使用淘汰策略，最多保留 24 项且序列化大小合计不超过
 16 MiB；超过预算的单项仍返回当前 Review，但不会长期驻留内存。项目快照或 Review 内容写入
 失败时在主窗口显示可关闭的缓存错误，后续保存成功后自动恢复。
 
+Diff 表格按文件保留已有内容行、双栏配对和代码宽度。变化文件重建自己的内容行，在一次批量
+更新中提交插入、删除和重载；其他文件的行控件、滚动位置和选区继续保留。Whole File、上下文
+展开和读取批次到达时采用同一更新方式；切换 Review 或分栏模式时重新建立全部行。
+Reviewed 标记和展开上下文的展示数据按内容版本复用，界面重复绘制时不再遍历相同的改动行；
+内容、状态或展开范围变化后重新计算，离开当前文件列表时清理对应数据。分批结果按预先建立的
+文件索引合并；读取、解析和首次标记计算明确在并发执行器上完成，发布结果前核对当前 Review。
+Whole File 和额外上下文的同一完整文件请求复用正在进行的读取，最后一个调用方
+取消后终止读取；缓存未命中时沿用已经核对的身份，计算完成后仍重新校验内容。
+
+批量 patch 分行解析，超过单文件行数上限后只继续计数，不保存后续行。超过 65536 个 Unicode
+标量的长行保留整行差异底色，跳过字符级细分。刷新时，改动文件的元数据同时用于增删统计缓存
+和最近活动时间，避免重复读取。缓存写入和删除按大小增量记账，超出预算或距离上次核对超过
+一分钟或发现外部目录变化时再读取目录，目录内容稳定时直接按索引清理。
+
 App 在后台每轮刷新完成后等待 10 分钟，再刷新全部项目；回到前台时取消后台定时任务及其刷新。
-回到前台及前台停留期间均不自动刷新，也不监听仓库文件事件。关闭主窗口后继续后台定时刷新。
+后台保留文件事件，回到前台后合并处理；前台持续监听文件、index、引用和 worktree 成员变化。
+监听范围扩大时补读新增范围，忽略 Git 不关注的文件写入，规则文件变化仍会刷新。
+Git 写操作和清理期间保留事件，操作结束后继续处理。监听不可用时提供错误提示并启用定时刷新。
+关闭主窗口后继续后台定时刷新。
 正常退出通过 macOS termination reply 等待 Review 状态与项目快照原子写入完成，再结束进程。
 状态扫描使用 `--no-ahead-behind` 和 `--ignore-submodules=dirty`；未跟踪目录按需展开，
 ahead/behind 单独读取。切换 worktree 立即使用可用快照，只有缺少完整状态时自动读取。
@@ -474,4 +516,4 @@ Desktop 会话索引解析出的 Desktop 会话打开。
 - 工作区 Diff 与命令行 Git 输出一致；
 - 单个失效路径或损坏仓库不会阻塞其它项目；
 - 空项目、大量 worktree 和大 Diff 都不会阻塞主线程；
-- `swift test` 与 `swift build` 通过。
+- `swift build` 通过。

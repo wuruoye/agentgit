@@ -7,6 +7,7 @@ enum ReviewIcon: String, CaseIterable {
     case display, split, unified, focus, history, refresh, previous, next, close
 
     private static var cache: [ReviewIcon: NSImage] = [:]
+    private static var actionImageCache: [ReviewIcon: NSImage] = [:]
     private static let resourceBundle: Bundle? = {
         if Bundle.main.bundleURL.pathExtension == "app" {
             return Bundle.main.resourceURL
@@ -28,6 +29,14 @@ enum ReviewIcon: String, CaseIterable {
         image.size = NSSize(width: 18, height: 18)
         image.isTemplate = true
         Self.cache[self] = image
+        return image
+    }
+
+    var actionImage: NSImage {
+        if let cached = Self.actionImageCache[self] { return cached }
+        let image = self.image.copy() as! NSImage
+        image.size = NSSize(width: 14, height: 14)
+        Self.actionImageCache[self] = image
         return image
     }
 

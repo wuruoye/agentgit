@@ -95,11 +95,14 @@ struct CommitGraphLayout: Equatable, Sendable {
                 insertionIndex += 1
             }
 
+            let bottomLaneIndexes = Dictionary(
+                uniqueKeysWithValues: bottomLanes.enumerated().map { ($0.element.targetOID, $0.offset) }
+            )
             var segments: [CommitGraphSegment] = []
             for (topIndex, lane) in topLanes.enumerated() where topIndex != nodeLane {
-                guard let bottomIndex = bottomLanes.firstIndex(where: {
-                    $0.targetOID == lane.targetOID
-                }) else {
+                guard let bottomIndex = bottomLaneIndexes[lane.targetOID],
+                      topIndex < CommitGraphMetrics.maximumRenderedLaneCount
+                        || bottomIndex < CommitGraphMetrics.maximumRenderedLaneCount else {
                     continue
                 }
                 segments.append(
@@ -112,7 +115,7 @@ struct CommitGraphLayout: Equatable, Sendable {
                     )
                 )
             }
-            if wasExpected || hasProcessedCommits {
+            if (wasExpected || hasProcessedCommits), nodeLane < CommitGraphMetrics.maximumRenderedLaneCount {
                 segments.append(
                     CommitGraphSegment(
                         startLane: nodeLane,
@@ -123,11 +126,16 @@ struct CommitGraphLayout: Equatable, Sendable {
                     )
                 )
             }
+            var hasHiddenParentSegment = false
             for parentOID in parents {
-                guard let parentLane = bottomLanes.firstIndex(where: {
-                    $0.targetOID == parentOID
-                }) else {
+                guard let parentLane = bottomLaneIndexes[parentOID],
+                      nodeLane < CommitGraphMetrics.maximumRenderedLaneCount
+                        || parentLane < CommitGraphMetrics.maximumRenderedLaneCount else {
                     continue
+                }
+                if parentLane >= CommitGraphMetrics.maximumRenderedLaneCount {
+                    guard !hasHiddenParentSegment else { continue }
+                    hasHiddenParentSegment = true
                 }
                 segments.append(
                     CommitGraphSegment(
@@ -170,10 +178,8 @@ struct CommitGraphLayout: Equatable, Sendable {
     }
 
     var renderedLaneCount: Int {
-        min(laneCount, Self.maximumRenderedLaneCount)
+        min(laneCount, CommitGraphMetrics.maximumRenderedLaneCount)
     }
-
-    private static let maximumRenderedLaneCount = 5
 }
 
 struct CommitGraphRow: Equatable, Sendable {
@@ -203,7 +209,7 @@ enum CommitGraphMetrics {
     /// Commit 行高。图谱 Canvas、Pending 标记和 Commit 行共用它，改一处三处一起变。
     static let rowHeight: CGFloat = 50
     static let horizontalPadding: CGFloat = 7
-    static let maximumNodeExtent: CGFloat = 6.5
+    static let maximumRenderedLaneCount = 5
 }
 
 func commitGraphLaneX(
@@ -211,8 +217,9 @@ func commitGraphLaneX(
     laneCount: Int,
     width: CGFloat
 ) -> CGFloat {
-    let count = max(1, min(laneCount, 5))
-    let displayedLane = min(max(0, lane), count - 1)
+    let count = max(1, min(laneCount, CommitGraphMetrics.maximumRenderedLaneCount))
+    // 隐藏端点放到可见列之外，由 Canvas 裁剪出入线，不占用最后一条可见列。
+    let displayedLane = min(max(0, lane), count)
     let horizontalPadding = min(
         CommitGraphMetrics.horizontalPadding,
         max(0, width / 2)
@@ -263,6 +270,7 @@ struct CommitGraphView: View {
                 )
             }
 
+            guard row.nodeLane < CommitGraphMetrics.maximumRenderedLaneCount else { return }
             let node = point(lane: row.nodeLane, position: .node, size: size)
             let radius: CGFloat = row.isMerge || row.hasReferences ? 4 : 3.5
             let nodeRect = CGRect(
@@ -304,6 +312,7 @@ struct CommitGraphView: View {
             }
         }
         .frame(width: width, height: CommitGraphMetrics.rowHeight)
+        .clipped()
         .accessibilityHidden(true)
     }
 

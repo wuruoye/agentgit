@@ -86,20 +86,18 @@ enum AgentGitPalette {
     )
 
     static let additionBackground = blended(
-        foreground: adaptive(
-            light: srgb(234, 247, 239),
-            dark: srgb(38, 59, 41)
-        ),
+        foreground: additionText,
         background: NSColor.textBackgroundColor,
-        fraction: 1
+        fraction: 0.10,
+        darkFraction: 0.16,
+        highContrastFraction: 0.22
     )
     static let deletionBackground = blended(
-        foreground: adaptive(
-            light: srgb(253, 237, 239),
-            dark: srgb(66, 40, 40)
-        ),
+        foreground: deletionText,
         background: NSColor.textBackgroundColor,
-        fraction: 1
+        fraction: 0.10,
+        darkFraction: 0.16,
+        highContrastFraction: 0.22
     )
     static let metadataBackground = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
@@ -107,32 +105,34 @@ enum AgentGitPalette {
         fraction: 0.24
     )
     static let additionInline = blended(
-        foreground: adaptive(
-            light: srgb(190, 229, 207),
-            dark: srgb(48, 82, 51)
-        ),
+        foreground: additionText,
         background: NSColor.textBackgroundColor,
-        fraction: 1
+        fraction: 0.28,
+        darkFraction: 0.30,
+        highContrastFraction: 0.40
     )
     static let deletionInline = blended(
-        foreground: adaptive(
-            light: srgb(245, 202, 211),
-            dark: srgb(91, 49, 49)
-        ),
+        foreground: deletionText,
         background: NSColor.textBackgroundColor,
-        fraction: 1
+        fraction: 0.28,
+        darkFraction: 0.30,
+        highContrastFraction: 0.40
     )
     static let additionText = adaptive(
         light: srgb(35, 132, 87),
-        dark: srgb(111, 208, 101)
+        dark: srgb(111, 208, 101),
+        highContrastLight: srgb(15, 91, 49),
+        highContrastDark: srgb(137, 234, 148)
     )
     static let deletionText = adaptive(
         light: srgb(192, 65, 78),
-        dark: srgb(255, 110, 110)
+        dark: srgb(255, 110, 110),
+        highContrastLight: srgb(157, 35, 47),
+        highContrastDark: srgb(255, 156, 160)
     )
 
-    static let statusAdded = readableStatusColor(NSColor.systemGreen)
-    static let statusDeleted = readableStatusColor(NSColor.systemRed)
+    static let statusAdded = additionText
+    static let statusDeleted = deletionText
     static let statusModified = readableStatusColor(NSColor.systemOrange)
     static let statusRenamed = readableStatusColor(NSColor.systemBlue)
     static let statusConflicted = readableStatusColor(NSColor.systemPurple)
@@ -204,11 +204,21 @@ enum AgentGitPalette {
         )
     }
 
-    private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {
+    private static let appearanceNames: [NSAppearance.Name] = [
+        .accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua, .darkAqua, .aqua
+    ]
+
+    private static func adaptive(
+        light: NSColor, dark: NSColor,
+        highContrastLight: NSColor? = nil, highContrastDark: NSColor? = nil
+    ) -> NSColor {
         NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? dark
-                : light
+            switch appearance.bestMatch(from: appearanceNames) {
+            case .accessibilityHighContrastDarkAqua: highContrastDark ?? dark
+            case .accessibilityHighContrastAqua: highContrastLight ?? light
+            case .darkAqua: dark
+            default: light
+            }
         }
     }
 
@@ -229,13 +239,25 @@ enum AgentGitPalette {
     private static func blended(
         foreground: NSColor,
         background: NSColor,
-        fraction: CGFloat
+        fraction: CGFloat,
+        darkFraction: CGFloat? = nil,
+        highContrastFraction: CGFloat? = nil
     ) -> NSColor {
         NSColor(name: nil) { appearance in
+            let name = appearance.bestMatch(from: appearanceNames)
+            let resolvedFraction: CGFloat
+            if name == .accessibilityHighContrastAqua || name == .accessibilityHighContrastDarkAqua,
+               let highContrastFraction {
+                resolvedFraction = highContrastFraction
+            } else if name == .darkAqua || name == .accessibilityHighContrastDarkAqua {
+                resolvedFraction = darkFraction ?? fraction
+            } else {
+                resolvedFraction = fraction
+            }
             var result = background
             appearance.performAsCurrentDrawingAppearance {
                 result = background.blended(
-                    withFraction: fraction,
+                    withFraction: resolvedFraction,
                     of: foreground
                 ) ?? background
             }
