@@ -14,6 +14,27 @@ case "${CONFIGURATION}" in
         ;;
 esac
 
+SIGNING_IDENTITY_FILE="${AGENTGIT_SIGNING_IDENTITY_FILE:-${HOME}/Library/Application Support/AgentGit/signing-identity}"
+SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:-}"
+if [[ -z "${SIGNING_IDENTITY}" && -r "${SIGNING_IDENTITY_FILE}" ]]; then
+    SIGNING_IDENTITY="$(/bin/cat "${SIGNING_IDENTITY_FILE}")"
+fi
+if [[ -z "${SIGNING_IDENTITY}" || "${SIGNING_IDENTITY}" == "-" ]]; then
+    echo "AgentGit requires a certificate signing identity. Save it to ${SIGNING_IDENTITY_FILE} or set AGENTGIT_SIGNING_IDENTITY." >&2
+    exit 1
+fi
+if ! /usr/bin/security find-identity -v -p codesigning | /usr/bin/awk -v identity="${SIGNING_IDENTITY}" '
+    $2 == identity { found = 1 }
+    {
+        split($0, fields, "\"")
+        if (fields[2] == identity) found = 1
+    }
+    END { exit !found }
+'; then
+    echo "Signing identity is unavailable in the Keychain: ${SIGNING_IDENTITY}" >&2
+    exit 1
+fi
+
 cd "${PROJECT_DIR}"
 swift build -c "${CONFIGURATION}"
 
@@ -33,8 +54,6 @@ install -m 755 "${BIN_DIR}/AgentGitApp" "${CONTENTS_DIR}/MacOS/AgentGitApp"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
 install -m 644 "${ICON_PATH}" "${RESOURCES_DIR}/AgentGit.icns"
 /usr/bin/ditto "${BIN_DIR}/AgentGit_AgentGitApp.bundle" "${RESOURCES_DIR}/AgentGit_AgentGitApp.bundle"
-# 默认使用不依赖证书的 ad-hoc 签名；本机固定证书可让 TCC 授权跨构建保留。
-SIGNING_IDENTITY="${AGENTGIT_SIGNING_IDENTITY:--}"
 sign_target() {
     local target="$1"
     if [[ "${CONFIGURATION}" == "release" ]]; then

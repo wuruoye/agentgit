@@ -20,6 +20,7 @@ struct AgentGitApp: App {
             ContentView()
                 .environment(model)
                 .font(.agentGitInterface(.body))
+                .tint(Color(nsColor: AgentGitPalette.activeControl))
                 .frame(
                     minWidth: AgentGitWindowMetrics.minimumWidth,
                     minHeight: AgentGitWindowMetrics.minimumHeight
@@ -74,6 +75,7 @@ struct AgentGitApp: App {
             AgentGitSettingsView()
                 .environment(model)
                 .font(.agentGitInterface(.body))
+                .tint(Color(nsColor: AgentGitPalette.activeControl))
         }
     }
 }

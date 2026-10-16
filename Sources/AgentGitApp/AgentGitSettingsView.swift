@@ -154,6 +154,7 @@ struct AgentGitSettingsView: View {
     @State private var selectedSection: AgentGitSettingsSection
     @State private var creatorHookInstalled: Bool?
     @State private var creatorHookError: String?
+    @State private var collapseRulesProjectID: GitProject.ID?
     let fixedContentHeight: CGFloat?
 
     init(
@@ -199,6 +200,9 @@ struct AgentGitSettingsView: View {
             height: fixedContentHeight ?? selectedSection.preferredContentHeight
         )
         .background(Color(nsColor: AgentGitPalette.canvas))
+        .onAppear {
+            collapseRulesProjectID = model.projectID(for: model.selectedWorktreeID)
+        }
     }
 
     private var settingsSidebar: some View {
@@ -341,6 +345,10 @@ struct AgentGitSettingsView: View {
             }
 
             AgentGitSettingsCard {
+                commitCollapseRulesSettings
+            }
+
+            AgentGitSettingsCard {
                 VStack(alignment: .leading, spacing: 14) {
                     settingsCardHeading(
                         "Live Preview",
@@ -349,6 +357,67 @@ struct AgentGitSettingsView: View {
                     )
                     ReviewSettingsPreview(layout: model.diffLayout)
                 }
+            }
+        }
+    }
+
+    private var collapseRulesProject: ProjectState? {
+        let projectID = collapseRulesProjectID ?? model.projectID(for: model.selectedWorktreeID)
+        return model.projects.first { $0.id == projectID } ?? model.projects.first
+    }
+
+    private var commitCollapseRulesSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsCardHeading(
+                "Collapsed Files in Commits",
+                detail: "Rules are saved separately for each repository and shared by its worktrees. Matching files start collapsed when you open a commit or commit range. You can expand them manually.",
+                image: "chevron.right.square"
+            )
+            if let project = collapseRulesProject {
+                Picker("Repository", selection: Binding(
+                    get: { project.id },
+                    set: { collapseRulesProjectID = $0 }
+                )) {
+                    ForEach(model.projects) { state in
+                        Text("\(state.project.displayName) · \(state.project.rootURL.deletingLastPathComponent().path)")
+                            .tag(state.id)
+                    }
+                }
+                .font(.agentGitInterface(size: 12))
+
+                Text(verbatim: project.project.rootURL.path)
+                    .font(.agentGitInterface(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                TextEditor(text: Binding(
+                    get: { model.commitFileCollapseSettings.text(for: project.id) },
+                    set: { model.commitFileCollapseSettings.setText($0, for: project.id) }
+                ))
+                .font(.agentGitInterface(size: 11.5, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(height: 108)
+                .background(Color(nsColor: AgentGitPalette.canvas))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 1)
+                }
+                .id(project.id)
+                .accessibilityLabel("Commit file collapse rules")
+
+                Text(verbatim: "One rule per line. Use * for any characters in a name, ? for one character, and ** across directories. Rules with / match paths from the repository root; other rules match filenames anywhere. Matching is case-sensitive. Blank lines and # comments are ignored. Changes are saved automatically.")
+                    .font(.agentGitInterface(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(verbatim: "Examples: *.lock · *.pb.swift · **/generated/**")
+                    .font(.agentGitInterface(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Add a Git project to configure its commit file rules.")
+                    .font(.agentGitInterface(size: 11.5))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -367,8 +436,13 @@ struct AgentGitSettingsView: View {
                         Toggle("Automatically remove inactive worktrees", isOn: $model.cleanupSettings.isEnabled)
                             .toggleStyle(.switch)
                         Spacer(minLength: 8)
-                        Button(model.isCleaningWorktrees ? "Cleaning…" : "Clean Up Now") {
+                        Button {
                             Task { await model.runWorktreeCleanupNow() }
+                        } label: {
+                            StableButtonTitle(
+                                title: model.isCleaningWorktrees ? "Cleaning…" : "Clean Up Now",
+                                alternatives: ["Cleaning…", "Clean Up Now"]
+                            )
                         }
                         .disabled(model.isCleaningWorktrees || model.projects.isEmpty)
                         .help("Check and remove eligible worktrees now, using the current inactivity and exclusion settings.")
@@ -431,6 +505,21 @@ struct AgentGitSettingsView: View {
             }
             AgentGitSettingsCard {
                 VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Button("Show Logs in Finder") {
+                            Task {
+                                await AgentGitDiagnostics.shared.flush()
+                                revealInFinder(AgentGitDiagnostics.shared.directoryURL)
+                            }
+                        }
+                        Button("Copy Cleanup Details") {
+                            if let report = model.cleanupReport {
+                                copyToPasteboard(report.diagnosticText)
+                            }
+                        }
+                        .disabled(model.isCleaningWorktrees)
+                        .workspaceControlSlot(isVisible: model.cleanupReport != nil)
+                    }
                     if model.isCleaningWorktrees {
                         HStack {
                             ProgressView().controlSize(.small)
@@ -460,18 +549,9 @@ struct AgentGitSettingsView: View {
                                 }
                             }
                         }
-                        Button("Copy Cleanup Details") {
-                            copyToPasteboard(report.diagnosticText)
-                        }
                     } else {
                         Text(model.cleanupSettings.isEnabled ? "Waiting for the first check." : "Automatic cleanup is off.")
                             .foregroundStyle(.secondary)
-                    }
-                    Button("Show Logs in Finder") {
-                        Task {
-                            await AgentGitDiagnostics.shared.flush()
-                            revealInFinder(AgentGitDiagnostics.shared.directoryURL)
-                        }
                     }
                 }
                 .font(.agentGitInterface(size: 11.5))
@@ -506,8 +586,8 @@ struct AgentGitSettingsView: View {
                 .font(.agentGitInterface(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 Spacer()
-                if let installed = creatorHookInstalled {
-                    Button(installed ? "Remove Hook" : "Install Hook") {
+                Button {
+                    if let installed = creatorHookInstalled {
                         Task {
                             do {
                                 try await installed
@@ -520,7 +600,13 @@ struct AgentGitSettingsView: View {
                             creatorHookInstalled = await WorktreeCreatorHook.isInstalled()
                         }
                     }
+                } label: {
+                    StableButtonTitle(
+                        title: creatorHookInstalled == true ? "Remove Hook" : "Install Hook",
+                        alternatives: ["Remove Hook", "Install Hook"]
+                    )
                 }
+                .workspaceControlSlot(isVisible: creatorHookInstalled != nil)
             }
 
             if let creatorHookError {

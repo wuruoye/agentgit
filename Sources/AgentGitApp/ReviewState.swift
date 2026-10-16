@@ -41,7 +41,7 @@ enum DiffLayoutMode: String, Hashable, CaseIterable, Identifiable {
 struct ReviewState: Equatable {
     var collapsedFileIDs: Set<String> = []
     var knownFileIDs: Set<String> = []
-    var expandedNavigatorFolderIDs: Set<String> = []
+    var collapsedNavigatorFolderIDs: Set<String> = []
     var focusedFileID: String?
     var filterText = ""
     var reviewedSnapshotByFileID: [String: DiffReviewSnapshotID] = [:]
@@ -453,12 +453,14 @@ func invalidateReviewedSnapshots(
 
 /// 首次见到的文件默认折叠；这次 Review 的文件总数不超过 `automaticExpansionLimit` 时改为默认
 /// 展开，常见规模的改动一打开就能直接读 diff，不用再逐个点开。用户自己折叠或展开的结果记在
-/// `knownFileIDs` 里，不受这个默认值影响。
+/// `knownFileIDs` 里。打开提交或修改规则时，`defaultCollapsedFileIDs` 中的文件会收起，
+/// 同步结束后仍可手动展开。
 @discardableResult
 func synchronizeReviewFileExpansion(
     in state: inout ReviewState,
     fileIDs: Set<String>,
-    automaticExpansionLimit: Int = 0
+    automaticExpansionLimit: Int = 0,
+    defaultCollapsedFileIDs: Set<String> = []
 ) -> Bool {
     let previousCollapsed = state.collapsedFileIDs
     let previousKnown = state.knownFileIDs
@@ -468,6 +470,7 @@ func synchronizeReviewFileExpansion(
     } else {
         state.collapsedFileIDs.formUnion(newFileIDs)
     }
+    state.collapsedFileIDs.formUnion(defaultCollapsedFileIDs)
     state.collapsedFileIDs.formIntersection(fileIDs)
     state.knownFileIDs = fileIDs
     return state.collapsedFileIDs != previousCollapsed
@@ -517,9 +520,10 @@ func synchronizeNavigatorFolderExpansion(
     in state: inout ReviewState,
     validFolderIDs: Set<String>
 ) -> Bool {
-    let previous = state.expandedNavigatorFolderIDs
-    state.expandedNavigatorFolderIDs.formIntersection(validFolderIDs)
-    return state.expandedNavigatorFolderIDs != previous
+    guard !validFolderIDs.isEmpty else { return false }
+    let previous = state.collapsedNavigatorFolderIDs
+    state.collapsedNavigatorFolderIDs.formIntersection(validFolderIDs)
+    return state.collapsedNavigatorFolderIDs != previous
 }
 
 /// 刻意不做 @Observable：滚动位置每帧都在变，进入观察体系会把整个工作区拖进重绘。
@@ -762,7 +766,7 @@ private struct PersistedReviewStateEntry: Codable {
 private struct PersistedReviewState: Codable {
     let collapsedFileIDs: Set<String>
     let knownFileIDs: Set<String>
-    let expandedNavigatorFolderIDs: Set<String>
+    let collapsedNavigatorFolderIDs: Set<String>
     let focusedFileID: String?
     let reviewedSnapshotByFileID: [String: DiffReviewSnapshotID]
     let wholeFileIDs: Set<String>
@@ -771,7 +775,7 @@ private struct PersistedReviewState: Codable {
     init(_ state: ReviewState) {
         collapsedFileIDs = state.collapsedFileIDs
         knownFileIDs = state.knownFileIDs
-        expandedNavigatorFolderIDs = state.expandedNavigatorFolderIDs
+        collapsedNavigatorFolderIDs = state.collapsedNavigatorFolderIDs
         focusedFileID = state.focusedFileID
         reviewedSnapshotByFileID = state.reviewedSnapshotByFileID
         wholeFileIDs = state.wholeFileIDs
@@ -782,7 +786,7 @@ private struct PersistedReviewState: Codable {
         ReviewState(
             collapsedFileIDs: collapsedFileIDs,
             knownFileIDs: knownFileIDs,
-            expandedNavigatorFolderIDs: expandedNavigatorFolderIDs,
+            collapsedNavigatorFolderIDs: collapsedNavigatorFolderIDs,
             focusedFileID: focusedFileID,
             filterText: "",
             reviewedSnapshotByFileID: reviewedSnapshotByFileID,
@@ -794,7 +798,7 @@ private struct PersistedReviewState: Codable {
     private enum CodingKeys: String, CodingKey {
         case collapsedFileIDs
         case knownFileIDs
-        case expandedNavigatorFolderIDs
+        case collapsedNavigatorFolderIDs
         case focusedFileID
         case reviewedSnapshotByFileID
         case wholeFileIDs
@@ -811,9 +815,9 @@ private struct PersistedReviewState: Codable {
             Set<String>.self,
             forKey: .knownFileIDs
         ) ?? []
-        expandedNavigatorFolderIDs = try container.decodeIfPresent(
+        collapsedNavigatorFolderIDs = try container.decodeIfPresent(
             Set<String>.self,
-            forKey: .expandedNavigatorFolderIDs
+            forKey: .collapsedNavigatorFolderIDs
         ) ?? []
         focusedFileID = try container.decodeIfPresent(
             String.self,

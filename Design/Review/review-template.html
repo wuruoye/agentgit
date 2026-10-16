@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentGit Review 原生样板</title>
+<style>
+*{box-sizing:border-box}body{margin:0;color:#41403d;background:#faf9f7;font:14px -apple-system,BlinkMacSystemFont,sans-serif}header{padding:24px 28px 16px}h1{font-size:20px;font-weight:500;margin:0 0 8px}p{color:#76746e;margin:0;line-height:1.6}nav{position:sticky;top:0;z-index:5;padding:12px 28px;background:#faf9f7f5;display:flex;gap:8px;border-bottom:1px solid #e7e5e0;align-items:center;flex-wrap:wrap}button{font:inherit;border:0;border-radius:6px;background:transparent;color:inherit;padding:8px 12px;cursor:pointer}button:hover{background:#f1f0ec}button[aria-pressed=true]{background:#edebe7}input{accent-color:#76746e}main{padding:24px 28px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}figure{margin:0;min-width:0}figcaption{margin-bottom:10px;color:#76746e}.viewport{overflow:auto;background:#fff;border:1px solid #e7e5e0;border-radius:7px}img{display:block;width:100%;height:auto}.actual img{width:auto;max-width:none}.actual .viewport{max-height:78vh}.overlay{position:relative;overflow:hidden;background:#fff}.overlay img:last-child{position:absolute;inset:0;opacity:.5}.solo{max-width:1250px;margin:auto}.solo figcaption{margin-top:0}.solo img{width:100%}.hidden{display:none!important}footer{padding:0 28px 24px;color:#76746e;font-size:12px}label{margin-left:auto;display:flex;gap:8px;align-items:center}a{color:inherit}
+.actual .overlay{width:4292px}
+</style>
+<header><h1>Review 原生样板</h1><p>同一提交、3 个文件、4 个 hunk，均以 110% 缩放和 2× Retina 渲染。对照区域均为 4292 × 2652 像素。</p></header>
+<nav>
+<button data-mode="pair" aria-pressed="true">并排对照</button><button data-mode="overlay" aria-pressed="false">叠图检查</button><button data-mode="states" aria-pressed="false">组件状态</button><button data-mode="narrow" aria-pressed="false">窄窗口样板</button>
+<button id="pixels" aria-pressed="false">原始像素</button><label id="opacity-label" class="hidden">样板透明度 <input id="opacity" type="range" min="0" max="100" value="50"></label>
+</nav>
+<main>
+<section id="pair" class="pair"><figure><figcaption>当前实际界面</figcaption><div class="viewport"><img data-image="current" alt="当前实际审阅界面"></div></figure><figure><figcaption>原生样板</figcaption><div class="viewport"><img data-image="proposal" alt="原生审阅样板"></div></figure></section>
+<section id="overlay" class="hidden"><div class="viewport"><div class="overlay"><img data-image="current" alt="当前实际界面"><img data-image="proposal" id="overlay-proposal" alt="叠加的原生样板"></div></div></section>
+<section id="states" class="solo hidden"><figure><figcaption>普通、悬停、选中、禁用 · 静态原生状态样板</figcaption><div class="viewport"><img data-image="states" alt="原生组件状态"></div></figure></section>
+<section id="narrow" class="solo hidden"><figure><figcaption>1160 × 820 逻辑点视口，110% 缩放 · 按钮收为图标，代码在列内裁剪</figcaption><div class="viewport"><img data-image="proposal-narrow" alt="窄窗口原生样板"></div></figure></section>
+</main>
+<footer>样板用于确认原生字体、几何与颜色。按钮状态为静态演示，Git 操作和完整交互在接入主应用时验证。</footer>
+<script>
+const images={{IMAGES}};document.querySelectorAll('[data-image]').forEach(img=>img.src='data:image/png;base64,'+images[img.dataset.image]);
+let mode='pair';document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>{mode=button.dataset.mode;document.querySelectorAll('main>section').forEach(section=>section.classList.toggle('hidden',section.id!==mode));document.querySelectorAll('[data-mode]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));document.getElementById('opacity-label').classList.toggle('hidden',mode!=='overlay');});
+document.getElementById('opacity').oninput=event=>document.getElementById('overlay-proposal').style.opacity=event.target.value/100;
+document.getElementById('pixels').onclick=event=>{const enabled=document.body.classList.toggle('actual');event.target.setAttribute('aria-pressed',String(enabled));};
+const viewports=document.querySelectorAll('#pair .viewport');let syncing=false;viewports.forEach((viewport,index)=>viewport.onscroll=()=>{if(syncing)return;syncing=true;viewports[1-index].scrollTop=viewport.scrollTop;viewports[1-index].scrollLeft=viewport.scrollLeft;requestAnimationFrame(()=>syncing=false);});
+</script>
+</html>

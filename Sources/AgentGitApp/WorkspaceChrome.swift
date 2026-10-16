@@ -3,6 +3,95 @@ import AgentGitIntegrationShared
 import AppKit
 import SwiftUI
 
+struct WorkspacePanelStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(Color(nsColor: AgentGitPalette.card))
+            .clipShape(RoundedRectangle(cornerRadius: AgentGitPalette.cardCornerRadius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: AgentGitPalette.cardCornerRadius, style: .continuous)
+                    .strokeBorder(Color(nsColor: AgentGitPalette.cardBorder), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+struct WorkspaceSearchFieldStyle: ViewModifier {
+    var isFocused = false
+    var isQuiet = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 10)
+            .frame(minHeight: 32)
+            .background(isQuiet ? Color.clear : Color(nsColor: AgentGitPalette.inputBackground), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(
+                        isFocused ? Color(nsColor: AgentGitPalette.focusIndicator) : isQuiet ? .clear : Color(nsColor: AgentGitPalette.cardBorder),
+                        lineWidth: isFocused ? 1 : 0.5
+                    )
+                    .allowsHitTesting(false)
+            }
+            .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: isFocused)
+    }
+}
+
+struct WorkspaceSelectionBackground: View {
+    var isSelected: Bool
+    var isHovered = false
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(nsColor: ReviewWorkspaceStyle.selection))
+                .opacity(isSelected ? 1 : 0)
+            InteractionBackground(color: ReviewWorkspaceStyle.hover, isVisible: isHovered && !isSelected)
+        }
+            .padding(.horizontal, 4)
+            .background(WorkspaceListSelectionStyle())
+            .accessibilityHidden(true)
+            .animation(nil, value: isSelected)
+    }
+}
+
+private struct WorkspaceListSelectionStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> WorkspaceListSelectionView {
+        WorkspaceListSelectionView()
+    }
+
+    func updateNSView(_ view: WorkspaceListSelectionView, context: Context) {
+        view.applySelectionStyle()
+    }
+}
+
+private final class WorkspaceListSelectionView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        applySelectionStyle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applySelectionStyle()
+    }
+
+    func applySelectionStyle() {
+        var ancestor = superview
+        while let view = ancestor {
+            if let table = view as? NSTableView {
+                // 选中背景由 WorkspaceSelectionBackground 绘制，避免系统鼠标高亮另铺一层蓝色。
+                table.selectionHighlightStyle = .none
+                return
+            }
+            ancestor = view.superview
+        }
+    }
+}
+
 struct WorkspaceIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         ReviewToolbarButtonStyle(iconOnly: true).makeBody(configuration: configuration)
@@ -33,22 +122,22 @@ struct WorktreeOverview: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("Worktrees").font(.agentGitInterface(size: 22, weight: .semibold))
-                Text(allWorktrees.count.formatted())
-                    .font(.agentGitInterface(size: 14, weight: .medium).monospacedDigit())
-                    .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Worktrees")
+                        .font(.agentGitInterface(size: 24, weight: .semibold))
+                    Text("\(model.projects.count) projects · \(allWorktrees.count) worktrees · \(allWorktrees.count { $0.status.changedFileCount > 0 }) with changes")
+                        .font(.agentGitInterface(size: 12))
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                }
                 Spacer()
-                Text("\(model.projects.count) projects · \(allWorktrees.count { $0.status.changedFileCount > 0 }) with changes")
-                    .font(.agentGitInterface(size: 11))
-                    .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                 Button(action: model.chooseProject) {
                     Label("Add Project", systemImage: "plus")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(ReviewToolbarButtonStyle(kind: .primary))
             }
-            .padding(.horizontal, 22)
-            .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.horizontal, 26)
+            .padding(.top, 28)
+            .padding(.bottom, 22)
 
             HStack(spacing: 12) {
                 HStack(spacing: 8) {
@@ -56,115 +145,117 @@ struct WorktreeOverview: View {
                     TextField("Find a project or branch…", text: $query)
                         .textFieldStyle(.plain)
                         .focused($isSearchFocused)
-                    if !query.isEmpty {
-                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel("Clear Overview Filter")
-                    }
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Clear Overview Filter")
+                        .workspaceControlSlot(isVisible: !query.isEmpty)
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .background(Color(nsColor: AgentGitPalette.inputBackground), in: RoundedRectangle(cornerRadius: 6))
+                .modifier(WorkspaceSearchFieldStyle(isFocused: isSearchFocused))
                 .frame(maxWidth: 360)
                 Spacer(minLength: 0)
                 Toggle("Needs attention", isOn: $attentionOnly)
                     .toggleStyle(.button)
+                    .buttonStyle(ReviewToolbarButtonStyle(kind: attentionOnly ? .selected : .normal))
                     .controlSize(.regular)
             }
             .font(.agentGitInterface(size: 12))
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 26)
             .padding(.bottom, 16)
 
-            HStack(spacing: 16) {
-                Text("BRANCH / WORKTREE").frame(maxWidth: .infinity, alignment: .leading)
-                Text("FILES").frame(width: 48, alignment: .trailing)
-                Text("DIFF").frame(width: 108, alignment: .trailing)
-                Text("SYNC").frame(width: 130, alignment: .leading)
-                Text("ACTIVITY").frame(width: 64, alignment: .trailing)
-            }
-            .font(.agentGitInterface(size: 10, weight: .semibold))
-            .tracking(0.5)
-            .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
-            .padding(.horizontal, 22)
-            .frame(height: 32)
-            .background(Color(nsColor: AgentGitPalette.canvas))
-
-            ScrollView {
-                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    ForEach(projects) { project in
-                        // 重名按整个项目判断，筛选后也保持同样的显示。
-                        let locationLabels = worktreeLocationLabels(
-                            (model.projects.first { $0.id == project.id }?.snapshot?.worktrees
-                                ?? project.worktrees).map(\.worktree)
-                        )
-                        Section {
-                            ForEach(project.worktrees) { snapshot in
-                                let creator = creatorAssociation(for: snapshot)
-                                OverviewWorktreeRow(
-                                    snapshot: snapshot,
-                                    locationLabel: locationLabels[snapshot.id],
-                                    creator: creator.map {
-                                        OverviewWorktreeCreator(
-                                            association: $0,
-                                            title: model.agentAssociations.displayTitle(for: $0),
-                                            availability: model.agentAssociations.navigationAvailability(for: $0)
-                                        )
-                                    },
-                                    isPinned: model.isWorktreePinned(id: snapshot.id),
-                                    isSelected: model.selectedWorktreeID == snapshot.id,
-                                    open: { select(snapshot.id) }
-                                )
-                                .contextMenu {
-                                    Button("Open Worktree") { select(snapshot.id) }
-                                    if let creator {
-                                        Button("Open Creator Session") {
-                                            model.agentAssociations.open(creator)
-                                        }
-                                    }
-                                    Button(model.isWorktreePinned(id: snapshot.id) ? "Unpin from Top" : "Pin to Top") {
-                                        model.toggleWorktreePinned(id: snapshot.id)
-                                    }
-                                    Divider()
-                                    Button("Open in Terminal") { openInTerminal(snapshot.worktree.rootURL) }
-                                    Button("Reveal in Finder") { revealInFinder(snapshot.worktree.rootURL) }
-                                    Button("Copy Path") { copyToPasteboard(snapshot.worktree.rootURL.path) }
-                                }
-                            }
-                        } header: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "folder.fill").foregroundStyle(Color.accentColor)
-                                Text(project.project.displayName).fontWeight(.semibold)
-                                Text(project.worktrees.count.formatted()).foregroundStyle(.secondary)
-                                Spacer()
-                                Text((project.project.rootURL.path as NSString).abbreviatingWithTildeInPath)
-                                    .font(.agentGitInterface(size: 11))
-                                    .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .font(.agentGitInterface(size: 12))
-                            .padding(.horizontal, 22)
-                            .frame(height: 36)
-                            .background(Color(nsColor: AgentGitPalette.canvas))
-                        }
-                    }
-                    if projects.isEmpty {
-                        ContentUnavailableView {
-                            Label("No Matching Worktrees", systemImage: "magnifyingglass")
-                        } description: {
-                            Text("Try another branch name or clear the filters.")
-                        } actions: {
-                            Button("Clear Filters") { query = ""; attentionOnly = false }
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
+            VStack(spacing: 0) {
+                HStack(spacing: 16) {
+                    Text("Branch / Worktree").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Files").frame(width: 48, alignment: .trailing)
+                    Text("Changes").frame(width: 108, alignment: .trailing)
+                    Text("Sync").frame(width: 130, alignment: .leading)
+                    Text("Activity").frame(width: 64, alignment: .trailing)
                 }
-                .padding(.bottom, 16)
+                .font(.agentGitInterface(size: 11, weight: .medium))
+                .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                .padding(.horizontal, 22)
+                .frame(height: 36)
+                .background(Color(nsColor: AgentGitPalette.inputBackground))
+
+                ScrollView {
+                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        ForEach(projects) { project in
+                            // 重名按整个项目判断，筛选后也保持同样的显示。
+                            let locationLabels = worktreeLocationLabels(
+                                (model.projects.first { $0.id == project.id }?.snapshot?.worktrees
+                                    ?? project.worktrees).map(\.worktree)
+                            )
+                            Section {
+                                ForEach(project.worktrees) { snapshot in
+                                    let creator = creatorAssociation(for: snapshot)
+                                    OverviewWorktreeRow(
+                                        snapshot: snapshot,
+                                        locationLabel: locationLabels[snapshot.id],
+                                        creator: creator.map {
+                                            OverviewWorktreeCreator(
+                                                association: $0,
+                                                title: model.agentAssociations.displayTitle(for: $0),
+                                                availability: model.agentAssociations.navigationAvailability(for: $0)
+                                            )
+                                        },
+                                        isPinned: model.isWorktreePinned(id: snapshot.id),
+                                        isSelected: model.selectedWorktreeID == snapshot.id,
+                                        open: { select(snapshot.id) }
+                                    )
+                                    .contextMenu {
+                                        Button("Open Worktree") { select(snapshot.id) }
+                                        if let creator {
+                                            Button("Open Creator Session") {
+                                                model.agentAssociations.open(creator)
+                                            }
+                                        }
+                                        Button(model.isWorktreePinned(id: snapshot.id) ? "Unpin from Top" : "Pin to Top") {
+                                            model.toggleWorktreePinned(id: snapshot.id)
+                                        }
+                                        Divider()
+                                        Button("Open in Terminal") { openInTerminal(snapshot.worktree.rootURL) }
+                                        Button("Reveal in Finder") { revealInFinder(snapshot.worktree.rootURL) }
+                                        Button("Copy Path") { copyToPasteboard(snapshot.worktree.rootURL.path) }
+                                    }
+                                }
+                            } header: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder").foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                                    Text(project.project.displayName).fontWeight(.semibold)
+                                    Text(project.worktrees.count.formatted()).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text((project.project.rootURL.path as NSString).abbreviatingWithTildeInPath)
+                                        .font(.agentGitInterface(size: 11))
+                                        .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                .font(.agentGitInterface(size: 12))
+                                .padding(.horizontal, 22)
+                                .frame(height: 40)
+                                .background(Color(nsColor: AgentGitPalette.card))
+                            }
+                        }
+                        if projects.isEmpty {
+                            ContentUnavailableView {
+                                Label("No Matching Worktrees", systemImage: "magnifyingglass")
+                            } description: {
+                                Text("Try another branch name or clear the filters.")
+                            } actions: {
+                                Button("Clear Filters") { query = ""; attentionOnly = false }
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .padding(.bottom, 16)
+                }
+                .background(Color(nsColor: AgentGitPalette.card))
             }
-            .background(Color(nsColor: AgentGitPalette.card))
+            .modifier(WorkspacePanelStyle())
+            .padding(.horizontal, 22)
+            .padding(.bottom, 20)
         }
-        .background(Color(nsColor: AgentGitPalette.card))
+        .background(Color(nsColor: AgentGitPalette.canvas))
         .focusedSceneValue(\.workspaceSearchAction, { isSearchFocused = true })
     }
 
@@ -213,7 +304,7 @@ struct OverviewWorktreeRow: View {
             HStack(spacing: 16) {
                 HStack(spacing: 10) {
                     Image(systemName: "arrow.triangle.branch")
-                        .foregroundStyle(isSelected ? Color.accentColor : Color(nsColor: AgentGitPalette.sidebarMetadata))
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.sidebarMetadata))
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(snapshot.worktree.displayName)
@@ -266,8 +357,17 @@ struct OverviewWorktreeRow: View {
                     .frame(width: 64, alignment: .trailing)
             }
             .padding(.horizontal, 22)
-            .frame(height: 54)
-            .background(isHovered ? Color(nsColor: AgentGitPalette.sidebarHover) : isSelected ? Color.accentColor.opacity(0.05) : .clear)
+            .frame(height: 58)
+            .background {
+                InteractionBackground(
+                    color: isSelected ? AgentGitPalette.sidebarSelection : AgentGitPalette.sidebarHover,
+                    isVisible: isSelected || isHovered,
+                    cornerRadius: 8
+                )
+                    .animation(nil, value: isSelected)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

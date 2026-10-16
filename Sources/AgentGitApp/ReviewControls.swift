@@ -1,14 +1,51 @@
 import AppKit
 import SwiftUI
 
+enum ReviewWorkspaceStyle {
+    static let commitTitleSize: CGFloat = 14
+    static let metadataSize: CGFloat = 11.5
+    static let titleSize: CGFloat = 15.5
+    static let fileTitleSize: CGFloat = 13.5
+    static let commitRowHeight: CGFloat = 56
+    static let toolbarHeight: CGFloat = 56
+    static let fileHeaderHeight: CGFloat = 52
+    static let hunkHeaderHeight: CGFloat = 24
+    static let primary = SidebarStyle.primary
+    static let secondary = SidebarStyle.secondary
+    static let selection = SidebarStyle.selection
+    static let hover = SidebarStyle.hover
+
+    static func font(_ size: CGFloat) -> Font {
+        .agentGitInterface(size: size, weight: .light)
+    }
+
+    static func nativeFont(_ size: CGFloat) -> NSFont {
+        AgentGitTypography.interface(ofSize: size, weight: .light)
+    }
+}
+
+enum WorkspaceMotion {
+    static let hoverDuration: Double = 0.12
+    static let pressDuration: Double = 0.08
+    static let layoutDuration: Double = 0.20
+
+    static func hover(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .easeOut(duration: hoverDuration)
+    }
+
+    static func layout(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .easeInOut(duration: layoutDuration)
+    }
+}
+
 enum ReviewControlMetrics {
-    static let height: CGFloat = 26
-    static let iconSize: CGFloat = 14
+    static let height: CGFloat = 28
+    static let iconSize: CGFloat = 15
     static let horizontalPadding: CGFloat = 8
     static let iconTextSpacing: CGFloat = 6
     static let spacing: CGFloat = 6
     static let trailingInset: CGFloat = 12
-    static let cornerRadius: CGFloat = 5
+    static let cornerRadius: CGFloat = 7
 }
 
 @MainActor
@@ -87,7 +124,60 @@ struct ReviewIconView: View {
     }
 }
 
-enum ReviewControlKind { case normal, selected, primary }
+extension View {
+    /// 控件暂时不可见时保留原有布局，同时移除点击、键盘和无障碍入口。
+    func workspaceControlSlot(isVisible: Bool) -> some View {
+        opacity(isVisible ? 1 : 0)
+            .disabled(!isVisible)
+            .allowsHitTesting(isVisible)
+            .accessibilityHidden(!isVisible)
+    }
+}
+
+struct StableButtonTitle: View {
+    let title: String
+    let alternatives: [String]
+
+    var body: some View {
+        ZStack {
+            ForEach(alternatives, id: \.self) { alternative in
+                Text(alternative).hidden().accessibilityHidden(true)
+            }
+            Text(title)
+        }
+        .lineLimit(1)
+        .fixedSize()
+    }
+}
+
+enum ReviewControlKind: Equatable { case normal, selected, primary, bordered, destructive }
+
+struct InteractionBackground: View {
+    let color: NSColor
+    let isVisible: Bool
+    var cornerRadius: CGFloat = 7
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Color(nsColor: color))
+            .opacity(isVisible ? 1 : 0)
+            .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: isVisible)
+            .allowsHitTesting(false)
+    }
+}
+
+struct WorkspaceActionLabelStyle: LabelStyle {
+    var iconOnly = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: ReviewControlMetrics.iconTextSpacing) {
+            configuration.icon
+                .frame(width: ReviewControlMetrics.iconSize, height: ReviewControlMetrics.iconSize)
+            if !iconOnly { configuration.title.fixedSize() }
+        }
+    }
+}
 
 private struct ReviewControlLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -116,28 +206,88 @@ private struct ReviewControlBody: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
-    private var fill: Color {
-        if kind == .primary { return .accentColor }
-        if kind == .selected { return .accentColor.opacity(configuration.isPressed ? 0.2 : 0.11) }
-        return Color(nsColor: configuration.isPressed ? AgentGitPalette.inputBackground : isHovered ? AgentGitPalette.reviewHover : .clear)
+    private var fill: NSColor {
+        if kind == .primary {
+            return !isEnabled ? AgentGitPalette.activeControl
+                : configuration.isPressed ? AgentGitPalette.primaryControlPressed
+                : isHovered ? AgentGitPalette.primaryControlHover : AgentGitPalette.activeControl
+        }
+        if kind == .selected {
+            return isEnabled && configuration.isPressed ? AgentGitPalette.controlPressed : AgentGitPalette.sidebarSelection
+        }
+        if kind == .destructive {
+            return AgentGitPalette.reviewActionConfirmationBackground
+        }
+        return configuration.isPressed ? AgentGitPalette.controlPressed : AgentGitPalette.controlHover
+    }
+
+    private var showsBackground: Bool {
+        kind == .primary || kind == .selected
+            || (isEnabled && (isHovered || configuration.isPressed))
+    }
+
+    private var foreground: Color {
+        if kind == .primary { return Color(nsColor: AgentGitPalette.primaryControlText) }
+        if kind == .destructive && (isHovered || configuration.isPressed) { return Color(nsColor: AgentGitPalette.reviewActionConfirmationText) }
+        return Color(nsColor: kind == .selected || isHovered ? AgentGitPalette.activeControl : AgentGitPalette.controlText)
     }
 
     var body: some View {
         configuration.label
             .labelStyle(ReviewControlLabelStyle())
-            .font(.agentGitInterface(size: 11.5, weight: .medium))
-            .foregroundStyle(kind == .primary ? Color.white : kind == .selected ? Color.accentColor : Color.primary)
+            .font(.agentGitInterface(size: 12, weight: .medium))
+            .foregroundStyle(foreground)
             .padding(.horizontal, iconOnly ? 6 : ReviewControlMetrics.horizontalPadding)
             .frame(minWidth: ReviewControlMetrics.height, minHeight: ReviewControlMetrics.height)
-            .background(fill, in: RoundedRectangle(cornerRadius: ReviewControlMetrics.cornerRadius, style: .continuous))
+            .background {
+                InteractionBackground(color: fill, isVisible: showsBackground, cornerRadius: ReviewControlMetrics.cornerRadius)
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: ReviewControlMetrics.cornerRadius, style: .continuous)
-                    .stroke(kind == .normal && isHovered ? Color(nsColor: AgentGitPalette.reviewControlBorder) : Color.clear, lineWidth: 0.5)
+                    .strokeBorder(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 0.75)
+                    .opacity(kind == .bordered ? 1 : 0)
+                    .allowsHitTesting(false)
             }
-            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
+            .opacity(isEnabled ? 1 : 0.45)
             .contentShape(RoundedRectangle(cornerRadius: ReviewControlMetrics.cornerRadius))
             .onHover { isHovered = $0 }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: isHovered)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
+            .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: isHovered)
+            .animation(reduceMotion ? nil : .easeOut(duration: WorkspaceMotion.pressDuration), value: configuration.isPressed)
+            .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: kind)
+    }
+}
+
+struct WorkspaceRowButtonStyle: ButtonStyle {
+    var isSelected = false
+    var cornerRadius: CGFloat = 7
+
+    func makeBody(configuration: Configuration) -> some View {
+        WorkspaceRowButtonBody(configuration: configuration, isSelected: isSelected, cornerRadius: cornerRadius)
+    }
+}
+
+private struct WorkspaceRowButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let isSelected: Bool
+    let cornerRadius: CGFloat
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                InteractionBackground(
+                    color: isSelected ? AgentGitPalette.sidebarSelection
+                        : configuration.isPressed ? AgentGitPalette.controlPressed : AgentGitPalette.sidebarHover,
+                    isVisible: isSelected || (isEnabled && (isHovered || configuration.isPressed)),
+                    cornerRadius: cornerRadius
+                )
+                .animation(nil, value: isSelected)
+                .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: configuration.isPressed)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .onHover { isHovered = $0 }
     }
 }

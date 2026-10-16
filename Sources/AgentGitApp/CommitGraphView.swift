@@ -174,7 +174,7 @@ struct CommitGraphLayout: Equatable, Sendable {
     }
 
     var displayWidth: CGFloat {
-        max(14, CGFloat(renderedLaneCount) * 9 + 5)
+        max(17, CGFloat(renderedLaneCount) * 9 + 5)
     }
 
     var renderedLaneCount: Int {
@@ -207,7 +207,7 @@ enum CommitGraphVerticalPosition: CGFloat, Equatable, Sendable {
 
 enum CommitGraphMetrics {
     /// Commit 行高。图谱 Canvas、Pending 标记和 Commit 行共用它，改一处三处一起变。
-    static let rowHeight: CGFloat = 50
+    static let rowHeight = ReviewWorkspaceStyle.commitRowHeight
     static let horizontalPadding: CGFloat = 7
     static let maximumRenderedLaneCount = 5
 }

@@ -13,26 +13,46 @@ AgentGit 首先是一款现代、原生、worktree-first 的 Git 客户端。它
   上游同步状态和活动时间按列对齐。有本地改动时仍显示同步状态；支持搜索和需要处理的
   worktree 筛选，点击行进入审阅。
 - **审阅布局**：项目和分支在侧栏中选择，切换 worktree 后恢复原有 Review 状态。
-  Pull / Push 在工具栏中。`History` 独立
-  展开或收起提交历史；`Focus`（`⇧⌘F`）收起项目侧栏和历史、保留文件导航，退出后恢复
-  原布局。右侧顶部显示比较范围和统计；文件头把文件名、目录分成两行，暂存按钮、增删
-  统计和 Reviewed 按钮保持固定位置。hunk 标题显示代码范围，分组与文件头继续吸顶。
-  `Display` 菜单提供带勾选状态的忽略空白选项，审阅进度、独立的全部折叠／展开与 hunk
-  导航固定在差异区顶部。部分文件展开时也可直接全部折叠，Review 菜单提供相同操作。
+  Pull / Push、刷新和会话入口位于窗口工具栏。`Commits` / `Files` 在同一个导航区切换显示；
+  `Focus`（`⇧⌘F`）收起项目侧栏并切换到文件导航，退出后恢复原布局。
+  提交标题采用 14pt 轻字重，作者、分支和时间排列在第二行；未提交改动用独立的状态入口展示。
+  Diff 顶栏显示 15.5pt 审阅标题、统计、布局与显示选项，hunk 导航显示实际当前位置和总数。
+  文件头把文件名、目录分成两行，完整文件切换、暂存、增删统计和 Reviewed 操作集中排列；
+  窄窗口下完整文件按钮收为图标。分组与文件头保持吸顶，hunk 标题条降低高度和底色对比。
+  `Display` 菜单提供带勾选状态的忽略空白选项，顶栏独立按钮一键展开／收起所有文件，
+  展开状态切换和 hunk 计数变化时，顶栏按钮的位置、尺寸和点击区域保持固定。
+  加载提示、会话入口和取消操作均保留固定空间；文件及 hunk 操作在加载、显隐和 Discard
+  确认期间保持原位，文件统计更新不会挤动相邻按钮。搜索框清除、历史加载／重试及设置里的
+  清理、Hook 和刷新按钮同样在状态切换时保留点击区域。
+  “更多”提供提交说明，Review 菜单也提供文件展开操作。工作区干净时，顶栏显示状态并隐藏零值统计和 hunk 导航。
   操作按钮使用统一的圆角、悬停、按下和禁用状态；图标采用 SF Symbols，SVG 后备图标位于
   `Sources/AgentGitApp/Resources/ReviewIcons`，随 App 打包并缓存复用。
+- **提交文件折叠规则**：在 Settings → Review → Collapsed Files in Commits 中选择仓库，
+  每行填写一条规则。规则按仓库分别保存，同一仓库的多个 worktree 共用一组规则。
+  打开提交或提交范围时，匹配的文件默认收起，仍可手动展开。`*` 匹配文件名中的任意字符，
+  `?` 匹配一个字符，`**` 可跨目录匹配；例如 `*.lock`、`*.pb.swift`、`**/generated/**`。
+  含 `/` 的规则匹配仓库根目录下的相对路径，其余规则匹配任意目录中的文件名；
+  目录规则可写成 `generated/`。匹配区分大小写，空行和 `#` 注释行会忽略，规则自动保存并跨启动保留。
 - **快捷切换**：`⌘P` 搜索全部 worktree，使用方向键与 Return 或直接点击打开。
   `⌘+`（或 `⌘=`）和 `⌘-` 全局调整字号及对应布局，范围为 80%–150%，`⌘0` 恢复 100%；
   设置跨启动保存，窄窗口放大时自动收起项目侧栏，恢复足够空间后还原。
-  `⌘F` 跟随总览或当前操作的提交、文件导航；`⌘1` / `⌘2` 聚焦对应列表，隐藏的历史会自动展开。
-  侧栏保留项目拖拽、worktree 置顶、折叠、筛选和右键操作，底部提供 Settings 入口。
-- **原生显示**：深浅色随系统切换。已安装 Claude 时，界面文字采用其 Anthropic Sans；
+  `⌘F` 跟随总览或当前操作的提交、文件导航；`⌘1` / `⌘2` 切换并聚焦对应列表。
+  侧栏每个 worktree 显示分支和会话名称，优先显示创建该 worktree 的会话，其次显示关联会话；
+  无关联会话时仅显示分支一行，悬停可查看关联状态。搜索支持分支、会话和项目；右键可打开关联会话。
+  仓库作为分组标题，置顶 worktree 排在各自仓库的列表顶部；列表下方的 Show More Worktrees / Show Less 展开全部或按活跃状态收起。
+  侧栏保留项目拖拽、折叠、筛选和右键操作，Customize 打开设置，More 提供筛选与刷新。
+- **原生显示**：深浅色随系统切换。界面采用浅灰侧栏、中性选中状态和连续的 Diff 正文，
+  顶部工具栏提供专注模式、会话和 Git 同步操作；导航与 Diff 共用按钮尺寸、图标颜色、
+  搜索框和选中样式。悬停、按下、布局切换及展开箭头提供短时过渡，并遵守系统减少动态效果设置。
+  已安装 Claude 时，界面文字采用其 Anthropic Sans；
   字体仅注册在 AgentGit 进程中，缺失时使用系统字体。代码采用 13 点等宽字体和 20 点行高，Diff 继续由
   AppKit 虚拟列表绘制。窗口最小尺寸为 `1040×680`，项目侧栏和 Review 导航可以拖动调宽。
 
 ## 本地运行
 
 运行需要 macOS 14 或更新版本，以及 Xcode Command Line Tools。编译需要 Swift 6.2 或更新版本。
+
+首次打包前，按下方说明配置本机签名证书。
 
 ```bash
 scripts/build-app.sh debug
@@ -73,12 +93,22 @@ scripts/package-app.sh --notarize
 公证模式会等待 Apple 返回终态，把 ticket staple 到 `.app`，重新生成最终 zip 和 SHA-256，
 再验证解压后的签名、staple ticket 与 Gatekeeper。凭据只从 Keychain profile 读取。
 
-本地默认使用不依赖证书的 ad-hoc 签名。重新构建后，macOS 可能重新请求目录访问权限。
-需要让权限跨构建保留时，可设置自己的固定开发证书：
+本地打包从 `~/Library/Application Support/AgentGit/signing-identity` 读取固定的签名身份，
+Debug、Release 和安装脚本共用该配置。证书与私钥保留在本机钥匙串，配置文件只存证书的
+指纹或名称。使用同一签名身份和 bundle identifier，可以让目录访问授权跨构建保留。
+配置或证书不可用时，脚本在编译前报错。
+
+使用 `security find-identity -v -p codesigning` 查看可用证书，选择一张 Apple Development
+证书，把命令显示的 40 位证书指纹保存到配置文件，可避免同名证书选错：
 
 ```bash
-AGENTGIT_SIGNING_IDENTITY='Apple Development: Example (TEAMID)' scripts/install-local.sh
+mkdir -p "$HOME/Library/Application Support/AgentGit"
+printf '%s\n' '<certificate fingerprint>' > "$HOME/Library/Application Support/AgentGit/signing-identity"
+scripts/install-local.sh
 ```
+
+`AGENTGIT_SIGNING_IDENTITY` 可显式覆盖本机配置，例如公证时指定 Developer ID Application
+证书；`AGENTGIT_SIGNING_IDENTITY_FILE` 可指定其他配置文件路径。
 
 ## 产品主路径
 
@@ -115,9 +145,10 @@ M1 完成以下链路：
 2. App 执行 `git worktree list --porcelain -z` 自动发现全部 worktree；
    从任意 linked worktree 添加时都解析到同一主 checkout，已有重复保存项在启动时按该身份
    合并，并保留首次出现的位置；
-3. 每个 worktree 显示 branch、HEAD、dirty 文件数、增删行数和上游 ahead/behind；
-4. 项目支持折叠和手动拖拽排序；每个项目默认显示最多四个近期活跃 worktree，所有有修改
-   或置顶的 worktree 都保留显示，不受四条上限和闲置时间影响；其余通过列表末尾控件展开；
+3. 侧栏按仓库显示分支和关联会话，总览展示 dirty 文件数、增删行数和上游 ahead/behind；
+4. 项目支持折叠和手动拖拽排序；置顶、有未提交修改、当前选中，以及最近一小时有 Git
+   或文件活动的 worktree 始终显示；没有符合条件的条目时，显示活动时间最近的一个，
+   其余通过列表末尾控件展开；
 5. 选择 worktree 后展示 changed-file 导航、unified diff 和提交历史；
 6. 项目列表与最后选中的 worktree 在下次启动时恢复；
 7. Git 命令失败时在对应项目或 worktree 上显示明确错误和恢复操作，不让整个窗口失效。

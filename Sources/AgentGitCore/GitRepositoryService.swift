@@ -162,16 +162,14 @@ public enum GitMutationError: Error, Equatable, Sendable {
 }
 
 public enum GitAllChangesAction: Sendable {
-    case stash, discard
+    case stage, discard
 }
 
 public enum GitAllChangesError: LocalizedError {
     case conflicts
-    case submoduleStash
     public var errorDescription: String? {
         switch self {
         case .conflicts: "Resolve conflicts before using an all-changes action."
-        case .submoduleStash: "Git stash does not restore submodule changes. Handle those changes separately before Stash All."
         }
     }
 }
@@ -2000,12 +1998,9 @@ public struct GitRepositoryService: Sendable {
         guard !status.changes.contains(where: { $0.kind == .unmerged }) else {
             throw GitAllChangesError.conflicts
         }
-        if action == .stash {
-            guard !status.changes.contains(where: { $0.submoduleStatus != nil }) else {
-                throw GitAllChangesError.submoduleStash
-            }
+        if action == .stage {
             _ = try await runner.run(
-                arguments: ["stash", "push", "--include-untracked", "--message", "AgentGit: Stash All"],
+                arguments: ["add", "--all"],
                 workingDirectory: worktree.rootURL
             )
             return

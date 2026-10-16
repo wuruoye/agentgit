@@ -97,7 +97,7 @@ struct WorktreeSwitcherView: View {
                                     HStack(spacing: 7) {
                                         Image(systemName: "folder.fill")
                                             .font(.agentGitInterface(size: 11, weight: .medium))
-                                            .foregroundStyle(Color.accentColor.opacity(0.78))
+                                            .foregroundStyle(Color(nsColor: AgentGitPalette.controlText))
                                         Text(project.project.displayName)
                                             .font(.agentGitInterface(size: 12, weight: .semibold))
                                         Spacer()
@@ -120,7 +120,7 @@ struct WorktreeSwitcherView: View {
                                                 isSelected: selection == worktree.id
                                             )
                                         }
-                                        .buttonStyle(.plain)
+                                        .buttonStyle(WorkspaceRowButtonStyle(isSelected: selection == worktree.id, cornerRadius: 9))
                                         .padding(.horizontal, 4)
                                         .id(worktree.id)
 
@@ -161,12 +161,14 @@ struct WorktreeSwitcherView: View {
                 Spacer()
                 Button("Cancel", action: dismiss.callAsFunction)
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(ReviewToolbarButtonStyle())
                 Button("Open") {
                     if let selection {
                         open(selection)
                     }
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(ReviewToolbarButtonStyle(kind: .primary))
                 .disabled(!contains(selection))
             }
             .padding(.horizontal, 16)
@@ -209,10 +211,10 @@ struct WorktreeSwitcherView: View {
         HStack(spacing: 11) {
             Image(systemName: "rectangle.stack.badge.person.crop")
                 .font(.agentGitInterface(size: 14, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.controlText))
                 .frame(width: 34, height: 34)
                 .background(
-                    Color.accentColor.opacity(0.1),
+                    Color(nsColor: AgentGitPalette.inputBackground),
                     in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                 )
             VStack(alignment: .leading, spacing: 2) {
@@ -257,27 +259,17 @@ struct WorktreeSwitcherView: View {
                         open(selection)
                     }
                 }
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear Filter")
+            Button {
+                query = ""
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
             }
+            .buttonStyle(WorkspaceIconButtonStyle())
+            .accessibilityLabel("Clear Filter")
+            .workspaceControlSlot(isVisible: !query.isEmpty)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            Color(nsColor: AgentGitPalette.inputBackground),
-            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 1)
-        }
+        .modifier(WorkspaceSearchFieldStyle(isFocused: isSearchFocused))
     }
 
     private func contains(_ worktreeID: GitWorktreeSnapshot.ID?) -> Bool {
@@ -351,12 +343,11 @@ private struct WorktreeSwitcherEmptyState: View {
 private struct WorktreeSwitcherRow: View {
     let snapshot: GitWorktreeSnapshot
     var isSelected = false
-    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: snapshot.worktree.isDetached ? "link" : "arrow.triangle.branch")
-                .foregroundStyle(snapshot.status.changedFileCount > 0 ? .orange : .secondary)
+                .foregroundStyle(Color(nsColor: AgentGitPalette.controlText))
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -367,7 +358,7 @@ private struct WorktreeSwitcherRow: View {
                             .font(.agentGitInterface(.caption2).monospacedDigit())
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(.orange.opacity(0.16), in: Capsule())
+                            .background(Color(nsColor: AgentGitPalette.inputBackground), in: Capsule())
                     }
                 }
                 HStack(spacing: 5) {
@@ -402,22 +393,15 @@ private struct WorktreeSwitcherRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-        .background(
-            isSelected
-                ? Color.accentColor.opacity(0.08)
-                : isHovered ? Color.secondary.opacity(0.045) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-        )
         .overlay(alignment: .leading) {
             if isSelected {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(Color.accentColor)
+                    .fill(Color(nsColor: AgentGitPalette.focusIndicator))
                     .frame(width: 3, height: 30)
                     .padding(.leading, 1)
             }
         }
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
         .help(worktreeRowHelpText(snapshot))
     }
 }

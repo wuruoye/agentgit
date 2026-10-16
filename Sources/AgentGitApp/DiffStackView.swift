@@ -1,5 +1,6 @@
 import AgentGitCore
 import AppKit
+import QuartzCore
 import SwiftUI
 
 enum DiffStackStatus: Hashable {
@@ -296,10 +297,14 @@ struct ReviewFileListExpansionBar: View {
                 onSetExpanded(!isExpanded)
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: "chevron.right")
                         .font(.agentGitInterface(size: 9, weight: .semibold))
-                        .frame(width: 10)
-                    Text(isExpanded ? "Collapse All" : "Expand All")
+                        .frame(width: 10, height: 10)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    StableButtonTitle(
+                        title: isExpanded ? "Collapse All" : "Expand All",
+                        alternatives: ["Collapse All", "Expand All"]
+                    )
                 }
                 .contentShape(Rectangle())
             }
@@ -408,6 +413,12 @@ struct DiffStackCommand: Equatable {
     let action: Action
 }
 
+struct DiffHunkPosition: Equatable, Sendable {
+    let index: Int
+    let count: Int
+    static let empty = DiffHunkPosition(index: 0, count: 0)
+}
+
 /// 单个 `NSTableView` 承载整次评审的所有文件，展开只是插入行，不新建视图层级。
 struct DiffStackView: NSViewRepresentable {
     let summary: DiffStackSummary?
@@ -433,8 +444,8 @@ struct DiffStackView: NSViewRepresentable {
     let onFileUtilityAction: (String, DiffStackFileUtilityAction) -> Void
     let onFileAction: (String, GitPendingSelectionAction) -> Void
     let onSelectionAction: (String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void
-    var canStashAll = true
     var onAllChangesAction: ((GitAllChangesAction) -> Void)? = nil
+    var onHunkPositionChanged: ((DiffHunkPosition) -> Void)? = nil
 
     func makeNSView(context: Context) -> DiffStackScrollView {
         let scrollView = DiffStackScrollView()
@@ -460,7 +471,7 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.onFileAction = onFileAction
         scrollView.onSelectionAction = onSelectionAction
         scrollView.onAllChangesAction = onAllChangesAction
-        scrollView.canStashAll = canStashAll
+        scrollView.onHunkPositionChanged = onHunkPositionChanged
         scrollView.bind(store: scrollStore, key: scrollKey)
         scrollView.isApplicationActive = isApplicationActive
         scrollView.loadingMessage = loadingMessage
@@ -479,13 +490,13 @@ struct DiffStackView: NSViewRepresentable {
 final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableViewDelegate {
     private enum Metrics {
         static let lineHeight: CGFloat = 20
-        static let hunkHeight: CGFloat = 30
+        static let hunkHeight = ReviewWorkspaceStyle.hunkHeaderHeight
         static let imageHeight: CGFloat = 360
         static let contextEdgeHeight: CGFloat = 22
         static let fileContextToggleHeight: CGFloat = 22
-        static let fileHeight: CGFloat = 56
+        static let fileHeight = ReviewWorkspaceStyle.fileHeaderHeight
         static let folderHeight: CGFloat = 24
-        static let groupHeight: CGFloat = 36
+        static let groupHeight: CGFloat = 32
         static let noteHeight: CGFloat = 30
         static let viewportAnchorBottomPadding: CGFloat = groupHeight + fileHeight
         static let unifiedCodeLeading: CGFloat = 80
@@ -514,6 +525,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     var onToggleFile: ((String) -> Void)?
+    var onHunkPositionChanged: ((DiffHunkPosition) -> Void)?
+    private var reportedHunkPosition: DiffHunkPosition?
     var onFocusFile: ((String) -> Void)?
     var onToggleGroup: ((String) -> Void)?
     var onToggleFolder: ((String) -> Void)?
@@ -531,9 +544,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 updateVisibleMutationAvailability()
             }
         }
-    }
-    var canStashAll = true {
-        didSet { updateVisibleMutationAvailability() }
     }
     var isApplicationActive = true {
         didSet {
@@ -733,6 +743,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             store.saveScrollOffset(contentView.bounds.minY, for: previousKey)
         }
         scrollKey = key
+        reportedHunkPosition = nil
         renderToken = nil
         appliedScrollTarget = nil
         appliedCommandID = nil
@@ -834,13 +845,15 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             let focusedControl = captureFocusedControl()
             let layoutChanged = layoutMode != layout
             let preservedOffset = contentView.bounds.minY
+            let expansionChanged = previousToken.map { token.expansionChanged(from: $0) } ?? false
             let hadPendingAnchor = pendingCodeAnchor != nil
                 || pendingHunkAnchor != nil
             if !hadPendingAnchor {
                 anchorMinimumDocumentHeight = nil
             }
             let automaticAnchor: PendingCodeAnchor? = if !hadPendingAnchor,
-                                                         pendingRestoreOffset == nil {
+                                                         pendingRestoreOffset == nil,
+                                                         !expansionChanged {
                 captureVisibleCodeAnchor()
             } else {
                 nil
@@ -1051,12 +1064,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 contextExpandHandler: { [weak self] fileID, gap in
                     self?.handleContextExpansion(fileID: fileID, gap: gap)
                 },
-                wholeFileHandler: { [weak self] fileID in
-                    self?.handleWholeFileToggle(
-                        fileID: fileID,
-                        preferredHunkAnchorID: hunk.anchorID
-                    )
-                },
                 historyHandler: { [weak self] fileID, startLine, endLine in
                     self?.focusFile(fileID)
                     self?.onShowHunkHistory?(fileID, startLine, endLine)
@@ -1144,6 +1151,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        publishHunkPosition()
         let visible = tableView.rows(in: tableView.visibleRect)
         guard visible.location != NSNotFound else { return }
         for row in visible.location..<NSMaxRange(visible) {
@@ -2136,26 +2144,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         guard !hunkRowIndexes.isEmpty, offset != 0 else {
             return false
         }
-        let anchorRow: Int
-        if tableView.selectedRow >= 0 {
-            anchorRow = tableView.selectedRow
-        } else {
-            anchorRow = max(
-                -1,
-                tableView.row(
-                    at: NSPoint(x: 0, y: contentView.bounds.minY + 1)
-                )
-            )
-        }
-
-        let targetRow: Int
-        if offset > 0 {
-            targetRow = hunkRowIndexes.first(where: { $0 > anchorRow })
-                ?? hunkRowIndexes[0]
-        } else {
-            targetRow = hunkRowIndexes.last(where: { $0 < anchorRow })
-                ?? hunkRowIndexes[hunkRowIndexes.count - 1]
-        }
+        // 与顶栏显示的当前 hunk 一致，手动滚动后不再沿用屏幕外的旧选中行。
+        let currentIndex = reportedHunkPosition.map { $0.index - 1 } ?? (offset > 0 ? -1 : 0)
+        let count = hunkRowIndexes.count
+        let targetIndex = (currentIndex + offset % count + count) % count
+        let targetRow = hunkRowIndexes[targetIndex]
 
         tableView.selectRowIndexes(
             IndexSet(integer: targetRow),
@@ -2309,7 +2302,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         isUpdatingSticky = true
-        defer { isUpdatingSticky = false }
+        defer {
+            isUpdatingSticky = false
+            publishHunkPosition()
+        }
 
         let top = contentView.bounds.minY
         let groupSection = currentGroupSection(above: top)
@@ -2406,6 +2402,35 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         stickyGroupHeader.isHidden = true
         stickyFileHeader.isHidden = true
         stickyClip.isHidden = true
+    }
+
+    private func publishHunkPosition() {
+        let position: DiffHunkPosition
+        if hunkRowIndexes.isEmpty {
+            position = .empty
+        } else {
+            let selectedRow = tableView.selectedRow
+            let selectedIsVisible = selectedRow >= 0 && selectedRow < rows.count
+                && tableView.rect(ofRow: selectedRow).intersects(tableView.visibleRect)
+            let visibleTop = contentView.bounds.minY + (stickyClip.isHidden ? 0 : stickyClip.bounds.height) + 1
+            let anchorRow = selectedIsVisible ? selectedRow : tableView.row(at: NSPoint(x: 0, y: visibleTop))
+            var low = 0
+            var high = hunkRowIndexes.count
+            while low < high {
+                let mid = (low + high) / 2
+                if hunkRowIndexes[mid] <= anchorRow { low = mid + 1 }
+                else { high = mid }
+            }
+            position = DiffHunkPosition(index: max(1, low), count: hunkRowIndexes.count)
+        }
+        guard position != reportedHunkPosition else { return }
+        reportedHunkPosition = position
+        let key = scrollKey
+        // 等 AppKit 完成本次布局后再更新 SwiftUI 顶栏。
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.scrollKey == key, self.reportedHunkPosition == position else { return }
+            self.onHunkPositionChanged?(position)
+        }
     }
 
     private func currentGroupSection(above top: CGFloat) -> GroupSection? {
@@ -3034,7 +3059,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     private func configureGroupActions(_ cell: DiffGroupCellView) {
-        cell.setActions(enabled: mutationActionsEnabled && onAllChangesAction != nil, canStash: canStashAll) { [weak self] action in
+        cell.setActions(enabled: mutationActionsEnabled && onAllChangesAction != nil) { [weak self] action in
             guard self?.mutationActionsEnabled == true else { return }
             self?.onAllChangesAction?(action)
         }
@@ -3101,12 +3126,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     isLoadingContextGap: loadingContextGapIDs.contains(gap.id),
                     contextExpandHandler: { [weak self] fileID, gap in
                         self?.handleContextExpansion(fileID: fileID, gap: gap)
-                    },
-                    wholeFileHandler: { [weak self] fileID in
-                        self?.handleWholeFileToggle(
-                            fileID: fileID,
-                            preferredHunkAnchorID: hunk.anchorID
-                        )
                     },
                     historyHandler: { [weak self] fileID, startLine, endLine in
                         self?.focusFile(fileID)
@@ -3642,6 +3661,26 @@ private struct DiffStackToken: Equatable {
         })
     }
 
+    func expansionChanged(from previous: DiffStackToken) -> Bool {
+        let previousFiles = Dictionary(uniqueKeysWithValues: previous.entries.map { ($0.id, $0) })
+        if entries.contains(where: { entry in
+            guard let old = previousFiles[entry.id] else { return false }
+            return entry.isExpanded != old.isExpanded || entry.groupIsExpanded != old.groupIsExpanded
+        }) {
+            return true
+        }
+        let previousFolders = Dictionary(uniqueKeysWithValues: previous.folders.map { ($0.id, $0.isExpanded) })
+        if folders.contains(where: { folder in
+            previousFolders[folder.id].map { $0 != folder.isExpanded } ?? false
+        }) {
+            return true
+        }
+        let previousEmptyGroups = Dictionary(uniqueKeysWithValues: previous.emptyGroups.map { ($0.id, $0.isExpanded) })
+        return emptyGroups.contains { group in
+            previousEmptyGroups[group.id].map { $0 != group.isExpanded } ?? false
+        }
+    }
+
     func layoutChangedFileIDs(from previous: DiffStackToken) -> Set<String> {
         let previousByID = Dictionary(uniqueKeysWithValues: previous.entries.map { ($0.id, $0) })
         return Set(entries.compactMap { entry in
@@ -4032,22 +4071,80 @@ private final class DiffMutationMenuCommand: NSObject {
     }
 }
 
-/// ▶/▼ 文本字形在 Mac 上偏“网页感”，统一换成系统 disclosure 符号。
 @MainActor
-private func makeDisclosureImageView() -> NSImageView {
-    let view = NSImageView()
-    view.imageScaling = .scaleNone
-    view.contentTintColor = .tertiaryLabelColor
-    return view
+private func makeDisclosureView() -> DiffDisclosureView {
+    DiffDisclosureView()
 }
 
-@MainActor
-private func disclosureImage(isExpanded: Bool) -> NSImage? {
-    let name = isExpanded ? "chevron.down" : "chevron.right"
-    let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-    return image?.withSymbolConfiguration(
-        NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-    )
+final class DiffDisclosureView: NSView {
+    private let glyph = CAShapeLayer()
+    private var isExpanded: Bool?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        glyph.bounds = CGRect(x: 0, y: 0, width: 13, height: 13)
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 4.75, y: 3))
+        path.addLine(to: CGPoint(x: 8.25, y: 6.5))
+        path.addLine(to: CGPoint(x: 4.75, y: 10))
+        glyph.path = path
+        glyph.fillColor = nil
+        glyph.lineWidth = 1.2
+        glyph.lineCap = .round
+        glyph.lineJoin = .round
+        layer?.addSublayer(glyph)
+        setAccessibilityElement(false)
+        updateColor()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glyph.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        glyph.contentsScale = window?.backingScaleFactor ?? 2
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColor()
+    }
+
+    private func updateColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            glyph.strokeColor = NSColor.tertiaryLabelColor.cgColor
+            CATransaction.commit()
+        }
+    }
+
+    func setExpanded(_ expanded: Bool) {
+        guard isExpanded != expanded else { return }
+        let canAnimate = isExpanded != nil && window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let previous = glyph.presentation()?.transform ?? glyph.transform
+        isExpanded = expanded
+        let rotation = CATransform3DMakeRotation(expanded ? .pi / 2 : 0, 0, 0, 1)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glyph.transform = rotation
+        glyph.removeAnimation(forKey: "disclosure-rotation")
+        CATransaction.commit()
+        if canAnimate {
+            let animation = CABasicAnimation(keyPath: "transform")
+            animation.fromValue = NSValue(caTransform3D: previous)
+            animation.toValue = NSValue(caTransform3D: rotation)
+            animation.duration = WorkspaceMotion.hoverDuration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            glyph.add(animation, forKey: "disclosure-rotation")
+        }
+    }
 }
 
 private final class DiffStickyClipView: NSView {
@@ -4147,7 +4244,7 @@ private final class DiffGroupCellView: NSTableCellView {
 
     var clickHandler: ((String) -> Void)?
 
-    private let chevron = makeDisclosureImageView()
+    private let chevron = makeDisclosureView()
     private let label = DiffTextField(
         font: AgentGitTypography.interface(ofSize: AgentGitTypography.interfaceSize, weight: .medium),
         textColor: .labelColor,
@@ -4155,7 +4252,7 @@ private final class DiffGroupCellView: NSTableCellView {
         selectable: false
     )
     private var groupID = ""
-    private let stashButton = ReviewActionButton(title: "Stash All", target: nil, action: nil)
+    private let stageButton = ReviewActionButton(title: "Stage All", target: nil, action: nil)
     private let discardButton = ReviewActionButton(title: "Discard All", target: nil, action: nil)
     private var allChangesHandler: ((GitAllChangesAction) -> Void)?
     /// 和文件、hunk 的 Discard 一样原地二次确认：第一次点击变成 Confirm，3 秒内再点才执行。
@@ -4168,16 +4265,17 @@ private final class DiffGroupCellView: NSTableCellView {
         super.init(frame: frameRect)
         addSubview(chevron)
         addSubview(label)
-        for button in [stashButton, discardButton] {
+        for button in [stageButton, discardButton] {
             button.bezelStyle = .inline
             button.target = self
             button.isHidden = true
             addSubview(button)
         }
-        stashButton.action = #selector(stashAll)
+        stageButton.action = #selector(stageAll)
+        stageButton.isPrimary = true
         discardButton.action = #selector(discardAll)
         discardButton.isDestructive = true
-        stashButton.toolTip = "Stash all staged, unstaged, and untracked files in this worktree"
+        stageButton.toolTip = "Stage all modified, deleted, and untracked files in this worktree"
         resetDiscardConfirmation()
     }
 
@@ -4195,12 +4293,12 @@ private final class DiffGroupCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        let stashWidth = stashButton.preferredWidth
+        let stageWidth = stageButton.preferredWidth
         let discardWidth = ReviewButtonCell.preferredWidth(
             title: "Discard All", image: nil,
             font: discardButton.font ?? AgentGitTypography.interface(ofSize: 11.5, weight: .medium)
         )
-        let actionsWidth = stashWidth + ReviewControlMetrics.spacing + discardWidth
+        let actionsWidth = stageWidth + ReviewControlMetrics.spacing + discardWidth
         let discardX = bounds.width - ReviewControlMetrics.trailingInset - discardWidth
         let actionY = max(0, (bounds.height - ReviewControlMetrics.height) / 2)
         chevron.frame = NSRect(x: 14, y: (bounds.height - 13) / 2, width: 13, height: 13)
@@ -4210,7 +4308,7 @@ private final class DiffGroupCellView: NSTableCellView {
             width: max(0, bounds.width - 36 - (groupID == "working" ? actionsWidth + ReviewControlMetrics.trailingInset + 12 : 7)),
             height: 16
         )
-        stashButton.frame = NSRect(x: discardX - ReviewControlMetrics.spacing - stashWidth, y: actionY, width: stashWidth, height: ReviewControlMetrics.height)
+        stageButton.frame = NSRect(x: discardX - ReviewControlMetrics.spacing - stageWidth, y: actionY, width: stageWidth, height: ReviewControlMetrics.height)
         discardButton.frame = NSRect(x: discardX, y: actionY, width: discardWidth, height: ReviewControlMetrics.height)
     }
 
@@ -4227,15 +4325,15 @@ private final class DiffGroupCellView: NSTableCellView {
             resetDiscardConfirmation()
         }
         groupID = group.id
-        stashButton.isHidden = groupID != "working"
+        stageButton.isHidden = groupID != "working"
         discardButton.isHidden = groupID != "working"
-        chevron.image = disclosureImage(isExpanded: group.isExpanded)
+        chevron.setExpanded(group.isExpanded)
         label.attributedStringValue = NSAttributedString(
             string: "\(group.title ?? "") · \(count)",
             attributes: [
                 .font: AgentGitTypography.interface(
-                    ofSize: 12,
-                    weight: .semibold
+                    ofSize: 11.5,
+                    weight: .medium
                 ),
                 .foregroundColor: AgentGitPalette.commitPrimaryText
             ]
@@ -4247,18 +4345,18 @@ private final class DiffGroupCellView: NSTableCellView {
         needsDisplay = true
     }
 
-    func setActions(enabled: Bool, canStash: Bool, handler: @escaping (GitAllChangesAction) -> Void) {
+    func setActions(enabled: Bool, handler: @escaping (GitAllChangesAction) -> Void) {
         allChangesHandler = handler
-        stashButton.isEnabled = enabled && canStash
+        stageButton.isEnabled = enabled
         discardButton.isEnabled = enabled
         if !enabled {
             resetDiscardConfirmation()
         }
     }
 
-    @objc private func stashAll() {
+    @objc private func stageAll() {
         resetDiscardConfirmation()
-        allChangesHandler?(.stash)
+        allChangesHandler?(.stage)
     }
 
     @objc private func discardAll() {
@@ -4304,7 +4402,7 @@ private final class DiffGroupCellView: NSTableCellView {
 private final class DiffFolderCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-folder")
 
-    private let chevron = makeDisclosureImageView()
+    private let chevron = makeDisclosureView()
     private let icon = NSImageView()
     private let label = DiffTextField(
         font: AgentGitTypography.interface(ofSize: AgentGitTypography.interfaceSize, weight: .regular),
@@ -4349,7 +4447,7 @@ private final class DiffFolderCellView: NSTableCellView {
     }
 
     func update(folder: DiffStackFolder) {
-        chevron.image = disclosureImage(isExpanded: folder.isExpanded)
+        chevron.setExpanded(folder.isExpanded)
         icon.image = NSImage(
             systemSymbolName: folder.isExpanded ? "folder.fill" : "folder",
             accessibilityDescription: nil
@@ -4367,6 +4465,7 @@ private final class DiffFolderCellView: NSTableCellView {
 
 private final class ReviewButtonCell: NSButtonCell {
     static func preferredWidth(title: String, image: NSImage?, font: NSFont) -> CGFloat {
+        if title.isEmpty { return ReviewControlMetrics.height }
         let textWidth = (title as NSString).size(withAttributes: [.font: font]).width
         let iconWidth = image == nil ? 0 : ReviewControlMetrics.iconSize
         let gap = image != nil && !title.isEmpty ? ReviewControlMetrics.iconTextSpacing : 0
@@ -4434,6 +4533,46 @@ private func moveReviewKeyboardFocus(from view: NSView, event: NSEvent) -> Bool 
 }
 
 private class ReviewControlButton: NSButton {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = ReviewControlMetrics.cornerRadius
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func updateInteractionBackground(_ color: NSColor?) {
+        guard let layer else { return }
+        let fill = color?.cgColor ?? layer.backgroundColor ?? AgentGitPalette.controlHover.cgColor
+        let target = color == nil ? fill.copy(alpha: 0) ?? fill : fill
+        guard layer.backgroundColor != target else { return }
+        var previous = layer.presentation()?.backgroundColor ?? layer.backgroundColor ?? target
+        if previous.alpha == 0 {
+            previous = target.copy(alpha: 0) ?? target
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.backgroundColor = target
+        CATransaction.commit()
+        if window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let animation = CABasicAnimation(keyPath: "backgroundColor")
+            animation.fromValue = previous
+            animation.toValue = target
+            animation.duration = WorkspaceMotion.hoverDuration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(animation, forKey: "control-background")
+        }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            layer?.removeAllAnimations()
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override var isEnabled: Bool {
         get { super.isEnabled }
         set {
@@ -4479,7 +4618,7 @@ private class ReviewControlButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if window?.firstResponder === self {
-            NSColor.controlAccentColor.setStroke()
+            AgentGitPalette.focusIndicator.setStroke()
             let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: ReviewControlMetrics.cornerRadius, yRadius: ReviewControlMetrics.cornerRadius)
             ring.lineWidth = 1.5
             ring.stroke()
@@ -4507,10 +4646,8 @@ private final class ReviewGlyphButton: ReviewControlButton {
     override func mouseExited(with event: NSEvent) { isHovered = false; needsDisplay = true }
 
     override func draw(_ dirtyRect: NSRect) {
-        if isEnabled && (isHovered || isHighlighted || state == .on) {
-            (isHighlighted ? AgentGitPalette.inputBackground : AgentGitPalette.reviewHover).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: ReviewControlMetrics.cornerRadius, yRadius: ReviewControlMetrics.cornerRadius).fill()
-        }
+        let highlighted = isEnabled && (isHovered || isHighlighted || state == .on)
+        updateInteractionBackground(highlighted ? (isHighlighted ? AgentGitPalette.controlPressed : AgentGitPalette.controlHover) : nil)
         super.draw(dirtyRect)
     }
 }
@@ -4530,8 +4667,8 @@ private final class ReviewActionButton: ReviewControlButton {
     }
 
     var discardWidth: CGFloat {
-        ReviewButtonCell.preferredWidth(
-            title: "Discard", image: ReviewIcon.discard.actionImage,
+        return ReviewButtonCell.preferredWidth(
+            title: "Confirm", image: nil,
             font: font ?? AgentGitTypography.interface(ofSize: 11.5, weight: .medium)
         )
     }
@@ -4558,24 +4695,21 @@ private final class ReviewActionButton: ReviewControlButton {
     override func draw(_ dirtyRect: NSRect) {
         let danger = isEnabled && (isConfirming || (isDestructive && isHovered))
         let foreground = danger ? AgentGitPalette.reviewActionConfirmationText
-            : isPrimary ? NSColor.controlAccentColor : AgentGitPalette.commitSecondaryText
+            : isPrimary || isHovered ? AgentGitPalette.activeControl : AgentGitPalette.controlText
         let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: ReviewControlMetrics.cornerRadius, yRadius: ReviewControlMetrics.cornerRadius)
         if danger {
-            AgentGitPalette.reviewActionConfirmationBackground.setFill()
-            shape.fill()
-        } else if isEnabled && (isHovered || isHighlighted) {
-            let background = isPrimary
-                ? NSColor.controlAccentColor.withAlphaComponent(isHighlighted ? 0.16 : 0.09)
-                : isHighlighted ? AgentGitPalette.inputBackground : AgentGitPalette.reviewHover
-            background.setFill()
-            shape.fill()
+            updateInteractionBackground(AgentGitPalette.reviewActionConfirmationBackground)
+        } else if isEnabled && (isHovered || isHighlighted || state == .on) {
+            updateInteractionBackground(state == .on ? ReviewWorkspaceStyle.selection : isHighlighted ? AgentGitPalette.controlPressed : AgentGitPalette.controlHover)
+        } else {
+            updateInteractionBackground(nil)
         }
         if isEnabled && isConfirming {
             foreground.withAlphaComponent(0.3).setStroke()
             shape.lineWidth = 0.7
             shape.stroke()
         }
-        contentTintColor = isEnabled ? foreground : .tertiaryLabelColor
+        contentTintColor = isEnabled ? foreground : AgentGitPalette.controlDisabled
         super.draw(dirtyRect)
     }
 }
@@ -4597,10 +4731,13 @@ private final class DiffFileStatsView: NSView {
         nil
     }
 
+    static let reservedWidth: CGFloat = 96
+
     func update(diff: GitFileDiff?) {
         addedLineCount = diff?.addedLineCount
         deletedLineCount = diff?.deletedLineCount
         if let diff {
+            toolTip = "+\(diff.addedLineCount)  −\(diff.deletedLineCount)"
             setAccessibilityLabel(
                 countedLabel(
                     diff.deletedLineCount,
@@ -4615,6 +4752,7 @@ private final class DiffFileStatsView: NSView {
                     )
             )
         } else {
+            toolTip = nil
             setAccessibilityLabel("Diff statistics loading")
         }
         needsDisplay = true
@@ -4640,10 +4778,10 @@ private final class DiffFileStatsView: NSView {
             return
         }
 
-        let font = NSFont.monospacedDigitSystemFont(
-            ofSize: 10.5,
-            weight: .medium
-        )
+        let naturalFont = ReviewWorkspaceStyle.nativeFont(11.5)
+        let naturalWidth = ("+\(addedLineCount)  −\(deletedLineCount)" as NSString)
+            .size(withAttributes: [.font: naturalFont]).width + 2
+        let font = ReviewWorkspaceStyle.nativeFont(11.5 * min(1, max(1, bounds.width - 2) / naturalWidth))
         let added = NSAttributedString(string: "+\(addedLineCount)", attributes: [.font: font, .foregroundColor: AgentGitPalette.additionText])
         let deleted = NSAttributedString(string: "−\(deletedLineCount)", attributes: [.font: font, .foregroundColor: AgentGitPalette.deletionText])
         let deletedSize = deleted.size()
@@ -4664,7 +4802,7 @@ private final class DiffFileCellView: NSTableCellView {
     var actionHandler: ((String, GitPendingSelectionAction) -> Void)?
     var menuHandler: ((String) -> NSMenu?)?
 
-    private let chevron = makeDisclosureImageView()
+    private let chevron = makeDisclosureView()
     private let statusIcon = NSImageView()
     private let statusText = DiffTextField(
         font: .monospacedSystemFont(ofSize: 10, weight: .bold),
@@ -4673,21 +4811,21 @@ private final class DiffFileCellView: NSTableCellView {
         selectable: false
     )
     private let title = DiffTextField(
-        font: AgentGitTypography.interface(ofSize: 13, weight: .semibold),
-        textColor: .labelColor,
+        font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.fileTitleSize),
+        textColor: ReviewWorkspaceStyle.primary,
         alignment: .left,
         selectable: false
     )
     private let directoryLabel = DiffTextField(
-        font: AgentGitTypography.interface(ofSize: 11, weight: .regular),
-        textColor: AgentGitPalette.sidebarMetadata,
+        font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.metadataSize),
+        textColor: ReviewWorkspaceStyle.secondary,
         alignment: .left,
         selectable: false
     )
     private let stats = DiffFileStatsView()
     private var statusColor = NSColor.secondaryLabelColor
     private let menuButton = ReviewGlyphButton(title: "", target: nil, action: nil)
-    private let wholeFileButton = ReviewGlyphButton(title: "", target: nil, action: nil)
+    private let wholeFileButton = ReviewActionButton(title: "Whole file", target: nil, action: nil)
     private let reviewButton = ReviewGlyphButton(title: "", target: nil, action: nil)
     private let primaryButton = ReviewActionButton(title: "", target: nil, action: nil)
     private let discardButton = ReviewActionButton(
@@ -4792,31 +4930,35 @@ private final class DiffFileCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        // The second line holds file actions; hover never shifts either path line.
-        let menuX = bounds.width - ReviewControlMetrics.trailingInset - ReviewControlMetrics.height
-        let reviewX = menuX - ReviewControlMetrics.height - ReviewControlMetrics.spacing
-        let trailingX = reviewX - ReviewControlMetrics.spacing
-        let primaryWidth = canApplyPrimaryAction ? primaryButton.preferredWidth : 0
-        let discardWidth = canDiscard ? discardButton.discardWidth : 0
-        let spacing = canDiscard && canApplyPrimaryAction ? ReviewControlMetrics.spacing : 0
-        let actionsWidth = primaryWidth + discardWidth + spacing
-        let contentX = trailingX - max(94, actionsWidth)
-        let wholeFileWidth: CGFloat = canToggleWholeFile ? ReviewControlMetrics.height : 0
-        let wholeFileX = contentX - wholeFileWidth - (canToggleWholeFile ? 6 : 0)
-        chevron.frame = NSRect(x: 14, y: headerCenterY(13), width: 13, height: 13)
-        statusIcon.frame = NSRect(x: 39, y: headerCenterY(18), width: 22, height: 18)
+        let compact = bounds.width < 720
+        wholeFileButton.imagePosition = compact ? .imageOnly : .imageLeft
+        let wholeFileWidth: CGFloat = compact ? ReviewControlMetrics.height
+            : ["Whole file", "Changes only", "Loading…"].map {
+                ReviewButtonCell.preferredWidth(
+                    title: $0, image: ReviewIcon.expand.actionImage,
+                    font: wholeFileButton.font ?? ReviewWorkspaceStyle.nativeFont(12)
+                )
+            }.max() ?? ReviewControlMetrics.height
+        let primaryWidth = ReviewControlMetrics.height
+        let discardWidth = discardButton.discardWidth
+        let widths = [wholeFileWidth, primaryWidth, discardWidth, ReviewControlMetrics.height, ReviewControlMetrics.height]
+        let controlsWidth = widths.reduce(0, +) + CGFloat(widths.filter { $0 > 0 }.count - 1) * ReviewControlMetrics.spacing
+        stats.isHidden = bounds.width < 420
+        let statsWidth: CGFloat = stats.isHidden ? 0 : DiffFileStatsView.reservedWidth
+        let statsSpacing: CGFloat = stats.isHidden ? 0 : 18
+        let textWidth = max(0, min(compact ? 180 : 280, bounds.width - 80 - statsWidth - statsSpacing - controlsWidth - 12))
+        let statsX = 80 + textWidth
+        chevron.frame = NSRect(x: 25.5, y: headerCenterY(13), width: 13, height: 13)
+        statusIcon.frame = NSRect(x: 53, y: headerCenterY(18), width: 22, height: 18)
         statusText.frame = statusIcon.frame
-        let textWidth = max(0, wholeFileX - 76 - 12)
-        title.frame = NSRect(x: 76, y: 10, width: textWidth, height: 18)
-        directoryLabel.frame = NSRect(x: 76, y: 32, width: textWidth, height: 14)
-        stats.frame = NSRect(x: trailingX - 94, y: actionsWidth > 0 ? 8 : headerCenterY(20), width: 94, height: 20)
-        menuButton.frame = NSRect(x: menuX, y: headerCenterY(ReviewControlMetrics.height), width: ReviewControlMetrics.height, height: ReviewControlMetrics.height)
-        reviewButton.frame = NSRect(x: reviewX, y: headerCenterY(ReviewControlMetrics.height), width: ReviewControlMetrics.height, height: ReviewControlMetrics.height)
-        wholeFileButton.frame = NSRect(x: wholeFileX, y: headerCenterY(ReviewControlMetrics.height), width: wholeFileWidth, height: ReviewControlMetrics.height)
-        let primaryX = trailingX - actionsWidth
-        let actionY = max(0, bounds.height - ReviewControlMetrics.height - 4)
-        primaryButton.frame = NSRect(x: primaryX, y: actionY, width: primaryWidth, height: ReviewControlMetrics.height)
-        discardButton.frame = NSRect(x: primaryX + primaryWidth + spacing, y: actionY, width: discardWidth, height: ReviewControlMetrics.height)
+        title.frame = NSRect(x: 80, y: directoryLabel.isHidden ? headerCenterY(19) : 8, width: textWidth, height: 19)
+        directoryLabel.frame = NSRect(x: 80, y: 30, width: textWidth, height: 14)
+        stats.frame = NSRect(x: statsX, y: headerCenterY(20), width: statsWidth, height: 20)
+        var x = statsX + statsWidth + statsSpacing
+        for (button, width) in zip([wholeFileButton, primaryButton, discardButton, reviewButton, menuButton] as [NSButton], widths) {
+            button.frame = NSRect(x: x, y: headerCenterY(ReviewControlMetrics.height), width: width, height: ReviewControlMetrics.height)
+            if width > 0 { x += width + ReviewControlMetrics.spacing }
+        }
     }
 
     static let leadingGapHeight: CGFloat = 0
@@ -4832,11 +4974,9 @@ private final class DiffFileCellView: NSTableCellView {
         background.setFill()
         dirtyRect.fill()
         if isFocused {
-            NSColor.controlAccentColor.setFill()
-            NSRect(x: 0, y: 8, width: 3, height: bounds.height - 16).fill()
+            AgentGitPalette.focusIndicator.setFill()
+            NSRect(x: 0, y: 8, width: 2, height: bounds.height - 16).fill()
         }
-        statusColor.withAlphaComponent(0.09).setFill()
-        NSBezierPath(roundedRect: NSRect(x: 36, y: headerCenterY(28), width: 28, height: 28), xRadius: 7, yRadius: 7).fill()
         AgentGitPalette.separator.withAlphaComponent(isExpanded ? 0.8 : 0.35).setFill()
         NSRect(x: 12, y: bounds.height - 1, width: bounds.width - 24, height: 1).fill()
         super.draw(dirtyRect)
@@ -4862,7 +5002,7 @@ private final class DiffFileCellView: NSTableCellView {
         isExpanded = file.isExpanded
         isReviewed = file.isReviewed
         canReview = file.diff != nil
-        canToggleWholeFile = file.canToggleWholeFile && file.showsWholeFile
+        canToggleWholeFile = file.canToggleWholeFile
         canApplyPrimaryAction = file.mutationMode != nil && file.canApplyPrimaryAction
         canDiscard = file.mutationMode == .working && file.canDiscard
         mutationMode = file.mutationMode
@@ -4872,7 +5012,7 @@ private final class DiffFileCellView: NSTableCellView {
         self.wholeFileHandler = wholeFileHandler ?? self.wholeFileHandler
         self.actionHandler = actionHandler ?? self.actionHandler
         self.menuHandler = menuHandler ?? self.menuHandler
-        chevron.image = disclosureImage(isExpanded: file.isExpanded)
+        chevron.setExpanded(file.isExpanded)
         updateStatusPresentation(
             for: file.status,
             statusLabel: file.statusLabel
@@ -4885,7 +5025,8 @@ private final class DiffFileCellView: NSTableCellView {
         let originalDirectory = file.originalPath.map { ($0 as NSString).deletingLastPathComponent }
         directoryLabel.stringValue = originalDirectory.flatMap {
             $0 == directory ? nil : "\($0.isEmpty ? "Repository root" : $0)  →  \(directory.isEmpty ? "Repository root" : directory)"
-        } ?? (directory.isEmpty ? "Repository root" : directory)
+        } ?? directory
+        directoryLabel.isHidden = directoryLabel.stringValue.isEmpty
         title.toolTip = file.originalPath.map { "\($0) → \(file.path)" } ?? file.path
         title.setAccessibilityLabel(title.toolTip)
         stats.update(diff: file.diff)
@@ -4897,7 +5038,9 @@ private final class DiffFileCellView: NSTableCellView {
         } else {
             wholeFileTitle = "Show Entire File"
         }
-        wholeFileButton.image = (file.showsWholeFile ? ReviewIcon.collapse : ReviewIcon.expand).image
+        wholeFileButton.title = file.isLoadingWholeFile ? "Loading…" : file.showsWholeFile ? "Changes only" : "Whole file"
+        wholeFileButton.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)
+        wholeFileButton.state = file.showsWholeFile ? .on : .off
         wholeFileButton.isHidden = !canToggleWholeFile
         wholeFileButton.isEnabled = !file.isLoadingWholeFile
         wholeFileButton.contentTintColor = file.showsWholeFile
@@ -4914,10 +5057,10 @@ private final class DiffFileCellView: NSTableCellView {
         reviewButton.toolTip = reviewTitle
         reviewButton.setAccessibilityLabel(reviewTitle)
         primaryButton.title = file.mutationMode?.fileActionTitle ?? ""
-        primaryButton.setAccessibilityLabel(primaryButton.title)
+        primaryButton.setAccessibilityLabel("\(primaryButton.title) File")
         primaryButton.image = (file.mutationMode == .staged ? ReviewIcon.unstage : ReviewIcon.stage).actionImage
-        primaryButton.imagePosition = .imageLeft
-        discardButton.imagePosition = .imageLeft
+        primaryButton.imagePosition = .imageOnly
+        discardButton.imagePosition = isConfirmingDiscard ? .noImage : .imageOnly
         primaryButton.toolTip = file.status == .conflicted
             ? "Stage the file after resolving its conflict markers"
             : primaryButton.title
@@ -5055,7 +5198,8 @@ private final class DiffFileCellView: NSTableCellView {
         wholeFileButton.action = #selector(toggleWholeFile)
         wholeFileButton.bezelStyle = .inline
         wholeFileButton.isBordered = false
-        wholeFileButton.imagePosition = .imageOnly
+        wholeFileButton.font = ReviewWorkspaceStyle.nativeFont(12)
+        wholeFileButton.imagePosition = .imageLeft
         wholeFileButton.imageScaling = .scaleProportionallyDown
     }
 
@@ -5104,6 +5248,7 @@ private final class DiffFileCellView: NSTableCellView {
         discardButton.isConfirming = true
         discardButton.title = "Confirm"
         discardButton.image = nil
+        discardButton.imagePosition = .noImage
         discardButton.contentTintColor = .systemRed
         discardButton.toolTip = "Confirm discard; a recovery copy will be saved in Trash"
         discardButton.setAccessibilityLabel("Confirm Discard File")
@@ -5141,6 +5286,7 @@ private final class DiffFileCellView: NSTableCellView {
         discardButton.isConfirming = false
         discardButton.title = "Discard"
         discardButton.image = ReviewIcon.discard.actionImage
+        discardButton.imagePosition = .imageOnly
         discardButton.contentTintColor = .secondaryLabelColor
         discardButton.toolTip = "Discard file changes; saves a recovery copy in Trash"
         discardButton.setAccessibilityLabel("Discard File")
@@ -5165,8 +5311,8 @@ private final class DiffFileCellView: NSTableCellView {
         paragraph.lineBreakMode = .byTruncatingMiddle
         return NSAttributedString(string: displayed, attributes: [
             .paragraphStyle: paragraph,
-            .font: AgentGitTypography.interface(ofSize: 13, weight: .semibold),
-            .foregroundColor: AgentGitPalette.commitPrimaryText
+            .font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.fileTitleSize),
+            .foregroundColor: ReviewWorkspaceStyle.primary
         ])
     }
 
@@ -5686,6 +5832,7 @@ private final class DiffContextEdgeCellView: NSTableCellView {
     private var gap: DiffStackContextGap?
     private var expandHandler: ((String, DiffStackContextGap) -> Void)?
     private var isHovered = false
+    private var reservedLabelWidth: CGFloat = 0
 
     override var isFlipped: Bool { true }
 
@@ -5733,8 +5880,8 @@ private final class DiffContextEdgeCellView: NSTableCellView {
     override func layout() {
         super.layout()
         button.frame = bounds
-        let labelSize = label.intrinsicContentSize
-        let contentWidth = 12 + 5 + labelSize.width
+        let labelWidth = min(reservedLabelWidth, max(0, bounds.width - 33))
+        let contentWidth = 12 + 5 + labelWidth
         let contentX = floor((bounds.width - contentWidth) / 2)
         icon.frame = NSRect(
             x: contentX,
@@ -5746,7 +5893,7 @@ private final class DiffContextEdgeCellView: NSTableCellView {
         label.frame = NSRect(
             x: contentX + 17,
             y: floor((bounds.height - 16) / 2),
-            width: labelSize.width,
+            width: labelWidth,
             height: 16
         )
         needsDisplay = true
@@ -5804,15 +5951,21 @@ private final class DiffContextEdgeCellView: NSTableCellView {
         self.fileID = fileID
         self.expandHandler = expandHandler
         let shownLineCount = min(20, gap.hiddenLineCount)
+        let expandTitle = gap.hiddenLineCount == shownLineCount
+            ? "Show \(shownLineCount) hidden lines"
+            : "Show \(shownLineCount) of \(gap.hiddenLineCount) hidden lines"
+        reservedLabelWidth = [expandTitle, "Loading hidden lines…"].map {
+            ceil(($0 as NSString).size(withAttributes: [
+                .font: label.font ?? AgentGitTypography.interface()
+            ]).width)
+        }.max() ?? 0
         let title: String
         if isLoading {
             title = "Loading hidden lines…"
             icon.isHidden = true
             progressIndicator.startAnimation(nil)
         } else {
-            title = gap.hiddenLineCount == shownLineCount
-                ? "Show \(shownLineCount) hidden lines"
-                : "Show \(shownLineCount) of \(gap.hiddenLineCount) hidden lines"
+            title = expandTitle
             icon.isHidden = false
             progressIndicator.stopAnimation(nil)
         }
@@ -5879,8 +6032,8 @@ private final class DiffHunkCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-hunk")
 
     private let unifiedTitle = DiffTextField(
-        font: AgentGitTypography.interface(ofSize: 11.5, weight: .medium),
-        textColor: AgentGitPalette.reviewHunkText,
+        font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.metadataSize),
+        textColor: ReviewWorkspaceStyle.secondary,
         alignment: .left,
         selectable: false
     )
@@ -5901,9 +6054,8 @@ private final class DiffHunkCellView: NSTableCellView {
     /// 不额外占一行，这里跟着对齐。
     private let contextExpandButton = ReviewGlyphButton(title: "", target: nil, action: nil)
     private let contextProgress = NSProgressIndicator()
-    private let wholeFileButton = ReviewGlyphButton(title: "", target: nil, action: nil)
     private let historyButton = ReviewActionButton(
-        title: "Hunk History",
+        title: "",
         target: nil,
         action: nil
     )
@@ -5925,16 +6077,12 @@ private final class DiffHunkCellView: NSTableCellView {
     private var discardConfirmationID = ""
     private var isConfirmingDiscard = false
     private var discardConfirmationTimer: Timer?
-    private var canToggleWholeFile = false
-    private var showsWholeFile = false
-    private var isLoadingWholeFile = false
     private var canShowHistory = false
     private var isHovered = false
     private var layoutMode: DiffLayoutMode = .unified
     private var contextGap: DiffStackContextGap?
     private var isLoadingContextGap = false
     private var contextExpandHandler: ((String, DiffStackContextGap) -> Void)?
-    private var wholeFileHandler: ((String) -> Void)?
     private var historyHandler: ((String, Int, Int) -> Void)?
     private var actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
 
@@ -5973,18 +6121,14 @@ private final class DiffHunkCellView: NSTableCellView {
         contextProgress.controlSize = .small
         contextProgress.isDisplayedWhenStopped = false
         addSubview(contextProgress)
-        addSubview(wholeFileButton)
         addSubview(historyButton)
         addSubview(menuButton)
         addSubview(primaryButton)
         addSubview(discardButton)
-        wholeFileButton.identifier = NSUserInterfaceItemIdentifier("hunk-whole-file-toggle")
-        wholeFileButton.target = self
-        wholeFileButton.action = #selector(toggleWholeFile)
-        wholeFileButton.bezelStyle = .inline
-        wholeFileButton.imagePosition = .imageOnly
-        wholeFileButton.imageScaling = .scaleProportionallyDown
         historyButton.identifier = NSUserInterfaceItemIdentifier("hunk-history")
+        historyButton.image = ReviewIcon.history.actionImage
+        historyButton.imagePosition = .imageOnly
+        historyButton.toolTip = "Show history for these lines"
         historyButton.setAccessibilityLabel("Hunk History")
         historyButton.setAccessibilityHelp(
             "Filter commit history to the lines in this hunk"
@@ -6039,32 +6183,19 @@ private final class DiffHunkCellView: NSTableCellView {
 
     override func layout() {
         super.layout()
-        let primaryWidth = primaryButton.isHidden ? 0 : primaryButton.preferredWidth
-        let discardWidth = discardButton.isHidden ? 0 : discardButton.discardWidth
-        let spacing = primaryWidth > 0 && discardWidth > 0 ? ReviewControlMetrics.spacing : 0
+        let primaryWidth = ReviewControlMetrics.height
+        let discardWidth = discardButton.discardWidth
+        let spacing = ReviewControlMetrics.spacing
         let actionsWidth = primaryWidth + discardWidth + spacing
-        let showsHistoryControls = canShowHistory
-        let historyWidth = showsHistoryControls ? historyButton.preferredWidth : 0
-        let menuWidth: CGFloat = showsHistoryControls ? ReviewControlMetrics.height : 0
-        let historySpacing: CGFloat = historyWidth > 0 ? ReviewControlMetrics.spacing : 0
-        let actionSpacing: CGFloat = actionsWidth > 0 && historyWidth > 0 ? ReviewControlMetrics.spacing : 0
-        let wholeFileWidth: CGFloat = canToggleWholeFile ? ReviewControlMetrics.height : 0
+        let historyWidth = historyButton.preferredWidth
+        let menuWidth = ReviewControlMetrics.height
+        let historySpacing = ReviewControlMetrics.spacing
+        let actionSpacing = ReviewControlMetrics.spacing
         marker.frame = .zero
-        // 展开入口占标题条最左边一格，正好落在行号列上方；整个文件的展开按钮排在它右边。
-        let expandWidth: CGFloat = contextExpandButton.isHidden ? 0 : ReviewControlMetrics.height
-        let wholeFileX: CGFloat = (contextExpandButton.isHidden ? 0 : expandWidth + 2) + 7
-        let wholeFileHeight = min(ReviewControlMetrics.height, bounds.height)
-        wholeFileButton.frame = NSRect(
-            x: wholeFileX,
-            y: max(0, (bounds.height - wholeFileHeight) / 2),
-            width: wholeFileWidth,
-            height: wholeFileHeight
-        )
+        let expandWidth = ReviewControlMetrics.height
         // unified 下标题起点对齐代码列，和 split 的行为一致；split 里 sideLabelInset 已经
         // 等于行号加符号列的宽度。
-        let unifiedLabelX: CGFloat = canToggleWholeFile
-            ? max(Self.unifiedCodeLeading, wholeFileButton.frame.maxX + 6)
-            : Self.unifiedCodeLeading
+        let unifiedLabelX = Self.unifiedCodeLeading
         let sideLabelInset: CGFloat = 47
         let menuX = bounds.width - menuWidth - ReviewControlMetrics.trailingInset
         let historyX = menuX - historyWidth - historySpacing
@@ -6075,13 +6206,13 @@ private final class DiffHunkCellView: NSTableCellView {
             || !primaryButton.isHidden || !historyButton.isHidden || !menuButton.isHidden
         location.frame = NSRect(x: max(0, bounds.width - 154), y: (bounds.height - 16) / 2, width: 140, height: 16)
         contextExpandButton.frame = NSRect(
-            x: 2,
+            x: 50,
             y: 0,
             width: expandWidth,
             height: bounds.height
         )
         contextProgress.frame = NSRect(
-            x: 5,
+            x: 58,
             y: max(0, (bounds.height - 12) / 2),
             width: 12,
             height: 12
@@ -6111,10 +6242,7 @@ private final class DiffHunkCellView: NSTableCellView {
             height: actionHeight
         )
         let titleX = layoutMode == .sideBySide
-            ? max(
-                sideLabelInset,
-                canToggleWholeFile ? wholeFileButton.frame.maxX + 6 : sideLabelInset
-            )
+            ? max(sideLabelInset, contextExpandButton.frame.maxX + 2)
             : unifiedLabelX
         unifiedTitle.frame = NSRect(
             x: titleX,
@@ -6137,8 +6265,8 @@ private final class DiffHunkCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         AgentGitPalette.hunkHeader.setFill()
         dirtyRect.fill()
-        AgentGitPalette.separator.withAlphaComponent(0.3).setFill()
-        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        AgentGitPalette.separator.withAlphaComponent(0.15).setFill()
+        NSRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5).fill()
         super.draw(dirtyRect)
     }
 
@@ -6157,7 +6285,6 @@ private final class DiffHunkCellView: NSTableCellView {
         mutationActionsEnabled: Bool = true,
         isLoadingContextGap: Bool = false,
         contextExpandHandler: ((String, DiffStackContextGap) -> Void)? = nil,
-        wholeFileHandler: ((String) -> Void)?,
         historyHandler: ((String, Int, Int) -> Void)?,
         actionHandler: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
     ) {
@@ -6189,43 +6316,16 @@ private final class DiffHunkCellView: NSTableCellView {
         mutationMode = hunk.mutationMode
         hunkMutationActionsEnabled = hunk.isMutationEnabled
         globalMutationActionsEnabled = mutationActionsEnabled
-        canToggleWholeFile = hunk.canToggleWholeFile && !hunk.showsWholeFile
-        showsWholeFile = hunk.showsWholeFile
-        isLoadingWholeFile = hunk.isLoadingWholeFile
         canShowHistory = hunk.mutationMode == nil
-        self.wholeFileHandler = wholeFileHandler
         self.historyHandler = historyHandler
         self.actionHandler = actionHandler
         primaryButton.title = hunk.mutationMode?.hunkActionTitle ?? ""
         primaryButton.setAccessibilityLabel(primaryButton.title)
+        primaryButton.toolTip = primaryButton.title
         primaryButton.image = (hunk.mutationMode == .staged ? ReviewIcon.unstage : ReviewIcon.stage).actionImage
-        primaryButton.imagePosition = .imageLeft
-        discardButton.imagePosition = .imageLeft
+        primaryButton.imagePosition = .imageOnly
+        discardButton.imagePosition = isConfirmingDiscard ? .noImage : .imageOnly
         updateMutationAvailability()
-        let wholeFileTitle: String
-        let wholeFileSymbol: String
-        if hunk.isLoadingWholeFile {
-            wholeFileTitle = "Loading Whole File…"
-            wholeFileSymbol = "ellipsis"
-        } else if hunk.showsWholeFile {
-            wholeFileTitle = "Show Only Modified Hunks"
-            wholeFileSymbol = "rectangle.compress.vertical"
-        } else {
-            wholeFileTitle = "Show Entire File"
-            wholeFileSymbol = "rectangle.expand.vertical"
-        }
-        wholeFileButton.image = NSImage(
-            systemSymbolName: wholeFileSymbol,
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
-        )
-        wholeFileButton.isEnabled = !hunk.isLoadingWholeFile
-        wholeFileButton.contentTintColor = hunk.showsWholeFile
-            ? AgentGitPalette.activeControl
-            : .secondaryLabelColor
-        wholeFileButton.toolTip = wholeFileTitle
-        wholeFileButton.setAccessibilityLabel(wholeFileTitle)
         updateHoverControls()
         toolTip = "\(hunk.rawHeader)\nOption-Down: Next Hunk  ·  Option-Up: Previous Hunk"
         needsLayout = true
@@ -6313,11 +6413,6 @@ private final class DiffHunkCellView: NSTableCellView {
         contextExpandHandler?(fileID, contextGap)
     }
 
-    @objc private func toggleWholeFile() {
-        resetDiscardConfirmation()
-        wholeFileHandler?(fileID)
-    }
-
     @objc private func showHistory() {
         resetDiscardConfirmation()
         historyHandler?(fileID, historyStartLine, historyEndLine)
@@ -6368,6 +6463,7 @@ private final class DiffHunkCellView: NSTableCellView {
         discardButton.isConfirming = true
         discardButton.title = "Confirm"
         discardButton.image = nil
+        discardButton.imagePosition = .noImage
         discardButton.contentTintColor = .systemRed
         discardButton.toolTip = "Confirm discard hunk; a recovery copy will be saved in Trash"
         discardButton.setAccessibilityLabel("Confirm Discard Hunk")
@@ -6405,6 +6501,7 @@ private final class DiffHunkCellView: NSTableCellView {
         discardButton.isConfirming = false
         discardButton.title = "Discard"
         discardButton.image = ReviewIcon.discard.actionImage
+        discardButton.imagePosition = .imageOnly
         discardButton.contentTintColor = .secondaryLabelColor
         discardButton.toolTip = "Discard hunk changes; saves a recovery copy in Trash"
         discardButton.setAccessibilityLabel("Discard Hunk")
@@ -6419,7 +6516,6 @@ private final class DiffHunkCellView: NSTableCellView {
             || lineIDs.isEmpty
         discardButton.isHidden = mutationMode != .working
             || lineIDs.isEmpty
-        wholeFileButton.isHidden = !canToggleWholeFile
         historyButton.isHidden = !canShowHistory
         menuButton.isHidden = !canShowHistory
         marker.isHidden = true

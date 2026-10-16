@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentGit 侧栏样板</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f0f0ef; color: #41403d; font: 15px/1.6 system-ui, sans-serif; }
+  main { max-width: 1030px; padding: 40px 28px 64px; margin: auto; }
+  h1 { font-size: 24px; font-weight: 500; margin: 0 0 8px; }
+  h2 { font-size: 17px; font-weight: 500; margin: 40px 0 16px; }
+  p { margin: 0 0 24px; color: #76746e; }
+  .pair { display: grid; grid-template-columns: repeat(2,minmax(0,455px)); gap: 28px; align-items: start; }
+  figure { margin: 0; min-width: 0; }
+  figcaption { margin: 0 0 12px; }
+  img { display: block; width: 100%; height: auto; }
+  .single { width: min(100%,455px); }
+  .overlay { position: relative; width: min(100%,455px); }
+  .overlay img:last-child { position: absolute; inset: 0; opacity: .5; }
+  label { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 16px; }
+  input { width: 250px; accent-color: #76746e; }
+  details { margin-top: 36px; }
+  summary { cursor: pointer; margin-bottom: 16px; }
+  @media(max-width:650px) { main { padding: 24px 18px; } .pair { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body><main>
+<h1>AgentGit 侧栏样板</h1>
+<p>原生 SwiftUI 渲染。每张 910 × 1964 像素，以 2× 导出；原生基准为 455 × 982 逻辑点，对照页按可用宽度等比显示。映射样板使用示例内容。</p>
+<h2>AgentGit 内容映射与行状态</h2>
+<div class="pair">
+  <figure><figcaption>repo 分组，置顶项排在本 repo 最前面</figcaption><img data-image="agentgit" alt="AgentGit 分支和会话两行侧栏样板，置顶项保留在所属 repo 内"></figure>
+  <figure><figcaption>普通、悬停、选中</figcaption><img data-image="row-states" alt="同一 worktree 行在普通、悬停和选中时的样式"></figure>
+</div>
+<details>
+  <summary>同文、同尺寸校准对照</summary>
+  <div class="pair">
+    <figure><figcaption>Claude Desktop · 参考</figcaption><img data-image="reference" alt="Claude Desktop 两行选中态侧栏原图"></figure>
+    <figure><figcaption>原生样板 · 同文校准</figcaption><img data-image="calibration" alt="使用相同文案的 SwiftUI 侧栏校准样板"></figure>
+  </div>
+</details>
+<details>
+  <summary>叠图检查</summary>
+  <label>样板不透明度 <input id="opacity" type="range" min="0" max="100" value="50" aria-label="样板不透明度"><output id="opacity-value">50%</output></label>
+  <div class="overlay"><img data-image="reference" alt="叠图的参考底图"><img id="overlay-sample" data-image="calibration" alt="用于核对文字轮廓和位置的样板叠图"></div>
+</details>
+</main>
+<script>
+  const images = {{IMAGES}};
+  document.querySelectorAll('[data-image]').forEach(image => { image.src = 'data:image/png;base64,' + images[image.dataset.image]; });
+  document.getElementById('opacity').addEventListener('input', event => {
+    const value = Number(event.target.value);
+    document.getElementById('overlay-sample').style.opacity = value / 100;
+    document.getElementById('opacity-value').value = value + '%';
+  });
+</script>
+</body>
+</html>

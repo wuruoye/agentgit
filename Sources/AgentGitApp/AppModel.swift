@@ -147,6 +147,7 @@ final class AppModel {
     var diffLayout: DiffLayoutMode {
         didSet { persistDiffPreferences() }
     }
+    let commitFileCollapseSettings: CommitFileCollapseSettings
     var collapsedProjectIDs: Set<GitProject.ID> {
         didSet {
             defaults.set(
@@ -237,6 +238,10 @@ final class AppModel {
         self.diffLayout = DiffLayoutMode(
             rawValue: defaults.string(forKey: Self.diffLayoutKey) ?? ""
         ) ?? .unified
+        self.commitFileCollapseSettings = CommitFileCollapseSettings(
+            defaults: defaults,
+            legacyProjectID: defaults.string(forKey: Self.selectedWorktreeProjectIDKey)
+        )
         self.collapsedProjectIDs = Set(
             defaults.stringArray(forKey: Self.collapsedProjectIDsKey) ?? []
         )
@@ -353,6 +358,13 @@ final class AppModel {
             .compactMap(\.snapshot)
             .flatMap(\.worktrees)
             .first { $0.id == selectedWorktreeID }
+    }
+
+    func projectID(for worktreeID: GitWorktree.ID?) -> GitProject.ID? {
+        guard let worktreeID else { return nil }
+        return projects.first { state in
+            state.snapshot?.worktrees.contains { $0.id == worktreeID } == true
+        }?.id
     }
 
     var hasAvailableWorktrees: Bool {
@@ -721,6 +733,7 @@ final class AppModel {
             if selectedWorktreeProjectID == original.id {
                 selectedWorktreeProjectID = resolved.id
             }
+            commitFileCollapseSettings.moveRules(from: original.id, to: resolved.id)
             if originalCompleteProjectIDs.contains(original.id) {
                 normalizedCompleteProjectIDs.insert(resolved.id)
             }

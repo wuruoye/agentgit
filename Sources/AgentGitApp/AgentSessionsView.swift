@@ -10,7 +10,10 @@ struct AgentSessionsButton: View {
     var body: some View {
         // 一个会话直接给按钮；多个会话时标题在工具栏里会全部被截成同样的前缀，改成一个下拉，
         // 菜单里才能看到完整标题和最近更新时间。
-        Group {
+        ZStack {
+            Color.clear
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
             if sortedAssociations.count == 1, let association = sortedAssociations.first {
                 shortcutButton(for: association)
             } else if sortedAssociations.count > 1 {
@@ -34,15 +37,18 @@ struct AgentSessionsButton: View {
                 } label: {
                     Label("\(sortedAssociations.count) Sessions", systemImage: "sparkles")
                 }
-                .menuStyle(.automatic)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .buttonStyle(ReviewToolbarButtonStyle())
                 .labelStyle(.titleAndIcon)
-                .fixedSize()
+                .lineLimit(1)
                 .help("Agent sessions registered for this worktree")
                 .accessibilityLabel(
                     "\(sortedAssociations.count) agent sessions for this worktree"
                 )
             }
         }
+        .frame(width: 136, height: ReviewControlMetrics.height)
     }
 
     private func shortcutButton(for association: AgentAssociation) -> some View {
@@ -98,7 +104,7 @@ private struct AgentSessionShortcutButton: View {
             .foregroundStyle(tintColor)
             .lineLimit(1)
         }
-        .buttonStyle(.automatic)
+        .buttonStyle(ReviewToolbarButtonStyle())
         .labelStyle(.titleAndIcon)
         .help(
             (isCreator ? "Created this worktree\n" : "")
@@ -119,7 +125,7 @@ private struct AgentSessionShortcutButton: View {
     private var tintColor: Color {
         switch availability {
         case .resolving: .secondary
-        case .available: association.provider.tintColor
+        case .available: Color(nsColor: AgentGitPalette.controlText)
         case .unavailable: .orange
         }
     }
