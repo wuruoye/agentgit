@@ -231,7 +231,10 @@ final class AppModel {
         let cachedPayload = snapshotStore?.initialPayload
         self.snapshotCacheEventID = cachedPayload?.eventID
             ?? FSEventsGetCurrentEventId()
-        self.completeProjectSnapshotIDs = cachedPayload?.completeProjectIDs ?? []
+        self.completeProjectSnapshotIDs = trustedCompleteProjectIDs(
+            cachedPayload?.completeProjectIDs ?? [],
+            cachedProjects: cachedPayload?.projects ?? []
+        )
         self.snapshotCacheError = snapshotStore?.initialErrorMessage
         self.reviewStates = ReviewStateStore(defaults: defaults)
         self.diffOptions = GitDiffOptions(
@@ -2210,38 +2213,28 @@ final class AppModel {
         }
         let task = Task { () -> ProjectRefreshResult in
             do {
-                var loadedWorktrees: [GitWorktree.ID: GitWorktreeSnapshot] = [:]
-                var refreshedProject = project
-                for try await event in service.projectRefreshEvents(
-                    at: project.rootURL,
-                    prioritizedWorktreeID: prioritizedWorktreeID,
-                    prioritizedSubmoduleScanMode: prioritizedSubmoduleScanMode,
-                    maximumConcurrentWorktrees: Self.maximumConcurrentWorktreeRefreshes
-                ) {
-                    try Task.checkCancellation()
-                    switch event {
-                    case let .discovered(discoveredProject, worktrees):
-                        refreshedProject = discoveredProject
+                let snapshot = try await collectProjectRefresh(
+                    service.projectRefreshEvents(
+                        at: project.rootURL,
+                        prioritizedWorktreeID: prioritizedWorktreeID,
+                        prioritizedSubmoduleScanMode: prioritizedSubmoduleScanMode,
+                        maximumConcurrentWorktrees: Self.maximumConcurrentWorktreeRefreshes
+                    ),
+                    project: project,
+                    onDiscovered: { discoveredProject, worktrees in
                         prepareProjectRefresh(
                             token: token,
                             project: discoveredProject,
                             discoveredWorktrees: worktrees
                         )
-                    case let .worktree(snapshot):
-                        loadedWorktrees[snapshot.id] = snapshot
+                    },
+                    onWorktree: { refreshedProject, snapshot in
                         applyPartialProjectRefresh(
                             token: token,
                             project: refreshedProject,
                             worktree: snapshot
                         )
                     }
-                }
-                let snapshot = GitProjectSnapshot(
-                    project: refreshedProject,
-                    worktrees: loadedWorktrees.values.sorted(
-                        by: compareWorktreeSnapshots
-                    ),
-                    refreshedAt: Date()
                 )
                 return ProjectRefreshResult(
                     snapshot: snapshot,
@@ -2662,6 +2655,47 @@ final class AppModel {
                 ?? "Git status returned no usable repository state."
         )
     }
+}
+
+/// 读完一次项目刷新的事件流，返回由收到的 worktree 组成的项目快照。
+/// 外层任务被取消时，`for try await` 读 AsyncThrowingStream 不会抛错，而是直接结束迭代；
+/// 读完后再查一次取消，避免把只收到一部分（甚至 0 个）worktree 的结果当成完整刷新写回。
+@MainActor
+func collectProjectRefresh(
+    _ events: AsyncThrowingStream<GitProjectRefreshEvent, any Error>,
+    project: GitProject,
+    onDiscovered: (GitProject, [GitWorktree]) -> Void,
+    onWorktree: (GitProject, GitWorktreeSnapshot) -> Void
+) async throws -> GitProjectSnapshot {
+    var loadedWorktrees: [GitWorktree.ID: GitWorktreeSnapshot] = [:]
+    var refreshedProject = project
+    for try await event in events {
+        try Task.checkCancellation()
+        switch event {
+        case let .discovered(discoveredProject, worktrees):
+            refreshedProject = discoveredProject
+            onDiscovered(discoveredProject, worktrees)
+        case let .worktree(snapshot):
+            loadedWorktrees[snapshot.id] = snapshot
+            onWorktree(refreshedProject, snapshot)
+        }
+    }
+    try Task.checkCancellation()
+    return GitProjectSnapshot(
+        project: refreshedProject,
+        worktrees: loadedWorktrees.values.sorted(by: compareWorktreeSnapshots),
+        refreshedAt: Date()
+    )
+}
+
+/// 缓存里记为完整、但一个 worktree 都没有的项目快照不可信：被取消的刷新曾经写出过这种快照，
+/// 导致项目从侧栏消失。这类项目不算完整，启动后重新核对 worktree 列表。
+func trustedCompleteProjectIDs(
+    _ projectIDs: Set<GitProject.ID>,
+    cachedProjects: [GitProjectSnapshot]
+) -> Set<GitProject.ID> {
+    let emptyProjectIDs = Set(cachedProjects.filter(\.worktrees.isEmpty).map(\.id))
+    return projectIDs.subtracting(emptyProjectIDs)
 }
 
 func worktreeSnapshotByApplyingRefresh(
