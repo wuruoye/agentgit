@@ -36,6 +36,7 @@ public enum GitSyntaxLanguage: Hashable, Sendable {
 
 public enum GitSyntaxTokenKind: Hashable, Sendable {
     case keyword
+    case type
     case string
     case number
     case comment
@@ -111,12 +112,25 @@ public enum DiffSyntaxHighlighter {
                 continue
             }
 
+            if unit == 0x40, startsAnnotation(text, at: index, language: language) {
+                let end = identifierEnd(text, from: index + 1)
+                spans.append(
+                    GitSyntaxSpan(location: index, length: end - index, kind: .keyword)
+                )
+                index = end
+                continue
+            }
+
             if isIdentifierStart(unit) {
                 let end = identifierEnd(text, from: index)
                 let word = text.substring(with: NSRange(location: index, length: end - index))
                 if keywords(for: language).contains(word) {
                     spans.append(
                         GitSyntaxSpan(location: index, length: end - index, kind: .keyword)
+                    )
+                } else if highlightsTypeNames(language), isTypeName(word) {
+                    spans.append(
+                        GitSyntaxSpan(location: index, length: end - index, kind: .type)
                     )
                 }
                 index = end
@@ -173,6 +187,35 @@ public enum DiffSyntaxHighlighter {
         case .plain, .python, .shell, .yaml, .markdown, .sql:
             false
         }
+    }
+
+    /// `@override`、`@MainActor`、Python 装饰器这类注解按关键字上色。
+    private static func startsAnnotation(
+        _ text: NSString,
+        at index: Int,
+        language: GitSyntaxLanguage
+    ) -> Bool {
+        switch language {
+        case .swift, .cLike, .python:
+            index + 1 < text.length && isIdentifierStart(text.character(at: index + 1))
+        case .plain, .shell, .json, .yaml, .markdown, .sql:
+            false
+        }
+    }
+
+    private static func highlightsTypeNames(_ language: GitSyntaxLanguage) -> Bool {
+        switch language {
+        case .swift, .cLike, .python: true
+        case .plain, .shell, .json, .yaml, .markdown, .sql: false
+        }
+    }
+
+    /// 首字母大写且含小写字母的标识符当作类型名；`MAX_SIZE` 这类全大写常量不算。
+    private static func isTypeName(_ word: String) -> Bool {
+        guard let first = word.utf16.first, (0x41...0x5A).contains(first) else {
+            return false
+        }
+        return word.utf16.contains { (0x61...0x7A).contains($0) }
     }
 
     private static func blockCommentEnd(_ text: NSString, from start: Int) -> Int {

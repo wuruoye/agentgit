@@ -112,6 +112,12 @@ struct IntegratedReviewWorkspace: View {
     @State private var diffCommand: DiffStackCommand?
     @Binding private var isReviewFocused: Bool
     @State private var paneBeforeFocus: ReviewPane?
+    /// 顶栏左端按钮收起整个左栏（文件树和提交列表）。
+    @AppStorage("agentgit.review-navigator-hidden") private var isNavigatorHidden = false
+    /// 左栏下半的提交列表可以收成一行标题。
+    @AppStorage("agentgit.review-commits-collapsed") private var isCommitsSectionCollapsed = false
+    /// 过滤框平时收起，由顶栏搜索按钮或 ⌘F 打开；框里有文字时一直显示。
+    @State private var isNavigatorSearchVisible = false
     @FocusState private var isCommitsNavigatorFocused: Bool
     @FocusState private var isCommitFilterFocused: Bool
     @FocusState private var isFileFilterFocused: Bool
@@ -454,14 +460,40 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func focusNavigatorFilter() {
-        if pane == .commits {
-            isCommitFilterFocused = true
-        } else {
-            isFileFilterFocused = true
+        isNavigatorHidden = false
+        isNavigatorSearchVisible = true
+        if pane == .commits { isCommitsSectionCollapsed = false }
+        let target = pane
+        // 过滤框要等这一轮布局出现后才能接收焦点。
+        Task { @MainActor in
+            await Task.yield()
+            if target == .commits {
+                isCommitFilterFocused = true
+            } else {
+                isFileFilterFocused = true
+            }
         }
     }
 
+    private var isNavigatorSearchActive: Bool {
+        isNavigatorSearchVisible || !review.filterText.isEmpty || !commitFilterText.isEmpty
+    }
+
+    private func toggleNavigatorSearch() {
+        guard isNavigatorSearchActive else {
+            focusNavigatorFilter()
+            return
+        }
+        isCommitFilterFocused = false
+        isFileFilterFocused = false
+        isNavigatorSearchVisible = false
+        review.filterText = ""
+        commitFilterText = ""
+    }
+
     private func focusNavigator(_ target: ReviewPane) {
+        isNavigatorHidden = false
+        if target == .commits { isCommitsSectionCollapsed = false }
         pane = target
         isCommitFilterFocused = false
         isFileFilterFocused = false
@@ -504,12 +536,19 @@ struct IntegratedReviewWorkspace: View {
     private var workspaceSplitView: some View {
         // 缩放放在各自的 hosting view 内，保证 SwiftUI 按钮收到的鼠标坐标与绘制位置一致。
         // NSSplitView 本身使用窗口坐标，列宽按缩放比例换算。
-        ReviewNativeSplitView(scale: (suppliedFontSettings ?? .shared).scale) {
-            FontScaleViewport(settings: suppliedFontSettings) { navigationPane }
-        } review: {
-            FontScaleViewport(settings: suppliedFontSettings) { reviewPane }
+        let scale = (suppliedFontSettings ?? .shared).scale
+        let groups = reviewDocumentStackGroups
+        return VStack(spacing: 0) {
+            // 顶栏横跨左栏和 diff，和 Claude Desktop 的审阅面板一样不画分隔线。
+            FontScaleViewport(settings: suppliedFontSettings) { reviewTopBar(groups: groups) }
+                .frame(height: ReviewWorkspaceStyle.toolbarHeight * scale)
+            ReviewNativeSplitView(scale: scale, isNavigationHidden: isNavigatorHidden) {
+                FontScaleViewport(settings: suppliedFontSettings) { navigationPane }
+            } review: {
+                FontScaleViewport(settings: suppliedFontSettings) { reviewPane(groups: groups) }
+            }
         }
-        .background(Color(nsColor: AgentGitPalette.card))
+        .background(Color(nsColor: AgentGitPalette.reviewBackground))
     }
 
     private func workspaceActions(compact: Bool) -> some View {
@@ -524,15 +563,6 @@ struct IntegratedReviewWorkspace: View {
                 }
             }
             .frame(width: 132, height: ReviewControlMetrics.height)
-            Button {
-                withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { isReviewFocused.toggle() }
-            } label: { ReviewIconView(icon: .focus) }
-            .buttonStyle(ReviewToolbarButtonStyle(kind: isReviewFocused ? .selected : .normal, iconOnly: true))
-            .keyboardShortcut("f", modifiers: [.command, .shift])
-            .help(isReviewFocused ? "Exit focused review (⇧⌘F)" : "Focus review (⇧⌘F)")
-            .accessibilityLabel("Toggle Review Focus")
-            .accessibilityValue(isReviewFocused ? "On" : "Off")
-
             AgentSessionsButton(worktree: snapshot.worktree)
             Button {
                 Task { await model.refreshSelectedProject() }
@@ -582,63 +612,84 @@ struct IntegratedReviewWorkspace: View {
 
     // MARK: - Navigation
 
+    /// 左栏上半是文件树，下半是提交列表，中间一条细线；两部分同时可见，⌘1 / ⌘2 切换焦点。
     private var navigationPane: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 20) {
-                navigatorTab(.commits)
-                navigatorTab(.files)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 18)
-            .frame(height: ReviewWorkspaceStyle.toolbarHeight)
-            ZStack {
-                historySection
-                    .opacity(pane == .commits ? 1 : 0)
-                    .allowsHitTesting(pane == .commits)
-                    .disabled(pane != .commits)
-                    .accessibilityHidden(pane != .commits)
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
                 filesSection
-                    .opacity(pane == .files ? 1 : 0)
-                    .allowsHitTesting(pane == .files)
-                    .disabled(pane != .files)
-                    .accessibilityHidden(pane != .files)
+                    .frame(maxHeight: .infinity)
+                Rectangle()
+                    .fill(Color(nsColor: AgentGitPalette.reviewDivider))
+                    .frame(height: 1)
+                commitsSectionHeader
+                if !isCommitsSectionCollapsed {
+                    historySection
+                        .frame(height: commitsSectionHeight(totalHeight: geometry.size.height))
+                }
             }
-            .animation(WorkspaceMotion.hover(reduceMotion: reduceMotion), value: pane)
         }
-        .background(Color(nsColor: AgentGitPalette.card))
+        .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
     }
 
-    private func navigatorTab(_ target: ReviewPane) -> some View {
-        Button { focusNavigator(target) } label: {
-            Text(target.title)
-                .font(ReviewWorkspaceStyle.font(13.5))
-                .foregroundStyle(Color(nsColor: pane == target ? ReviewWorkspaceStyle.primary : ReviewWorkspaceStyle.secondary))
-                .padding(.horizontal, 2)
-                .frame(height: 38)
-                .overlay(alignment: .bottom) {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(pane == target ? Color(nsColor: AgentGitPalette.activeControl) : .clear)
-                        .frame(height: 1.5)
-                }
-                .contentShape(Rectangle())
+    private func commitsSectionHeight(totalHeight: CGFloat) -> CGFloat {
+        let available = max(0, totalHeight - Self.commitsHeaderHeight - 1)
+        return min(available, max(160, available * 0.45))
+    }
+
+    private static let commitsHeaderHeight: CGFloat = 38
+
+    private var commitsSectionHeader: some View {
+        Button {
+            withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) {
+                isCommitsSectionCollapsed.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                    .rotationEffect(.degrees(isCommitsSectionCollapsed ? -90 : 0))
+                    .frame(width: 14, height: 14)
+                Text("Commits")
+                    .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.navigatorRowSize))
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
+                Spacer(minLength: 8)
+                Text(commitsSectionCountLabel)
+                    .font(ReviewWorkspaceStyle.font(13).monospacedDigit())
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                    .lineLimit(1)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 16)
+            .frame(height: Self.commitsHeaderHeight)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(target == .commits ? "Commit history (⌘1)" : "Changed files (⌘2)")
-        .accessibilityLabel("Show \(target.title)")
-        .accessibilityValue(pane == target ? "Selected" : "Not selected")
-        .accessibilityAddTraits(pane == target ? .isSelected : [])
+        .help(isCommitsSectionCollapsed ? "Show commits (⌘1)" : "Hide commits")
+        .accessibilityLabel("Commits, \(commitsSectionCountLabel)")
+        .accessibilityValue(isCommitsSectionCollapsed ? "Collapsed" : "Expanded")
+    }
+
+    private var commitsSectionCountLabel: String {
+        if isHunkHistoryActive { return "\(hunkHistoryCommits.count)" }
+        if isHistorySearchActive {
+            return "\(searchedCommits.count)\(hasMoreHistorySearchResults ? "+" : "")"
+        }
+        return "\(commits.count)\(hasMoreHistory ? "+" : "")"
     }
 
     private var historySection: some View {
         VStack(spacing: 0) {
-            IntegratedFilterField(
-                placeholder: "Search commits",
-                text: $commitFilterText,
-                isFocused: $isCommitFilterFocused
-            )
-            .help("Search commit messages, authors, hashes, and references")
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            if isNavigatorSearchVisible || !commitFilterText.isEmpty || isCommitFilterFocused {
+                IntegratedFilterField(
+                    placeholder: "Search commits",
+                    text: $commitFilterText,
+                    isFocused: $isCommitFilterFocused
+                )
+                .help("Search commit messages, authors, hashes, and references")
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+            }
             if let hunkHistoryFilter {
                 HunkHistoryFilterBar(filter: hunkHistoryFilter, clear: clearHunkHistory)
             }
@@ -648,14 +699,16 @@ struct IntegratedReviewWorkspace: View {
 
     private var filesSection: some View {
         VStack(spacing: 0) {
-            IntegratedFilterField(
-                placeholder: "Filter files",
-                text: $review.filterText,
-                isFocused: $isFileFilterFocused
-            )
-            .help("Filter changed files by name or path")
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            if isNavigatorSearchVisible || !review.filterText.isEmpty || isFileFilterFocused {
+                IntegratedFilterField(
+                    placeholder: "Filter files",
+                    text: $review.filterText,
+                    isFocused: $isFileFilterFocused
+                )
+                .help("Filter changed files by name or path")
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+            }
             filesList
         }
     }
@@ -672,7 +725,8 @@ struct IntegratedReviewWorkspace: View {
                     PendingOverviewRow(
                         workingCount: workingItems.count,
                         untrackedCount: untrackedItems.count,
-                        stagedCount: stagedItems.count
+                        stagedCount: stagedItems.count,
+                        leadingWidth: isHistorySearchActive ? 14 : graph.displayWidth
                     )
                     .id(IntegratedOverviewSelection.pending)
                     .tag(IntegratedOverviewSelection.pending)
@@ -1090,7 +1144,7 @@ struct IntegratedReviewWorkspace: View {
                     fileCount: fileCount,
                     isExpanded: expandedFolderIDs.contains(id)
                 )
-                .padding(.leading, CGFloat(row.depth) * 13)
+                .padding(.leading, CGFloat(row.depth) * Self.navigatorIndent)
                 .contentShape(Rectangle())
                 .tag(NavigatorSelection.folder(id))
                 .listRowBackground(WorkspaceSelectionBackground(isSelected: navigatorSelection == .folder(id)))
@@ -1117,7 +1171,7 @@ struct IntegratedReviewWorkspace: View {
                         && item.change.kind != .unmerged,
                     showsPathDetail: false
                 )
-                .padding(.leading, CGFloat(row.depth) * 13)
+                .padding(.leading, CGFloat(row.depth) * Self.navigatorIndent)
                 .contentShape(Rectangle())
                 .tag(NavigatorSelection.file(item.id.stackID))
                 .listRowBackground(WorkspaceSelectionBackground(isSelected: navigatorSelection == .file(item.id.stackID)))
@@ -1131,6 +1185,8 @@ struct IntegratedReviewWorkspace: View {
             }
         }
     }
+
+    private static let navigatorIndent: CGFloat = 14
 
     /// 键盘选择也打开文件；鼠标点击另行处理，确保重复点击仍能定位。
     private var navigatorSelectionBinding: Binding<NavigatorSelection?> {
@@ -1253,14 +1309,13 @@ struct IntegratedReviewWorkspace: View {
 
     // MARK: - Review
 
-    private var reviewPane: some View {
-        let groups = reviewDocumentStackGroups
-        return VStack(spacing: 0) {
-            reviewToolbar(groups: groups)
-            Divider()
+    private func reviewPane(groups: [DiffStackGroup]) -> some View {
+        VStack(spacing: 0) {
             if selectedReviewDocument == .summary, isContextMessageExpanded {
                 contextSummaryHeader
-                Divider()
+                Rectangle()
+                    .fill(Color(nsColor: AgentGitPalette.reviewDivider))
+                    .frame(height: 1)
             }
             reviewBody(groups: groups)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1296,114 +1351,85 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private func reviewToolbar(groups: [DiffStackGroup]) -> some View {
-        ViewThatFits(in: .horizontal) {
-            reviewToolbarContent(compact: false, groups: groups)
-            reviewToolbarContent(compact: true, groups: groups)
-        }
-        .padding(.horizontal, 18)
-        .frame(height: ReviewWorkspaceStyle.toolbarHeight)
-        .background(Color(nsColor: AgentGitPalette.card))
-    }
-
-    private func reviewToolbarContent(compact: Bool, groups: [DiffStackGroup]) -> some View {
-        HStack(spacing: 14) {
-            Button { selectedReviewDocument = .summary } label: {
-                Image(systemName: "chevron.left")
-            }
-            .buttonStyle(WorkspaceIconButtonStyle())
-            .keyboardShortcut(.cancelAction)
-            .help("Show every file in this review (Esc)")
-            .accessibilityLabel("Show All Files")
-            .workspaceControlSlot(isVisible: selectedReviewDocument != .summary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(reviewToolbarTitle)
-                    .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.titleSize))
-                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: 8) {
-                    if deferredPendingMutation != nil {
-                        Text("Checking file before applying action…")
-                    } else if currentFileItems.isEmpty, isContextDetailSettled {
-                        Text(activeContext == .pending ? "Working tree clean" : "No file changes")
-                    } else {
-                        Text(countedLabel(reviewDocumentFileItems.count, singular: "file"))
-                        DiffCountLabel(
-                            added: totalAddedLineCount,
-                            deleted: totalDeletedLineCount,
-                            font: ReviewWorkspaceStyle.font(12).monospacedDigit()
-                        )
-                    }
-                    if deferredPendingMutation == nil, !compact, !currentFileItems.isEmpty {
-                        Text("·")
-                        Text("\(reviewedFileCount)/\(currentFileItems.count) reviewed")
-                    }
+    /// 顶栏按 Claude Desktop 的审阅面板排布：左端是文件树开关和标题，右端只有搜索、更多、
+    /// 展开、关闭四个无边框图标。原来工具条上的布局切换、空白选项和 hunk 导航收进「更多」菜单，
+    /// 文件数和增删统计放进标题的下拉菜单。按钮位置固定，显隐只改透明度。
+    private func reviewTopBar(groups: [DiffStackGroup]) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) {
+                    isNavigatorHidden.toggle()
                 }
-                .font(ReviewWorkspaceStyle.font(12))
-                .lineLimit(1)
-                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+            } label: {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 14, weight: .regular))
             }
-            .frame(minWidth: compact ? 60 : 230, alignment: .leading)
-            .help(comparisonEndpointsLabel)
-            Spacer(minLength: 4)
-            reviewComparisonControls(compact: compact, groups: groups)
-                .fixedSize()
-        }
-    }
-
-    private var reviewToolbarTitle: String {
-        if case let .file(fileID) = selectedReviewDocument,
-           let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
-            return (item.change.path as NSString).lastPathComponent
-        }
-        switch activeContext {
-        case .pending: return "Uncommitted Changes"
-        case .commit: return contextMessageSubject ?? "Commit Review"
-        case .range: return "Commit Range"
-        }
-    }
-
-    private func reviewComparisonControls(compact: Bool, groups: [DiffStackGroup]) -> some View {
-        let hasExpandedFiles = groups.contains { $0.isExpanded && $0.files.contains(where: \.isExpanded) }
-        return HStack(spacing: compact ? 6 : 14) {
-            HStack(spacing: compact ? 6 : 14) {
-                ReviewLayoutControls(
-                    diffLayout: Binding(get: { model.diffLayout }, set: { model.diffLayout = $0 }),
-                    compact: compact
-                )
-                .fixedSize()
-                Menu {
-                    Toggle("Ignore Whitespace Changes", isOn: Binding(
-                        get: { model.diffOptions.ignoresWhitespace },
-                        set: { model.diffOptions.ignoresWhitespace = $0 }
-                    ))
-                } label: {
-                    ReviewIconView(icon: .display).frame(width: 28, height: 28)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .help(model.diffOptions.ignoresWhitespace ? "Display options — whitespace changes hidden" : "Display options — all whitespace changes shown")
-                .accessibilityLabel("Diff Display Options")
-                .accessibilityValue(model.diffOptions.ignoresWhitespace ? "Ignoring whitespace" : "Showing whitespace")
-            }
-            .workspaceControlSlot(isVisible: !reviewDocumentFileItems.isEmpty || !isContextDetailSettled)
+            .buttonStyle(ReviewToolbarButtonStyle(kind: isNavigatorHidden ? .normal : .toggledOn, iconOnly: true))
+            .help(isNavigatorHidden ? "Show file tree and commits" : "Hide file tree and commits")
+            .accessibilityLabel("Toggle File Tree")
+            .accessibilityValue(isNavigatorHidden ? "Hidden" : "Shown")
+            reviewTitleMenu
+                .padding(.leading, 4)
+            Spacer(minLength: 8)
             ZStack {
                 if isApplyingMutation || deferredPendingMutation != nil || (isLoadingDiffs && !isRefreshingSnapshot) {
                     ProgressView().controlSize(.small)
+                        .help(deferredPendingMutation != nil ? "Checking file before applying action…" : "Updating review…")
                         .accessibilityLabel(deferredPendingMutation != nil ? "Checking file before applying action…" : "Updating review…")
                 }
             }
             .frame(width: 18, height: ReviewControlMetrics.height)
-            Button {
-                setEntireFileListExpanded(!hasExpandedFiles)
-            } label: {
-                ReviewIconView(icon: hasExpandedFiles ? .collapse : .expand)
+            HStack(spacing: 2) {
+                Button(action: toggleNavigatorSearch) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .regular))
+                }
+                .buttonStyle(ReviewToolbarButtonStyle(kind: isNavigatorSearchActive ? .toggledOn : .normal, iconOnly: true))
+                .help(isNavigatorSearchActive ? "Close search" : "Filter files and commits (⌘F)")
+                .accessibilityLabel("Search")
+                .accessibilityValue(isNavigatorSearchActive ? "On" : "Off")
+                reviewMoreMenu(groups: groups)
+                Button {
+                    withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { isReviewFocused.toggle() }
+                } label: {
+                    Image(systemName: isReviewFocused
+                        ? "arrow.down.right.and.arrow.up.left"
+                        : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 13, weight: .regular))
+                }
+                .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .help(isReviewFocused ? "Exit focused review (⇧⌘F)" : "Focus review (⇧⌘F)")
+                .accessibilityLabel("Toggle Review Focus")
+                .accessibilityValue(isReviewFocused ? "On" : "Off")
+                Button { selectedReviewDocument = .summary } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .regular))
+                }
+                .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
+                .keyboardShortcut(.cancelAction)
+                .help("Close this file and show every file in this review (Esc)")
+                .accessibilityLabel("Show All Files")
+                .workspaceControlSlot(isVisible: selectedReviewDocument != .summary)
             }
-            .disabled(reviewDocumentFileItems.isEmpty)
-            .help(hasExpandedFiles ? "Collapse All Files" : "Expand All Files")
-            .accessibilityLabel(hasExpandedFiles ? "Collapse All Files" : "Expand All Files")
-            Menu {
+            .fixedSize()
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 12)
+        .frame(height: ReviewWorkspaceStyle.toolbarHeight)
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: AgentGitPalette.reviewBackground))
+    }
+
+    private var reviewTitleMenu: some View {
+        Menu {
+            Section(reviewSummaryLine) {
+                if deferredPendingMutation == nil, !currentFileItems.isEmpty {
+                    Text("\(reviewedFileCount)/\(currentFileItems.count) reviewed")
+                }
+                Text(comparisonEndpointsLabel)
+            }
+            if contextMessageSubject != nil {
                 Toggle("Show Commit Message", isOn: Binding(
                     get: { isContextMessageExpanded },
                     set: { expanded in
@@ -1412,42 +1438,101 @@ struct IntegratedReviewWorkspace: View {
                         }
                     }
                 ))
-            } label: {
-                ReviewIconView(icon: .more).frame(width: 28, height: 28)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .help("Review options — commit message")
-            .accessibilityLabel("Review Options")
-            .workspaceControlSlot(isVisible: contextMessageSubject != nil)
-            // 导航隐藏时保留空间，计数变化也不改变按钮位置和点击区域。
-            Divider()
-                .frame(height: 16)
-                .opacity(visibleHunkCount > 0 ? 1 : 0)
-            HStack(spacing: 2) {
-                Button { moveHunk(by: -1) } label: { ReviewIconView(icon: .previous) }
-                    .help("Previous hunk (⌥↑)")
-                    .accessibilityLabel("Previous hunk")
-                Text("\(min(max(1, hunkPosition.index), visibleHunkCount))\(compact ? "/" : " / ")\(visibleHunkCount)")
-                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+            if case let .commit(commitID) = activeContext {
+                Divider()
+                Button("Copy Commit SHA") { copyToPasteboard(commitID) }
+                if let subject = contextMessageSubject {
+                    Button("Copy Subject") { copyToPasteboard(subject) }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(reviewTopBarTitle)
+                    .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.titleSize))
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .frame(width: compact ? 62 : 74)
-                    .help("Current hunk / \(countedLabel(visibleHunkCount, singular: "hunk"))")
-                    .accessibilityLabel("Hunk \(min(max(1, hunkPosition.index), visibleHunkCount)) of \(visibleHunkCount)")
-                Button { moveHunk(by: 1) } label: { ReviewIconView(icon: .next) }
-                    .help("Next hunk (⌥↓)")
-                    .accessibilityLabel("Next hunk")
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
             }
-            .fixedSize()
-            .opacity(visibleHunkCount > 0 ? 1 : 0)
-            .disabled(visibleHunkCount == 0)
-            .allowsHitTesting(visibleHunkCount > 0)
-            .accessibilityHidden(visibleHunkCount == 0)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(WorkspaceIconButtonStyle())
-        .font(ReviewWorkspaceStyle.font(11.5).monospacedDigit())
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help("\(reviewSummaryLine) · \(comparisonEndpointsLabel)")
+        .accessibilityLabel(reviewTopBarTitle)
+        .accessibilityHint("Shows review details and commit message options")
+    }
 
+    /// 顶栏标题：提交显示 SHA 加标题，打开单个文件时显示文件名。
+    private var reviewTopBarTitle: String {
+        if case let .file(fileID) = selectedReviewDocument,
+           let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
+            return (item.change.path as NSString).lastPathComponent
+        }
+        switch activeContext {
+        case .pending:
+            return "Uncommitted changes"
+        case let .commit(commitID):
+            return "\(String(commitID.prefix(13))) \(contextMessageSubject ?? "")"
+        case let .range(base, head):
+            return "\(String(base.prefix(7)))..\(String(head.prefix(7))) Commit Range"
+        }
+    }
+
+    private var reviewSummaryLine: String {
+        if deferredPendingMutation != nil { return "Checking file before applying action…" }
+        if currentFileItems.isEmpty, isContextDetailSettled {
+            return activeContext == .pending ? "Working tree clean" : "No file changes"
+        }
+        return "\(countedLabel(reviewDocumentFileItems.count, singular: "file"))  "
+            + "+\(totalAddedLineCount)  -\(totalDeletedLineCount)"
+    }
+
+    private func reviewMoreMenu(groups: [DiffStackGroup]) -> some View {
+        let hasExpandedFiles = groups.contains { $0.isExpanded && $0.files.contains(where: \.isExpanded) }
+        return Menu {
+            Picker("Diff Layout", selection: Binding(get: { model.diffLayout }, set: { layout in
+                withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { model.diffLayout = layout }
+            })) {
+                ForEach(DiffLayoutMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+            Toggle("Ignore Whitespace Changes", isOn: Binding(
+                get: { model.diffOptions.ignoresWhitespace },
+                set: { model.diffOptions.ignoresWhitespace = $0 }
+            ))
+            Divider()
+            Button(hasExpandedFiles ? "Collapse All Files" : "Expand All Files") {
+                setEntireFileListExpanded(!hasExpandedFiles)
+            }
+            .disabled(reviewDocumentFileItems.isEmpty)
+            Divider()
+            Section(visibleHunkCount > 0
+                ? "Hunk \(min(max(1, hunkPosition.index), visibleHunkCount)) of \(visibleHunkCount)"
+                : "No hunks") {
+                Button("Previous Hunk") { moveHunk(by: -1) }
+                    .disabled(visibleHunkCount == 0)
+                Button("Next Hunk") { moveHunk(by: 1) }
+                    .disabled(visibleHunkCount == 0)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .regular))
+                .rotationEffect(.degrees(90))
+        }
+        .menuStyle(.button)
+        .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
+        .menuIndicator(.hidden)
+        .help(model.diffOptions.ignoresWhitespace
+            ? "Review options — whitespace changes hidden"
+            : "Review options — layout, whitespace, hunks")
+        .accessibilityLabel("Review Options")
     }
 
     /// commit message 原来占着 diff 顶部一大块，现在收在比较条里按需展开。
@@ -3518,6 +3603,8 @@ struct IntegratedReviewWorkspace: View {
             head
         }
         pane = .commits
+        isNavigatorHidden = false
+        isCommitsSectionCollapsed = false
         isCommitFilterFocused = false
         isFileFilterFocused = false
         hunkHistoryCommits = []
@@ -6364,7 +6451,7 @@ struct ContextDetailLoadKey: Hashable {
 enum ReviewSplitLayoutMetrics {
     static let widthDefaultsKey = "agentgit.review-navigation-width.v2"
     static let minimumNavigationWidth: CGFloat = 200
-    static let idealNavigationWidth: CGFloat = 260
+    static let idealNavigationWidth: CGFloat = 300
     static let maximumNavigationWidth: CGFloat = 360
     static let minimumReviewWidth: CGFloat = 490
 
@@ -6399,15 +6486,18 @@ struct ReviewNativeSplitView<Navigation: View, Review: View>:
     NSViewControllerRepresentable {
     @Environment(\.reviewSplitDefaultsSuiteName) private var defaultsSuiteName
     let scale: CGFloat
+    let isNavigationHidden: Bool
     let navigation: Navigation
     let review: Review
 
     init(
         scale: CGFloat = 1,
+        isNavigationHidden: Bool = false,
         @ViewBuilder navigation: () -> Navigation,
         @ViewBuilder review: () -> Review
     ) {
         self.scale = scale
+        self.isNavigationHidden = isNavigationHidden
         self.navigation = navigation()
         self.review = review()
     }
@@ -6432,6 +6522,7 @@ struct ReviewNativeSplitView<Navigation: View, Review: View>:
             navigation: AnyView(navigation),
             review: AnyView(review)
         )
+        controller.setNavigationHidden(isNavigationHidden)
     }
 }
 
@@ -6448,6 +6539,7 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
     private var lastLayoutWidth: CGFloat = 0
     private var pendingPersistedWidth: CGFloat?
     private var persistTimer: Timer?
+    private var initiallyHidesNavigation = false
 
     init(
         defaults: UserDefaults,
@@ -6499,6 +6591,7 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
         )
         managedSplitView.addArrangedSubview(navigationController.view)
         managedSplitView.addArrangedSubview(reviewController.view)
+        navigationController.view.isHidden = initiallyHidesNavigation
         managedSplitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         managedSplitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         NotificationCenter.default.addObserver(
@@ -6511,7 +6604,8 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard managedSplitView.bounds.width
+        guard !navigationController.view.isHidden,
+              managedSplitView.bounds.width
                 >= ReviewSplitLayoutMetrics.minimumNavigationWidth * scale
                     + managedSplitView.dividerThickness,
               managedSplitView.subviews.count >= 2 else {
@@ -6534,6 +6628,19 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
         isApplyingPersistedWidth = true
         managedSplitView.setPosition(width, ofDividerAt: 0)
         isApplyingPersistedWidth = false
+    }
+
+    /// 顶栏的文件树按钮收起左栏时只隐藏视图，宽度记录不变；再次显示时按记录的宽度恢复。
+    func setNavigationHidden(_ hidden: Bool) {
+        guard isViewLoaded else {
+            initiallyHidesNavigation = hidden
+            return
+        }
+        guard navigationController.view.isHidden != hidden else { return }
+        navigationController.view.isHidden = hidden
+        if !hidden { hasAppliedInitialWidth = false }
+        managedSplitView.adjustSubviews()
+        view.needsLayout = true
     }
 
     func update(scale: CGFloat, navigation: AnyView, review: AnyView) {
@@ -6599,6 +6706,7 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
 
     @objc func splitViewDidResizeSubviews(_ notification: Notification) {
         guard hasAppliedInitialWidth,
+              !navigationController.view.isHidden,
               !isApplyingPersistedWidth,
               managedSplitView.subviews.count >= 2 else {
             return
@@ -6767,55 +6875,6 @@ struct DiffCountLabel: View {
 }
 
 
-private struct ReviewLayoutControls: View {
-    @Binding var diffLayout: DiffLayoutMode
-    var compact = false
-    @Namespace private var selectionAnimation
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 2) {
-                ForEach(DiffLayoutMode.allCases) { mode in
-                    Button {
-                        withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { diffLayout = mode }
-                    } label: {
-                        Label {
-                            if !compact { Text(mode.title) }
-                        } icon: {
-                            ReviewIconView(icon: mode == .unified ? .unified : .split, size: 13)
-                        }
-                        .labelStyle(WorkspaceActionLabelStyle(iconOnly: compact))
-                        .padding(.horizontal, compact ? 6 : 8)
-                        .frame(minWidth: 28, minHeight: 26)
-                        .background {
-                            if diffLayout == mode {
-                                RoundedRectangle(cornerRadius: 5)
-                                    .fill(Color(nsColor: ReviewWorkspaceStyle.selection))
-                                    .matchedGeometryEffect(id: "layout-selection", in: selectionAnimation)
-                            }
-                        }
-                        .contentShape(RoundedRectangle(cornerRadius: 5))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
-                    .accessibilityLabel(mode.title)
-                    .accessibilityValue(diffLayout == mode ? "Selected" : "Not selected")
-                    .accessibilityAddTraits(diffLayout == mode ? .isSelected : [])
-                    .help("\(mode.title) diff")
-                }
-            }
-            .padding(2)
-            .background(Color(nsColor: AgentGitPalette.inputBackground), in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Diff Layout")
-        }
-        .controlSize(.small)
-        .font(ReviewWorkspaceStyle.font(12))
-    }
-}
-
-
 private struct IntegratedFilterField: View {
     let placeholder: String
     @Binding var text: String
@@ -6848,7 +6907,7 @@ private struct IntegratedFilterField: View {
             .accessibilityLabel("Clear Filter")
             .workspaceControlSlot(isVisible: !text.isEmpty)
         }
-        .modifier(WorkspaceSearchFieldStyle(isFocused: isFocused, isQuiet: true))
+        .modifier(WorkspaceSearchFieldStyle(isFocused: isFocused))
     }
 }
 
@@ -7199,28 +7258,22 @@ private struct NavigatorFolderRow: View {
 
     var body: some View {
         let fileCountLabel = countedLabel(fileCount, singular: "file")
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             Image(systemName: "chevron.right")
-                .font(.agentGitInterface(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 10, height: 10)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                .frame(width: 14, height: 14)
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
-            Image(systemName: isExpanded ? "folder.fill" : "folder")
-                .font(.agentGitInterface(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 14)
             Text(name)
-                .font(.agentGitInterface(.callout).weight(.medium))
+                .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.navigatorRowSize))
+                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
-            Text("\(fileCount)")
-                .font(.agentGitInterface(.caption2).monospacedDigit())
-                .foregroundStyle(.tertiary)
         }
+        .frame(minHeight: 26)
         .contentShape(Rectangle())
-        .padding(.vertical, 2)
-        .help(name)
+        .help("\(name) · \(fileCountLabel)")
         .accessibilityLabel("\(name), \(fileCountLabel)")
         .accessibilityHint(isExpanded ? "Collapse folder" : "Expand folder")
     }
@@ -7235,20 +7288,25 @@ private struct NavigatorFileRow: View {
     var showsPathDetail = true
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(item.statusLabel)
-                .font(.caption2.monospaced().weight(.bold))
+        HStack(spacing: 6) {
+            // 和 diff 文件标题一样用 `</>` 图标；修改的文件灰色，其他状态用对应颜色。
+            Image(systemName: item.stackStatus == .conflicted
+                ? "exclamationmark.triangle.fill"
+                : "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(statusColor)
-                .frame(width: 12)
+                .frame(width: 14, height: 14)
 
             VStack(alignment: .leading, spacing: 1) {
                 fileName
-                    .font(.agentGitInterface(.callout))
+                    .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.navigatorRowSize))
+                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 if showsPathDetail, !pathDetail.isEmpty {
                     Text(pathDetail)
-                        .font(.agentGitInterface(.caption2))
-                        .foregroundStyle(.tertiary)
+                        .font(ReviewWorkspaceStyle.font(11.5))
+                        .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.tertiary))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -7257,18 +7315,21 @@ private struct NavigatorFileRow: View {
             Spacer(minLength: 4)
 
             if let diff {
-                Text("+\(diff.addedLineCount)")
-                    .foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
-                Text("−\(diff.deletedLineCount)")
-                    .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
+                HStack(spacing: 4) {
+                    Text("+\(diff.addedLineCount)")
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
+                    Text("-\(diff.deletedLineCount)")
+                        .foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
+                }
+                .fixedSize()
             }
             if isReviewed {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(Color(nsColor: AgentGitPalette.statusAdded))
             }
         }
-        .font(.agentGitInterface(.caption2).monospacedDigit())
-        .padding(.vertical, 1)
+        .font(ReviewWorkspaceStyle.font(12).monospacedDigit())
+        .frame(minHeight: 26)
         .help(helpText)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
@@ -7309,7 +7370,7 @@ private struct NavigatorFileRow: View {
         case .deleted: Color(nsColor: AgentGitPalette.statusDeleted)
         case .renamed: Color(nsColor: AgentGitPalette.statusRenamed)
         case .conflicted: Color(nsColor: AgentGitPalette.statusConflicted)
-        case .modified: Color(nsColor: AgentGitPalette.statusModified)
+        case .modified: Color(nsColor: ReviewWorkspaceStyle.tertiary)
         }
     }
 
@@ -7383,53 +7444,33 @@ func navigatorFileAccessibilityLabel(
     return details.joined(separator: ", ")
 }
 
+/// 提交列表顶端的「Uncommitted changes」。左侧图标落在提交图谱那一列，文字和提交标题对齐。
 struct PendingOverviewRow: View {
     let workingCount: Int
     let untrackedCount: Int
     let stagedCount: Int
+    var leadingWidth: CGFloat = 14
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 9) {
-                Image(systemName: totalCount == 0 ? "checkmark.circle" : "circle.dotted")
-                    .font(.system(size: 13, weight: .light))
-                    .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
-                    .frame(width: 17)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(totalCount == 0 ? "Working tree clean" : "Pending Changes")
-                        .font(ReviewWorkspaceStyle.font(totalCount == 0 ? 12 : 14))
-                        .foregroundStyle(Color(nsColor: totalCount == 0 ? ReviewWorkspaceStyle.secondary : ReviewWorkspaceStyle.primary))
-                        .lineLimit(1)
-                    if totalCount > 0 {
-                        ViewThatFits(in: .horizontal) {
-                            HStack(spacing: 6) {
-                                Text("Working \(workingCount)")
-                                if untrackedCount > 0 {
-                                    Text("·")
-                                    Text("Untracked \(untrackedCount)")
-                                }
-                                Text("·")
-                                Text("Staged \(stagedCount)")
-                            }
-                            .fixedSize(horizontal: true, vertical: false)
-                            Text(countedLabel(totalCount, singular: "changed file"))
-                        }
-                        .font(ReviewWorkspaceStyle.font(11.5))
-                        .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
-                        .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: totalCount == 0 ? 44 : CommitGraphMetrics.rowHeight)
-            Rectangle()
-                .fill(Color(nsColor: AgentGitPalette.cardBorder).opacity(0.65))
-                .frame(height: 0.5)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
+        HStack(spacing: 7) {
+            Image(systemName: totalCount == 0 ? "checkmark.circle" : "circle.dotted")
+                .font(.system(size: 12, weight: .light))
+                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                .frame(width: leadingWidth)
+            Text("Uncommitted changes")
+                .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.commitTitleSize))
+                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Text(totalCount == 0 ? "Clean" : "\(totalCount)")
+                .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.metadataSize).monospacedDigit())
+                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                .lineLimit(1)
         }
+        .padding(.trailing, 8)
+        .frame(height: 38)
         .contentShape(Rectangle())
+        .help(breakdown)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
             pendingOverviewAccessibilityLabel(
@@ -7441,11 +7482,20 @@ struct PendingOverviewRow: View {
         .accessibilityHint("Select to review pending changes")
     }
 
+    private var breakdown: String {
+        guard totalCount > 0 else { return "Working tree clean" }
+        var parts = ["Working \(workingCount)"]
+        if untrackedCount > 0 { parts.append("Untracked \(untrackedCount)") }
+        parts.append("Staged \(stagedCount)")
+        return parts.joined(separator: " · ")
+    }
+
     private var totalCount: Int {
         workingCount + untrackedCount + stagedCount
     }
 }
 
+/// 每个提交两行：标题单行截断；下面一行灰色小字是 SHA、作者和相对时间，引用标签放在末尾。
 struct IntegratedCommitRow: View {
     let commit: GitCommit
     let graphRow: CommitGraphRow?
@@ -7454,8 +7504,7 @@ struct IntegratedCommitRow: View {
     let isSearchResult: Bool
 
     var body: some View {
-        let references = commit.references
-        return HStack(alignment: .center, spacing: 7) {
+        HStack(alignment: .center, spacing: 7) {
             if let graphRow {
                 CommitGraphView(
                     row: graphRow,
@@ -7468,7 +7517,7 @@ struct IntegratedCommitRow: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: graphWidth, height: CommitGraphMetrics.rowHeight)
             }
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(commit.subject)
                     .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.commitTitleSize))
                     .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.primary))
@@ -7476,42 +7525,8 @@ struct IntegratedCommitRow: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ViewThatFits(in: .horizontal) {
-                HStack(spacing: 7) {
-                    Text(commit.authorName)
-                        .lineLimit(1)
-                        .layoutPriority(0)
-                    ForEach(references.prefix(1)) { reference in
-                        CommitReferenceBadge(reference: reference)
-                    }
-                    if references.count > 1 {
-                        Menu {
-                            ForEach(references.dropFirst()) { reference in
-                                Button("Copy \(reference.label)") {
-                                    copyToPasteboard(reference.fullName)
-                                }
-                            }
-                        } label: {
-                            Text("+\(references.count - 1)")
-                                .font(ReviewWorkspaceStyle.font(10.5).monospacedDigit())
-                                .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
-                        }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
-                        .fixedSize()
-                        .help(
-                            references.dropFirst().map(\.label).joined(separator: "\n")
-                        )
-                    }
-                    Spacer(minLength: 2)
-                    Text(commitListTimestamp(commit.authoredAt))
-                        .fixedSize()
-                        .layoutPriority(2)
-                }
-                HStack(spacing: 7) {
-                    Text(commit.authorName).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(commitListTimestamp(commit.authoredAt)).fixedSize()
-                }
+                    metadataLine(showsReferences: true)
+                    metadataLine(showsReferences: false)
                 }
                 .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.metadataSize))
                 .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
@@ -7524,6 +7539,56 @@ struct IntegratedCommitRow: View {
         .accessibilityLabel(commitRowAccessibilityLabel(commit))
         .accessibilityHint("Select to review this commit")
     }
+
+    private func metadataLine(showsReferences: Bool) -> some View {
+        let references = commit.references
+        return HStack(spacing: 0) {
+            Text(String(commit.oid.prefix(13)))
+                .font(.system(size: 11.5, design: .monospaced))
+                .fixedSize()
+            Text(" · ").fixedSize()
+            Text(commit.authorName)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(" · ").fixedSize()
+            Text(commitListRelativeTime(commit.authoredAt))
+                .fixedSize()
+            if showsReferences, let reference = references.first {
+                CommitReferenceBadge(reference: reference)
+                    .padding(.leading, 6)
+                if references.count > 1 {
+                    Menu {
+                        ForEach(references.dropFirst()) { reference in
+                            Button("Copy \(reference.label)") {
+                                copyToPasteboard(reference.fullName)
+                            }
+                        }
+                    } label: {
+                        Text("+\(references.count - 1)")
+                            .font(ReviewWorkspaceStyle.font(10.5).monospacedDigit())
+                            .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .padding(.leading, 4)
+                    .help(references.dropFirst().map(\.label).joined(separator: "\n"))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+    }
+}
+
+/// 提交列表里的相对时间：「41m ago」「3h ago」「2d ago」，超过一个月显示日期。
+func commitListRelativeTime(_ date: Date, relativeTo now: Date = Date()) -> String {
+    let compact = compactRelativeTime(date, relativeTo: now)
+    if compact == "now" { return "just now" }
+    if let unit = compact.last, "mhd".contains(unit), Int(compact.dropLast()) != nil {
+        return compact + " ago"
+    }
+    return compact
 }
 
 func pendingOverviewAccessibilityLabel(

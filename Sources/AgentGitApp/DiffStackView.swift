@@ -109,6 +109,25 @@ enum DiffContextGapBuilder {
                     )
                 )
             }
+        } else if firstHunk.newStart > 1 {
+            // 第一个 hunk 之前的未改动行也算一段折叠上下文，和 hunk 之间的一样从下往上展开。
+            let gapID = "\(fileID):context:start->\(firstHunk.id)"
+            let totalLineCount = firstHunk.newStart - 1
+            let requestedLineCount = min(totalLineCount, revealedLineCountByGapID[gapID] ?? 0)
+            let revealedLines = contextLines(
+                in: sourceLines,
+                from: firstHunk.newStart - requestedLineCount,
+                to: firstHunk.newStart
+            )
+            gaps.append(
+                DiffStackContextGap(
+                    id: gapID,
+                    hiddenLineCount: totalLineCount - revealedLines.count,
+                    revealedLines: revealedLines,
+                    nextHunkAnchorID: hunkAnchorID(fileID: fileID, hunkID: firstHunk.id),
+                    contextRenderID: contextRenderID
+                )
+            )
         }
 
         gaps.append(contentsOf: zip(compactDiff.hunks, compactDiff.hunks.dropFirst()).compactMap {
@@ -492,16 +511,16 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         static let lineHeight: CGFloat = 20
         static let hunkHeight = ReviewWorkspaceStyle.hunkHeaderHeight
         static let imageHeight: CGFloat = 360
-        static let contextEdgeHeight: CGFloat = 22
+        static let contextEdgeHeight = DiffHunkCellView.gapHeight
         static let fileContextToggleHeight: CGFloat = 22
         static let fileHeight = ReviewWorkspaceStyle.fileHeaderHeight
         static let folderHeight: CGFloat = 24
         static let groupHeight: CGFloat = 32
         static let noteHeight: CGFloat = 30
         static let viewportAnchorBottomPadding: CGFloat = groupHeight + fileHeight
-        static let unifiedCodeLeading: CGFloat = 80
+        static let unifiedCodeLeading = DiffLineCellView.codeLeading
         static let unifiedCodeTrailing: CGFloat = 8
-        static let sideCodeLeading: CGFloat = 47
+        static let sideCodeLeading = DiffSideLinePane.codeLeading
         static let sideCodeTrailing: CGFloat = 8
         static let maximumDisplayedColumns = 4_000
         static let codeCharacterWidth = ("M" as NSString).size(
@@ -1170,7 +1189,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case .group: Metrics.groupHeight
         case .folder: Metrics.folderHeight
         case .file: Metrics.fileHeight
-        case .hunk: Metrics.hunkHeight
+        case let .hunk(hunk): hunk.contextGap == nil ? Metrics.hunkHeight : DiffHunkCellView.gapHeight
         case .contextEdge: Metrics.contextEdgeHeight
         case .fileContextToggle: Metrics.fileContextToggleHeight
         case .line, .sideBySide: Metrics.lineHeight
@@ -4169,7 +4188,7 @@ private final class DiffStickyClipView: NSView {
         AgentGitPalette.fileHeader.setFill()
         NSRect(x: 0, y: groupHeight, width: bounds.width, height: fileHeight).fill()
         if fileHeight > 0 {
-            AgentGitPalette.separator.setFill()
+            AgentGitPalette.reviewDivider.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
     }
@@ -4315,7 +4334,7 @@ private final class DiffGroupCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         AgentGitPalette.groupHeader.setFill()
         dirtyRect.fill()
-        AgentGitPalette.separator.withAlphaComponent(0.55).setFill()
+        AgentGitPalette.reviewDivider.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -4441,7 +4460,7 @@ private final class DiffFolderCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         AgentGitPalette.folderHeader.setFill()
         dirtyRect.fill()
-        AgentGitPalette.separator.withAlphaComponent(0.55).setFill()
+        AgentGitPalette.reviewDivider.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -4731,13 +4750,14 @@ private final class DiffFileStatsView: NSView {
         nil
     }
 
-    static let reservedWidth: CGFloat = 96
+    static let font = ReviewWorkspaceStyle.nativeFont(13)
+    private static let spacing: CGFloat = 6
 
     func update(diff: GitFileDiff?) {
         addedLineCount = diff?.addedLineCount
         deletedLineCount = diff?.deletedLineCount
         if let diff {
-            toolTip = "+\(diff.addedLineCount)  −\(diff.deletedLineCount)"
+            toolTip = "+\(diff.addedLineCount)  -\(diff.deletedLineCount)"
             setAccessibilityLabel(
                 countedLabel(
                     diff.deletedLineCount,
@@ -4758,37 +4778,30 @@ private final class DiffFileStatsView: NSView {
         needsDisplay = true
     }
 
+    /// 统计紧跟在路径后面，宽度按实际数字算。
+    var preferredWidth: CGFloat {
+        guard let addedLineCount, let deletedLineCount else {
+            return ceil(("…" as NSString).size(withAttributes: [.font: Self.font]).width) + 2
+        }
+        let added = ("+\(addedLineCount)" as NSString).size(withAttributes: [.font: Self.font]).width
+        let deleted = ("-\(deletedLineCount)" as NSString).size(withAttributes: [.font: Self.font]).width
+        return ceil(added + Self.spacing + deleted) + 2
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let addedLineCount, let deletedLineCount else {
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedDigitSystemFont(
-                    ofSize: 10.5,
-                    weight: .medium
-                ),
-                .foregroundColor: NSColor.tertiaryLabelColor
-            ]
-            let text = NSAttributedString(string: "…", attributes: attributes)
-            let size = text.size()
-            text.draw(
-                at: NSPoint(
-                    x: max(0, bounds.maxX - size.width),
-                    y: max(0, (bounds.height - size.height) / 2)
-                )
-            )
+            let text = NSAttributedString(string: "…", attributes: [
+                .font: Self.font,
+                .foregroundColor: AgentGitPalette.reviewTertiaryText
+            ])
+            text.draw(at: NSPoint(x: 0, y: max(0, (bounds.height - text.size().height) / 2)))
             return
         }
-
-        let naturalFont = ReviewWorkspaceStyle.nativeFont(11.5)
-        let naturalWidth = ("+\(addedLineCount)  −\(deletedLineCount)" as NSString)
-            .size(withAttributes: [.font: naturalFont]).width + 2
-        let font = ReviewWorkspaceStyle.nativeFont(11.5 * min(1, max(1, bounds.width - 2) / naturalWidth))
-        let added = NSAttributedString(string: "+\(addedLineCount)", attributes: [.font: font, .foregroundColor: AgentGitPalette.additionText])
-        let deleted = NSAttributedString(string: "−\(deletedLineCount)", attributes: [.font: font, .foregroundColor: AgentGitPalette.deletionText])
-        let deletedSize = deleted.size()
+        let added = NSAttributedString(string: "+\(addedLineCount)", attributes: [.font: Self.font, .foregroundColor: AgentGitPalette.additionText])
+        let deleted = NSAttributedString(string: "-\(deletedLineCount)", attributes: [.font: Self.font, .foregroundColor: AgentGitPalette.deletionText])
         let addedSize = added.size()
-        let right = bounds.width - 1
-        deleted.draw(at: NSPoint(x: right - deletedSize.width, y: (bounds.height - deletedSize.height) / 2))
-        added.draw(at: NSPoint(x: right - deletedSize.width - 9 - addedSize.width, y: (bounds.height - addedSize.height) / 2))
+        added.draw(at: NSPoint(x: 0, y: (bounds.height - addedSize.height) / 2))
+        deleted.draw(at: NSPoint(x: addedSize.width + Self.spacing, y: (bounds.height - deleted.size().height) / 2))
     }
 }
 
@@ -4817,8 +4830,8 @@ private final class DiffFileCellView: NSTableCellView {
         selectable: false
     )
     private let directoryLabel = DiffTextField(
-        font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.metadataSize),
-        textColor: ReviewWorkspaceStyle.secondary,
+        font: ReviewWorkspaceStyle.nativeFont(13),
+        textColor: AgentGitPalette.reviewTertiaryText,
         alignment: .left,
         selectable: false
     )
@@ -4887,8 +4900,9 @@ private final class DiffFileCellView: NSTableCellView {
         )
         resetDiscardConfirmation()
         title.lineBreakMode = .byTruncatingMiddle
-        title.usesSingleLineMode = false
+        title.usesSingleLineMode = true
         title.cell?.truncatesLastVisibleLine = true
+        directoryLabel.usesSingleLineMode = true
     }
 
     required init?(coder: NSCoder) {
@@ -4928,6 +4942,8 @@ private final class DiffFileCellView: NSTableCellView {
         clickHandler(fileID)
     }
 
+    /// 标题行只有一行：箭头、代码图标、文件名、目录、增删统计依次排开，文件操作靠右。
+    /// 空间不够时先压缩目录，再压缩文件名；按钮位置固定在右侧，不随文字长短移动。
     override func layout() {
         super.layout()
         let compact = bounds.width < 720
@@ -4943,18 +4959,36 @@ private final class DiffFileCellView: NSTableCellView {
         let discardWidth = discardButton.discardWidth
         let widths = [wholeFileWidth, primaryWidth, discardWidth, ReviewControlMetrics.height, ReviewControlMetrics.height]
         let controlsWidth = widths.reduce(0, +) + CGFloat(widths.filter { $0 > 0 }.count - 1) * ReviewControlMetrics.spacing
+        let controlsX = max(0, bounds.width - ReviewControlMetrics.trailingInset - controlsWidth)
+        chevron.frame = NSRect(x: 14, y: headerCenterY(13), width: 13, height: 13)
+        statusIcon.frame = NSRect(x: 33, y: headerCenterY(16), width: 16, height: 16)
+        statusText.frame = .zero
+
+        let textX: CGFloat = 55
+        let textLimit = max(textX, controlsX - 12)
         stats.isHidden = bounds.width < 420
-        let statsWidth: CGFloat = stats.isHidden ? 0 : DiffFileStatsView.reservedWidth
-        let statsSpacing: CGFloat = stats.isHidden ? 0 : 18
-        let textWidth = max(0, min(compact ? 180 : 280, bounds.width - 80 - statsWidth - statsSpacing - controlsWidth - 12))
-        let statsX = 80 + textWidth
-        chevron.frame = NSRect(x: 25.5, y: headerCenterY(13), width: 13, height: 13)
-        statusIcon.frame = NSRect(x: 53, y: headerCenterY(18), width: 22, height: 18)
-        statusText.frame = statusIcon.frame
-        title.frame = NSRect(x: 80, y: directoryLabel.isHidden ? headerCenterY(19) : 8, width: textWidth, height: 19)
-        directoryLabel.frame = NSRect(x: 80, y: 30, width: textWidth, height: 14)
-        stats.frame = NSRect(x: statsX, y: headerCenterY(20), width: statsWidth, height: 20)
-        var x = statsX + statsWidth + statsSpacing
+        let statsWidth = stats.isHidden ? 0 : stats.preferredWidth
+        let statsSpacing: CGFloat = stats.isHidden ? 0 : 10
+        let nameWidth = ceil(title.attributedStringValue.size().width) + 4
+        let directoryWidth = directoryLabel.isHidden ? 0 : ceil((directoryLabel.stringValue as NSString).size(
+            withAttributes: [.font: directoryLabel.font ?? ReviewWorkspaceStyle.nativeFont(13)]
+        ).width) + 4
+        let directorySpacing: CGFloat = directoryLabel.isHidden ? 0 : 8
+        var available = textLimit - textX - statsWidth - statsSpacing
+        let shownNameWidth = min(nameWidth, max(0, available))
+        available -= shownNameWidth + directorySpacing
+        let shownDirectoryWidth = min(directoryWidth, max(0, available))
+        let rowY = headerCenterY(19)
+        title.frame = NSRect(x: textX, y: rowY, width: shownNameWidth, height: 19)
+        directoryLabel.frame = NSRect(
+            x: title.frame.maxX + directorySpacing,
+            y: rowY,
+            width: shownDirectoryWidth < 24 ? 0 : shownDirectoryWidth,
+            height: 19
+        )
+        let statsX = (directoryLabel.frame.width > 0 ? directoryLabel.frame.maxX : title.frame.maxX) + statsSpacing
+        stats.frame = NSRect(x: statsX, y: headerCenterY(19), width: statsWidth, height: 19)
+        var x = controlsX
         for (button, width) in zip([wholeFileButton, primaryButton, discardButton, reviewButton, menuButton] as [NSButton], widths) {
             button.frame = NSRect(x: x, y: headerCenterY(ReviewControlMetrics.height), width: width, height: ReviewControlMetrics.height)
             if width > 0 { x += width + ReviewControlMetrics.spacing }
@@ -4968,17 +5002,16 @@ private final class DiffFileCellView: NSTableCellView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let background = isFocused ? AgentGitPalette.fileHeaderFocused
-            : isExpanded ? AgentGitPalette.fileHeader
-            : isHovered ? AgentGitPalette.reviewHover : AgentGitPalette.fileListRow
+        let background = isFocused || isHovered ? AgentGitPalette.fileHeaderFocused : AgentGitPalette.fileHeader
         background.setFill()
         dirtyRect.fill()
         if isFocused {
             AgentGitPalette.focusIndicator.setFill()
-            NSRect(x: 0, y: 8, width: 2, height: bounds.height - 16).fill()
+            NSRect(x: 0, y: 6, width: 2, height: bounds.height - 12).fill()
         }
-        AgentGitPalette.separator.withAlphaComponent(isExpanded ? 0.8 : 0.35).setFill()
-        NSRect(x: 12, y: bounds.height - 1, width: bounds.width - 24, height: 1).fill()
+        // 相邻两个文件标题之间用顶部一条细线分开，展开后标题行下面直接接代码。
+        AgentGitPalette.reviewDivider.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
 
@@ -5156,40 +5189,35 @@ private final class DiffFileCellView: NSTableCellView {
         statusText.isHidden = true
     }
 
+    /// 文件名前统一放 `</>` 代码图标；修改的文件用灰色，新增、删除、改名等状态用对应颜色，
+    /// 冲突文件换成警告图标。
     private func updateStatusPresentation(
         for status: DiffStackStatus,
         statusLabel: String
     ) {
         statusColor = Self.color(for: status)
-        let configuration: (symbol: String, label: String)? = switch status {
+        let (symbol, label): (String, String) = switch status {
         case .conflicted: ("exclamationmark.triangle.fill", "Conflicted File")
-        case .added, .deleted, .modified, .renamed, .untracked: nil
-        }
-        guard let configuration else {
-            statusIcon.isHidden = true
-            statusIcon.image = nil
-            statusIcon.setAccessibilityLabel(nil)
-            statusText.isHidden = false
-            statusText.stringValue = statusLabel
-            statusText.textColor = Self.color(for: status)
-            statusText.setAccessibilityLabel(
-                status == .deleted ? "Deleted File" : nil
-            )
-            return
+        case .added: ("chevron.left.forwardslash.chevron.right", "Added File")
+        case .untracked: ("chevron.left.forwardslash.chevron.right", "Untracked File")
+        case .deleted: ("chevron.left.forwardslash.chevron.right", "Deleted File")
+        case .renamed: ("chevron.left.forwardslash.chevron.right", "Renamed File")
+        case .modified: ("chevron.left.forwardslash.chevron.right", "Modified File")
         }
         statusIcon.isHidden = false
         statusText.isHidden = true
-        statusText.stringValue = ""
+        statusText.stringValue = statusLabel
         statusText.setAccessibilityLabel(nil)
         statusIcon.image = NSImage(
-            systemSymbolName: configuration.symbol,
-            accessibilityDescription: configuration.label
+            systemSymbolName: symbol,
+            accessibilityDescription: label
         )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
         )
-        statusIcon.contentTintColor = Self.color(for: status)
+        statusIcon.contentTintColor = status == .modified ? AgentGitPalette.reviewTertiaryText : Self.color(for: status)
         statusIcon.layer?.backgroundColor = NSColor.clear.cgColor
-        statusIcon.setAccessibilityLabel(configuration.label)
+        statusIcon.toolTip = label
+        statusIcon.setAccessibilityLabel(label)
     }
 
     private func configureWholeFileButton() {
@@ -5312,7 +5340,7 @@ private final class DiffFileCellView: NSTableCellView {
         return NSAttributedString(string: displayed, attributes: [
             .paragraphStyle: paragraph,
             .font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.fileTitleSize),
-            .foregroundColor: ReviewWorkspaceStyle.primary
+            .foregroundColor: AgentGitPalette.reviewPrimaryText
         ])
     }
 
@@ -5773,7 +5801,7 @@ private final class DiffFileContextToggleCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         AgentGitPalette.hunkHeader.setFill()
         dirtyRect.fill()
-        AgentGitPalette.reviewHeaderBorder.withAlphaComponent(0.7).setFill()
+        AgentGitPalette.reviewDivider.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         super.draw(dirtyRect)
     }
@@ -5816,23 +5844,15 @@ private final class DiffFileContextToggleCellView: NSTableCellView {
     }
 }
 
+/// 文件末尾被折叠的上下文，和 hunk 之间的分隔行同样只显示一行灰字，点一下展开。
 private final class DiffContextEdgeCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("diff-context-edge")
 
-    private let button = NSButton(title: "", target: nil, action: nil)
-    private let icon = NSImageView()
+    private let button = ReviewGlyphButton(title: "", target: nil, action: nil)
     private let progressIndicator = NSProgressIndicator()
-    private let label = DiffTextField(
-        font: AgentGitTypography.interface(ofSize: AgentGitTypography.interfaceSize, weight: .regular),
-        textColor: AgentGitPalette.reviewContextGapText,
-        alignment: .left,
-        selectable: false
-    )
     private var fileID = ""
     private var gap: DiffStackContextGap?
     private var expandHandler: ((String, DiffStackContextGap) -> Void)?
-    private var isHovered = false
-    private var reservedLabelWidth: CGFloat = 0
 
     override var isFlipped: Bool { true }
 
@@ -5843,102 +5863,37 @@ private final class DiffContextEdgeCellView: NSTableCellView {
         button.action = #selector(expand)
         button.bezelStyle = .inline
         button.isBordered = false
-        button.title = ""
+        button.imagePosition = .noImage
+        button.font = DiffHunkCellView.gapFont
+        button.contentTintColor = AgentGitPalette.reviewSecondaryText
         addSubview(button)
-        icon.image = NSImage(
-            systemSymbolName: "arrow.up.and.down",
-            accessibilityDescription: "Expand hidden context"
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
-        )
-        icon.contentTintColor = AgentGitPalette.reviewContextGapText
-        icon.imageScaling = .scaleNone
-        addSubview(icon)
         progressIndicator.style = .spinning
         progressIndicator.controlSize = .small
         progressIndicator.isDisplayedWhenStopped = false
         addSubview(progressIndicator)
-        addSubview(label)
-        addTrackingArea(
-            NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-                owner: self
-            )
-        )
-        updateHoverAppearance()
     }
 
     required init?(coder: NSCoder) {
         nil
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? button : nil
-    }
-
     override func layout() {
         super.layout()
-        button.frame = bounds
-        let labelWidth = min(reservedLabelWidth, max(0, bounds.width - 33))
-        let contentWidth = 12 + 5 + labelWidth
-        let contentX = floor((bounds.width - contentWidth) / 2)
-        icon.frame = NSRect(
-            x: contentX,
-            y: floor((bounds.height - 12) / 2),
+        let height = min(ReviewControlMetrics.height, bounds.height)
+        let width = ReviewButtonCell.preferredWidth(title: button.title, image: nil, font: DiffHunkCellView.gapFont)
+        button.frame = NSRect(x: 6, y: max(0, (bounds.height - height) / 2), width: width, height: height)
+        progressIndicator.frame = NSRect(
+            x: button.frame.maxX,
+            y: max(0, (bounds.height - 12) / 2),
             width: 12,
             height: 12
         )
-        progressIndicator.frame = icon.frame
-        label.frame = NSRect(
-            x: contentX + 17,
-            y: floor((bounds.height - 16) / 2),
-            width: labelWidth,
-            height: 16
-        )
-        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // 平时只画一条被文字断开的细线，diff 读起来是连续的；鼠标移上来才铺成一条可点的带子。
-        // 原来无论如何都铺满整行灰底加上下两条边，每两个 hunk 之间就横着一条重色带，
-        // 把一个文件的 diff 视觉上切得很碎。
-        if isHovered {
-            AgentGitPalette.reviewContextGap.setFill()
-            dirtyRect.fill()
-            AgentGitPalette.separator.withAlphaComponent(0.65).setFill()
-            NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
-            NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
-        } else {
-            AgentGitPalette.codeBackground.setFill()
-            dirtyRect.fill()
-            AgentGitPalette.separator.withAlphaComponent(0.5).setFill()
-            let ruleY = floor(bounds.height / 2)
-            let contentRect = icon.frame.union(label.frame).insetBy(dx: -8, dy: 0)
-            NSRect(
-                x: 0,
-                y: ruleY,
-                width: max(0, contentRect.minX),
-                height: 1
-            ).fill()
-            NSRect(
-                x: contentRect.maxX,
-                y: ruleY,
-                width: max(0, bounds.width - contentRect.maxX),
-                height: 1
-            ).fill()
-        }
+        AgentGitPalette.codeBackground.setFill()
+        dirtyRect.fill()
         super.draw(dirtyRect)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-        updateHoverAppearance()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        updateHoverAppearance()
     }
 
     func update(
@@ -5954,25 +5909,16 @@ private final class DiffContextEdgeCellView: NSTableCellView {
         let expandTitle = gap.hiddenLineCount == shownLineCount
             ? "Show \(shownLineCount) hidden lines"
             : "Show \(shownLineCount) of \(gap.hiddenLineCount) hidden lines"
-        reservedLabelWidth = [expandTitle, "Loading hidden lines…"].map {
-            ceil(($0 as NSString).size(withAttributes: [
-                .font: label.font ?? AgentGitTypography.interface()
-            ]).width)
-        }.max() ?? 0
-        let title: String
         if isLoading {
-            title = "Loading hidden lines…"
-            icon.isHidden = true
+            button.title = "Loading hidden lines…"
             progressIndicator.startAnimation(nil)
         } else {
-            title = expandTitle
-            icon.isHidden = false
+            button.title = unmodifiedLinesTitle(gap.hiddenLineCount)
             progressIndicator.stopAnimation(nil)
         }
-        label.stringValue = title
         button.isEnabled = !isLoading
-        button.toolTip = title
-        button.setAccessibilityLabel(title)
+        button.toolTip = isLoading ? button.title : expandTitle
+        button.setAccessibilityLabel(button.toolTip)
         needsLayout = true
         needsDisplay = true
     }
@@ -5983,13 +5929,10 @@ private final class DiffContextEdgeCellView: NSTableCellView {
         }
         expandHandler?(fileID, gap)
     }
+}
 
-    private func updateHoverAppearance() {
-        button.alphaValue = isHovered ? 1 : 0.72
-        icon.alphaValue = button.alphaValue
-        label.alphaValue = button.alphaValue
-        needsDisplay = true
-    }
+func unmodifiedLinesTitle(_ count: Int) -> String {
+    count == 1 ? "1 unmodified line" : "\(count) unmodified lines"
 }
 
 private final class DiffNoteCellView: NSTableCellView {
@@ -6023,17 +5966,19 @@ private final class DiffNoteCellView: NSTableCellView {
     }
 }
 
+/// hunk 之间的分隔行：左侧一行灰字「N unmodified lines」，点一下展开被折叠的上下文；
+/// 后面跟着 hunk 所在的函数名，增删操作在鼠标移上来时出现在右侧。
 private final class DiffHunkCellView: NSTableCellView {
-    /// 和 `DiffStackScrollView.Metrics.unifiedCodeLeading` 一致：unified 下代码列的起点，
-    /// hunk 标题跟它对齐才不会比代码更靠左。
-    static let unifiedCodeLeading: CGFloat = 80
+    /// 带折叠上下文时行高放大，上下各留出约一行的空白。
+    nonisolated static let gapHeight: CGFloat = 44
+    static let gapFont = ReviewWorkspaceStyle.nativeFont(13)
 
     private static let discardConfirmationDuration: TimeInterval = 3
     static let identifier = NSUserInterfaceItemIdentifier("diff-hunk")
 
     private let unifiedTitle = DiffTextField(
-        font: ReviewWorkspaceStyle.nativeFont(ReviewWorkspaceStyle.metadataSize),
-        textColor: ReviewWorkspaceStyle.secondary,
+        font: ReviewWorkspaceStyle.nativeFont(12),
+        textColor: AgentGitPalette.reviewTertiaryText,
         alignment: .left,
         selectable: false
     )
@@ -6107,15 +6052,9 @@ private final class DiffHunkCellView: NSTableCellView {
         contextExpandButton.action = #selector(expandContextGap)
         contextExpandButton.bezelStyle = .inline
         contextExpandButton.isBordered = false
-        contextExpandButton.imagePosition = .imageOnly
-        contextExpandButton.imageScaling = .scaleProportionallyDown
-        contextExpandButton.image = NSImage(
-            systemSymbolName: "arrow.up.and.down",
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
-        )
-        contextExpandButton.contentTintColor = .secondaryLabelColor
+        contextExpandButton.imagePosition = .noImage
+        contextExpandButton.font = Self.gapFont
+        contextExpandButton.contentTintColor = AgentGitPalette.reviewSecondaryText
         addSubview(contextExpandButton)
         contextProgress.style = .spinning
         contextProgress.controlSize = .small
@@ -6192,11 +6131,11 @@ private final class DiffHunkCellView: NSTableCellView {
         let historySpacing = ReviewControlMetrics.spacing
         let actionSpacing = ReviewControlMetrics.spacing
         marker.frame = .zero
-        let expandWidth = ReviewControlMetrics.height
-        // unified 下标题起点对齐代码列，和 split 的行为一致；split 里 sideLabelInset 已经
-        // 等于行号加符号列的宽度。
-        let unifiedLabelX = Self.unifiedCodeLeading
-        let sideLabelInset: CGFloat = 47
+        let expandWidth = contextExpandButton.isHidden ? 0 : ReviewButtonCell.preferredWidth(
+            title: contextExpandButton.title,
+            image: nil,
+            font: Self.gapFont
+        )
         let menuX = bounds.width - menuWidth - ReviewControlMetrics.trailingInset
         let historyX = menuX - historyWidth - historySpacing
         let actionX = historyX - actionsWidth - actionSpacing
@@ -6205,14 +6144,15 @@ private final class DiffHunkCellView: NSTableCellView {
         location.isHidden = isHovered || isConfirmingDiscard
             || !primaryButton.isHidden || !historyButton.isHidden || !menuButton.isHidden
         location.frame = NSRect(x: max(0, bounds.width - 154), y: (bounds.height - 16) / 2, width: 140, height: 16)
+        // 按钮左右各留 8pt 内边距，文字起点落在 14pt，和文件标题的箭头对齐。
         contextExpandButton.frame = NSRect(
-            x: 50,
-            y: 0,
+            x: 6,
+            y: actionY,
             width: expandWidth,
-            height: bounds.height
+            height: actionHeight
         )
         contextProgress.frame = NSRect(
-            x: 58,
+            x: contextExpandButton.frame.maxX,
             y: max(0, (bounds.height - 12) / 2),
             width: 12,
             height: 12
@@ -6241,9 +6181,9 @@ private final class DiffHunkCellView: NSTableCellView {
             width: menuWidth,
             height: actionHeight
         )
-        let titleX = layoutMode == .sideBySide
-            ? max(sideLabelInset, contextExpandButton.frame.maxX + 2)
-            : unifiedLabelX
+        let titleX = contextExpandButton.isHidden
+            ? 14
+            : contextProgress.frame.maxX + (isLoadingContextGap ? 8 : -6)
         unifiedTitle.frame = NSRect(
             x: titleX,
             y: max(0, (bounds.height - 16) / 2),
@@ -6265,8 +6205,6 @@ private final class DiffHunkCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         AgentGitPalette.hunkHeader.setFill()
         dirtyRect.fill()
-        AgentGitPalette.separator.withAlphaComponent(0.15).setFill()
-        NSRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5).fill()
         super.draw(dirtyRect)
     }
 
@@ -6383,12 +6321,12 @@ private final class DiffHunkCellView: NSTableCellView {
             contextProgress.stopAnimation(nil)
             return
         }
-        // 加载时按钮留在原位只是禁用，位置不动；转圈叠在图标上。
+        // 加载时文字换成进度说明，按钮只禁用不移动，转圈跟在文字后面。
         contextExpandButton.isHidden = false
         contextExpandButton.isEnabled = !isLoadingContextGap
-        contextExpandButton.contentTintColor = isLoadingContextGap
-            ? .clear
-            : .secondaryLabelColor
+        contextExpandButton.title = isLoadingContextGap
+            ? "Loading hidden lines…"
+            : unmodifiedLinesTitle(contextGap.hiddenLineCount)
         if isLoadingContextGap {
             contextProgress.startAnimation(nil)
         } else {
@@ -6540,8 +6478,13 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
         [.unified: content]
     }
 
-    private let oldLineNumber = DiffTextField.lineNumber()
-    private let newLineNumber = DiffTextField.lineNumber()
+    /// 统一视图只留一列行号：新增和上下文行显示新行号，删除行显示旧行号。
+    /// 最左是增删竖条，接着是右对齐的行号和 +/- 符号，代码从 `codeLeading` 开始。
+    static let lineNumberFrame = NSRect(x: 4, y: 0, width: 40, height: 0)
+    static let markerFrame = NSRect(x: 46, y: 0, width: 12, height: 0)
+    nonisolated static let codeLeading: CGFloat = 64
+
+    private let lineNumber = DiffTextField.lineNumber()
     private let marker = DiffTextField(
         font: AgentGitTypography.code,
         textColor: .secondaryLabelColor,
@@ -6564,8 +6507,7 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        addSubview(oldLineNumber)
-        addSubview(newLineNumber)
+        addSubview(lineNumber)
         addSubview(marker)
         contentClip.identifier = NSUserInterfaceItemIdentifier("diff-unified-code-clip")
         contentClip.wantsLayer = true
@@ -6581,25 +6523,22 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
 
     override func layout() {
         super.layout()
-        let lineNumberWidth: CGFloat = 33
-        let markerWidth: CGFloat = 14
-        oldLineNumber.frame = NSRect(x: 0, y: 0, width: lineNumberWidth, height: bounds.height)
-        newLineNumber.frame = NSRect(
-            x: lineNumberWidth,
+        lineNumber.frame = NSRect(
+            x: Self.lineNumberFrame.minX,
             y: 0,
-            width: lineNumberWidth,
+            width: Self.lineNumberFrame.width,
             height: bounds.height
         )
         marker.frame = NSRect(
-            x: lineNumberWidth * 2,
+            x: Self.markerFrame.minX,
             y: 0,
-            width: markerWidth,
+            width: Self.markerFrame.width,
             height: bounds.height
         )
         contentClip.frame = NSRect(
-            x: lineNumberWidth * 2 + markerWidth,
+            x: Self.codeLeading,
             y: 0,
-            width: max(0, bounds.width - lineNumberWidth * 2 - markerWidth - 8),
+            width: max(0, bounds.width - Self.codeLeading - 8),
             height: bounds.height
         )
         content.frame = NSRect(
@@ -6613,12 +6552,15 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
     override func draw(_ dirtyRect: NSRect) {
         backgroundColor.setFill()
         dirtyRect.fill()
+        if let barColor = diffChangeBarColor(for: kind) {
+            barColor.setFill()
+            NSRect(x: 0, y: 0, width: AgentGitPalette.diffChangeBarWidth, height: bounds.height).fill()
+        }
         if isRowSelected {
             NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
             dirtyRect.fill()
         }
-        // 行号列不再铺灰底。代码区改成纯白之后这条灰带反而成了最显眼的东西，而且横穿增删行时
-        // 会把绿红色带切断。行号靠字色区分就够了，整行底色保持连续。
+        // 行号列不铺底色，整行增删底色从竖条一直连到行尾。
         super.draw(dirtyRect)
     }
 
@@ -6635,8 +6577,11 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
         renderedLine = line
         renderedLanguage = language
         kind = line.kind
-        oldLineNumber.stringValue = line.oldLineNumber.map(String.init) ?? ""
-        newLineNumber.stringValue = line.newLineNumber.map(String.init) ?? ""
+        let displayedLineNumber = line.kind == .deletion
+            ? line.oldLineNumber
+            : line.newLineNumber ?? line.oldLineNumber
+        lineNumber.stringValue = displayedLineNumber.map(String.init) ?? ""
+        lineNumber.textColor = diffLineNumberColor(for: line.kind)
         marker.stringValue = markerText
         marker.textColor = markerColor
         content.setAttributedString(Self.contentText(for: line, language: language))
@@ -6734,6 +6679,7 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
     private static func syntaxColor(for kind: GitSyntaxTokenKind) -> NSColor {
         switch kind {
         case .keyword: AgentGitPalette.syntaxKeyword
+        case .type: AgentGitPalette.syntaxType
         case .string: AgentGitPalette.syntaxString
         case .number: AgentGitPalette.syntaxNumber
         case .comment: AgentGitPalette.syntaxComment
@@ -6754,7 +6700,7 @@ private final class DiffLineCellView: NSTableCellView, DiffCodeViewport, DiffCod
     private var markerText: String {
         switch kind {
         case .addition: "+"
-        case .deletion: "−"
+        case .deletion: "-"
         case .metadata: "·"
         case .context: " "
         }
@@ -6866,6 +6812,9 @@ private final class DiffSideLinePane: NSView {
         content
     }
 
+    /// 每栏自带增删竖条和一列行号，代码从 `codeLeading` 开始。
+    nonisolated static let codeLeading: CGFloat = 52
+
     private let side: Side
     private let lineNumber = DiffTextField.lineNumber()
     private let marker = DiffTextField(
@@ -6909,19 +6858,12 @@ private final class DiffSideLinePane: NSView {
 
     override func layout() {
         super.layout()
-        let lineNumberWidth: CGFloat = 33
-        let markerWidth: CGFloat = 14
-        lineNumber.frame = NSRect(x: 0, y: 0, width: lineNumberWidth, height: bounds.height)
-        marker.frame = NSRect(
-            x: lineNumberWidth,
-            y: 0,
-            width: markerWidth,
-            height: bounds.height
-        )
+        lineNumber.frame = NSRect(x: 4, y: 0, width: 34, height: bounds.height)
+        marker.frame = NSRect(x: 38, y: 0, width: 12, height: bounds.height)
         contentClip.frame = NSRect(
-            x: lineNumberWidth + markerWidth,
+            x: Self.codeLeading,
             y: 0,
-            width: max(0, bounds.width - lineNumberWidth - markerWidth - 8),
+            width: max(0, bounds.width - Self.codeLeading - 8),
             height: bounds.height
         )
         content.frame = NSRect(
@@ -6936,6 +6878,10 @@ private final class DiffSideLinePane: NSView {
         let fillRect = bounds.intersection(dirtyRect)
         backgroundColor.setFill()
         fillRect.fill()
+        if let kind, let barColor = diffChangeBarColor(for: kind) {
+            barColor.setFill()
+            NSRect(x: 0, y: 0, width: AgentGitPalette.diffChangeBarWidth, height: bounds.height).fill()
+        }
         if isRowSelected {
             NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
             fillRect.fill()
@@ -6965,6 +6911,7 @@ private final class DiffSideLinePane: NSView {
         case .new:
             lineNumber.stringValue = line.newLineNumber.map(String.init) ?? ""
         }
+        lineNumber.textColor = diffLineNumberColor(for: line.kind)
         marker.stringValue = markerText
         marker.textColor = markerColor
         content.setAttributedString(
@@ -6991,7 +6938,7 @@ private final class DiffSideLinePane: NSView {
             return ""
         }
         return switch (side, kind) {
-        case (.old, .deletion): "−"
+        case (.old, .deletion): "-"
         case (.new, .addition): "+"
         case (_, .metadata): "·"
         case (_, .context), (.old, .addition), (.new, .deletion): ""
@@ -7182,6 +7129,25 @@ private final class DiffSelectableTextView: NSTextView {
                 height: bounds.height
             ).fill()
         }
+    }
+}
+
+/// 增删行最左侧竖条的颜色；上下文和元数据行不画。
+@MainActor
+private func diffChangeBarColor(for kind: GitDiffLineKind) -> NSColor? {
+    switch kind {
+    case .addition: AgentGitPalette.additionText
+    case .deletion: AgentGitPalette.deletionText
+    case .context, .metadata: nil
+    }
+}
+
+@MainActor
+private func diffLineNumberColor(for kind: GitDiffLineKind) -> NSColor {
+    switch kind {
+    case .addition: AgentGitPalette.additionText
+    case .deletion: AgentGitPalette.deletionText
+    case .context, .metadata: AgentGitPalette.codeLineNumber
     }
 }
 

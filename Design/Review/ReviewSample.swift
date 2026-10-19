@@ -23,6 +23,18 @@ struct ReviewFixture: Decodable {
         let title: String
         let header: String
         let lines: [Line]
+
+        /// `@@ -a,b +c,d @@` 里新文件一侧的起始行和行数。
+        var newRange: (start: Int, count: Int) {
+            let expression = try! NSRegularExpression(pattern: #"\+(\d+)(?:,(\d+))?"#)
+            let text = header as NSString
+            guard let match = expression.firstMatch(in: header, range: NSRange(location: 0, length: text.length)) else {
+                return (1, 0)
+            }
+            let start = Int(text.substring(with: match.range(at: 1))) ?? 1
+            let count = match.range(at: 2).location == NSNotFound ? 1 : Int(text.substring(with: match.range(at: 2))) ?? 0
+            return (start, count)
+        }
     }
     struct Line: Decodable {
         let kind: String
@@ -37,118 +49,210 @@ struct ReviewFixture: Decodable {
     let deleted: Int
 }
 
+/// 样板直接取主应用的调色板、字号和语法高亮，只把布局用 SwiftUI 重画一遍。
 enum ReviewSampleSpec {
     static let zoom: CGFloat = 1.1
     static let retina: CGFloat = 2
     static let physicalSize = CGSize(width: 2146, height: 1326)
-    static let navigationWidth: CGFloat = 360
-    static let dividerWidth: CGFloat = 1 / zoom
-    static let primary = Color(nsColor: NSColor(srgbRed: 65 / 255, green: 64 / 255, blue: 61 / 255, alpha: 1))
-    static let secondary = Color(nsColor: NSColor(srgbRed: 118 / 255, green: 116 / 255, blue: 110 / 255, alpha: 1))
-    static let selection = Color(nsColor: NSColor(srgbRed: 237 / 255, green: 235 / 255, blue: 231 / 255, alpha: 1))
-    static let hover = Color(nsColor: NSColor(srgbRed: 241 / 255, green: 240 / 255, blue: 236 / 255, alpha: 1))
-    static let separator = Color(nsColor: NSColor(white: 0.91, alpha: 1))
-    static let hunk = Color(nsColor: NSColor(white: 0.987, alpha: 1))
+    static let navigationWidth: CGFloat = 300
+    static let toolbarHeight: CGFloat = 44
+    static let fileHeaderHeight: CGFloat = 36
+    static let gapHeight: CGFloat = 44
+    static let hunkHeight: CGFloat = 24
+    static let lineHeight: CGFloat = 20
+    static let codeLeading: CGFloat = 64
+
+    static func color(_ color: NSColor) -> Color { Color(nsColor: color) }
+    static var primary: Color { color(AgentGitPalette.reviewPrimaryText) }
+    static var secondary: Color { color(AgentGitPalette.reviewSecondaryText) }
+    static var tertiary: Color { color(AgentGitPalette.reviewTertiaryText) }
+    static var background: Color { color(AgentGitPalette.reviewBackground) }
+    static var divider: Color { color(AgentGitPalette.reviewDivider) }
 
     static func font(_ size: CGFloat) -> Font {
         .agentGitInterface(size: size, weight: .light)
     }
 }
 
-enum SampleInteraction { case normal, hover, selected, disabled }
+enum SampleInteraction { case normal, hover, selected, toggledOn, disabled }
 
-struct ReviewSampleButton: View {
+struct ReviewSampleIconButton: View {
     let symbol: String
     var title: String? = nil
     var state: SampleInteraction = .normal
+    var rotation: Double = 0
+
+    private var fill: NSColor? {
+        switch state {
+        case .hover: AgentGitPalette.controlHover
+        case .selected: AgentGitPalette.reviewRowSelection
+        case .toggledOn: AgentGitPalette.reviewToggleSelectedBackground
+        case .normal, .disabled: nil
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .regular))
+                .font(.system(size: 14, weight: .regular))
+                .rotationEffect(.degrees(rotation))
                 .frame(width: 15, height: 15)
             if let title { Text(title).font(ReviewSampleSpec.font(12)) }
         }
-        .foregroundStyle(ReviewSampleSpec.primary)
-        .padding(.horizontal, title == nil ? 7 : 8)
+        .foregroundStyle(state == .toggledOn
+            ? ReviewSampleSpec.color(AgentGitPalette.reviewToggleSelectedText)
+            : ReviewSampleSpec.color(AgentGitPalette.controlText))
+        .padding(.horizontal, title == nil ? 6 : 8)
         .frame(minWidth: 28, minHeight: 28)
         .background {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(state == .selected ? ReviewSampleSpec.selection : ReviewSampleSpec.hover)
-                .opacity(state == .selected || state == .hover ? 1 : 0)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(fill.map(ReviewSampleSpec.color) ?? .clear)
         }
-        .opacity(state == .disabled ? 0.35 : 1)
+        .opacity(state == .disabled ? 0.45 : 1)
+    }
+}
+
+struct ReviewSampleTopBar: View {
+    let fixture: ReviewFixture
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ReviewSampleIconButton(symbol: "list.bullet", state: .toggledOn)
+            HStack(spacing: 6) {
+                Text("\(String(fixture.commits[0].id.prefix(13))) \(fixture.commits[0].subject)")
+                    .font(ReviewSampleSpec.font(14.5))
+                    .foregroundStyle(ReviewSampleSpec.primary)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(ReviewSampleSpec.secondary)
+            }
+            .padding(.leading, 4)
+            Spacer(minLength: 8)
+            HStack(spacing: 2) {
+                ReviewSampleIconButton(symbol: "magnifyingglass")
+                ReviewSampleIconButton(symbol: "ellipsis", rotation: 90)
+                ReviewSampleIconButton(symbol: "arrow.up.left.and.arrow.down.right")
+                ReviewSampleIconButton(symbol: "xmark")
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 12)
+        .frame(height: ReviewSampleSpec.toolbarHeight)
+        .background(ReviewSampleSpec.background)
+    }
+}
+
+/// 左栏文件树：目录逐级缩进，文件行是 `</>` 图标、文件名和右侧的增删统计。
+struct ReviewSampleFileTree: View {
+    let files: [ReviewFixture.File]
+
+    private enum Row: Identifiable {
+        case folder(name: String, depth: Int)
+        case file(ReviewFixture.File, depth: Int)
+        var id: String {
+            switch self {
+            case let .folder(name, depth): "folder:\(depth):\(name)"
+            case let .file(file, _): "file:\(file.path)"
+            }
+        }
+    }
+
+    private var rows: [Row] {
+        var rows: [Row] = []
+        var openedPrefixes = Set<String>()
+        for file in files.sorted(by: { $0.path < $1.path }) {
+            let components = file.directory.split(separator: "/").map(String.init)
+            for depth in components.indices {
+                let prefix = components[...depth].joined(separator: "/")
+                if openedPrefixes.insert(prefix).inserted {
+                    rows.append(.folder(name: components[depth], depth: depth))
+                }
+            }
+            rows.append(.file(file, depth: components.count))
+        }
+        return rows
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(rows) { row in
+                switch row {
+                case let .folder(name, depth):
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .medium))
+                            .rotationEffect(.degrees(90))
+                            .foregroundStyle(ReviewSampleSpec.secondary)
+                            .frame(width: 14)
+                        Text(name).foregroundStyle(ReviewSampleSpec.primary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, CGFloat(depth) * 14)
+                    .frame(height: 26)
+                case let .file(file, depth):
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(ReviewSampleSpec.tertiary)
+                            .frame(width: 14)
+                        Text(file.name).foregroundStyle(ReviewSampleSpec.primary).lineLimit(1)
+                        Spacer(minLength: 4)
+                        sampleCounts(added: file.added, deleted: file.deleted, size: 12)
+                    }
+                    .padding(.leading, CGFloat(depth) * 14)
+                    .frame(height: 26)
+                }
+            }
+        }
+        .font(ReviewSampleSpec.font(14))
+        .lineLimit(1)
+        .truncationMode(.middle)
     }
 }
 
 struct ReviewSampleCommitRow: View {
     let commit: ReviewFixture.Commit
     var state: SampleInteraction = .normal
-    var showsReference = false
-
-    private var referenceLabel: String? {
-        guard showsReference, let reference = commit.references.first else { return nil }
-        return reference.replacingOccurrences(of: "HEAD -> ", with: "")
-            .replacingOccurrences(of: "tag: ", with: "")
-    }
-
-    private var referenceWidth: CGFloat {
-        let font = AgentGitTypography.interface(ofSize: 10.5, weight: .light)
-        return min(85, ceil(((referenceLabel ?? "") as NSString).size(withAttributes: [.font: font]).width))
-    }
 
     var body: some View {
         HStack(spacing: 7) {
             Canvas { context, size in
-                let x: CGFloat = 8
+                let x = size.width / 2
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: 0))
                 path.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(path, with: .color(.gray.opacity(0.43)), lineWidth: 1)
+                context.stroke(path, with: .color(ReviewSampleSpec.tertiary), lineWidth: 1)
                 context.fill(
                     Path(roundedRect: CGRect(x: x - 3, y: size.height / 2 - 3, width: 6, height: 6), cornerRadius: 1.5),
-                    with: .color(state == .selected ? ReviewSampleSpec.primary.opacity(0.72) : .gray.opacity(0.65))
+                    with: .color(ReviewSampleSpec.secondary)
                 )
             }
-            .frame(width: 17, height: 56)
-            VStack(alignment: .leading, spacing: 5) {
+            .frame(width: 14, height: 54)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(commit.subject)
                     .font(ReviewSampleSpec.font(14))
                     .foregroundStyle(ReviewSampleSpec.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 7) {
-                    Text(commit.author).lineLimit(1)
-                    if let referenceLabel {
-                        Text(referenceLabel)
-                            .font(ReviewSampleSpec.font(10.5))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(width: referenceWidth, alignment: .leading)
-                            .padding(.horizontal, 5)
-                            .frame(height: 17)
-                            .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 4))
-                        if commit.references.count > 1 {
-                            Text("+\(commit.references.count - 1)").font(ReviewSampleSpec.font(10.5))
-                        }
-                    }
-                    Spacer(minLength: 4)
-                    Text(commit.date).fixedSize()
+                HStack(spacing: 0) {
+                    Text(String(commit.id.prefix(13))).font(.system(size: 11.5, design: .monospaced))
+                    Text(" · \(commit.author) · \(commit.date)")
                 }
-                .font(ReviewSampleSpec.font(11.5))
+                .font(ReviewSampleSpec.font(12))
                 .foregroundStyle(ReviewSampleSpec.secondary)
+                .lineLimit(1)
             }
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 12)
-        .frame(height: 56)
+        .padding(.horizontal, 8)
+        .frame(height: 54)
         .background {
-            RoundedRectangle(cornerRadius: 7)
-                .fill(state == .selected ? ReviewSampleSpec.selection : ReviewSampleSpec.hover)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(ReviewSampleSpec.color(state == .selected ? AgentGitPalette.reviewRowSelection : AgentGitPalette.reviewRowHover))
                 .opacity(state == .selected || state == .hover ? 1 : 0)
         }
-        .opacity(state == .disabled ? 0.4 : 1)
+        .opacity(state == .disabled ? 0.45 : 1)
     }
 }
 
@@ -157,257 +261,244 @@ struct ReviewSampleNavigation: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 20) {
-                Text("Commits")
-                    .foregroundStyle(ReviewSampleSpec.primary)
-                    .frame(height: 38)
-                    .overlay(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: 1).fill(ReviewSampleSpec.primary).frame(height: 1.5)
-                    }
-                Text("Files").foregroundStyle(ReviewSampleSpec.secondary)
-                Spacer(minLength: 0)
-            }
-            .font(ReviewSampleSpec.font(13.5))
-            .padding(.horizontal, 18)
-            .frame(height: 56)
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 12))
-                Text("Search commits").font(ReviewSampleSpec.font(12))
+            ReviewSampleFileTree(files: fixture.files)
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+            Spacer(minLength: 0)
+            Rectangle().fill(ReviewSampleSpec.divider).frame(height: 1)
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(ReviewSampleSpec.secondary)
+                    .frame(width: 14)
+                Text("Commits").foregroundStyle(ReviewSampleSpec.primary)
                 Spacer()
+                Text("\(fixture.commits.count)").foregroundStyle(ReviewSampleSpec.secondary)
             }
-            .foregroundStyle(ReviewSampleSpec.secondary.opacity(0.8))
-            .padding(.horizontal, 18)
-            .frame(height: 32)
-            HStack(spacing: 9) {
-                Image(systemName: "checkmark.circle").font(.system(size: 13, weight: .light))
-                Text("Working tree clean").font(ReviewSampleSpec.font(12))
-                Spacer()
-            }
-            .foregroundStyle(ReviewSampleSpec.secondary)
-            .padding(.horizontal, 18)
-            .frame(height: 44)
-            Rectangle().fill(ReviewSampleSpec.separator.opacity(0.65)).frame(height: 0.5)
-                .padding(.horizontal, 18)
-                .padding(.bottom, 8)
+            .font(ReviewSampleSpec.font(14))
+            .padding(.leading, 12)
+            .padding(.trailing, 16)
+            .frame(height: 38)
             VStack(spacing: 0) {
-                ForEach(Array(fixture.commits.enumerated()), id: \.element.id) { index, commit in
-                    ReviewSampleCommitRow(commit: commit, state: index == 0 ? .selected : .normal, showsReference: !commit.references.isEmpty)
+                HStack(spacing: 7) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 12, weight: .light))
+                        .foregroundStyle(ReviewSampleSpec.secondary)
+                        .frame(width: 14)
+                    Text("Uncommitted changes").foregroundStyle(ReviewSampleSpec.primary)
+                    Spacer()
+                    Text("Clean").font(ReviewSampleSpec.font(12)).foregroundStyle(ReviewSampleSpec.secondary)
+                }
+                .font(ReviewSampleSpec.font(14))
+                .padding(.horizontal, 8)
+                .frame(height: 38)
+                ForEach(Array(fixture.commits.prefix(7).enumerated()), id: \.element.id) { index, commit in
+                    ReviewSampleCommitRow(commit: commit, state: index == 0 ? .selected : .normal)
                 }
             }
             .padding(.horizontal, 6)
-            Spacer(minLength: 0)
+            .frame(height: 460, alignment: .top)
+            .clipped()
         }
-        .frame(width: ReviewSampleSpec.navigationWidth, alignment: .topLeading)
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-        .clipped()
-        .background(Color.white)
+        .frame(width: ReviewSampleSpec.navigationWidth)
+        .frame(maxHeight: .infinity)
+        .background(ReviewSampleSpec.background)
     }
 }
 
-struct ReviewSampleToolbar: View {
-    let fixture: ReviewFixture
-    var compact = false
-
-    var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(fixture.commits[0].subject)
-                    .font(ReviewSampleSpec.font(15.5))
-                    .foregroundStyle(ReviewSampleSpec.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: 9) {
-                    Text("\(fixture.files.count) files")
-                    diffCounts(added: fixture.added, deleted: fixture.deleted)
-                    if !compact { Text("·"); Text("0/\(fixture.files.count) reviewed") }
-                }
-                .font(ReviewSampleSpec.font(12))
-                .foregroundStyle(ReviewSampleSpec.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 1) {
-                ReviewSampleButton(symbol: "rectangle", title: compact ? nil : "Unified", state: .selected)
-                ReviewSampleButton(symbol: "rectangle.split.2x1", title: compact ? nil : "Split")
-            }
-            .padding(2)
-            .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 7))
-            HStack(spacing: 2) {
-                ReviewSampleButton(symbol: "slider.horizontal.3")
-                ReviewSampleButton(symbol: "ellipsis")
-            }
-            Rectangle().fill(ReviewSampleSpec.separator).frame(width: 0.5, height: 16)
-            HStack(spacing: 1) {
-                ReviewSampleButton(symbol: "chevron.up", state: .disabled)
-                Text("1 / \(fixture.files.reduce(0) { $0 + $1.hunks.count })")
-                    .font(ReviewSampleSpec.font(11.5).monospacedDigit())
-                    .foregroundStyle(ReviewSampleSpec.secondary)
-                    .frame(minWidth: 34)
-                ReviewSampleButton(symbol: "chevron.down")
-            }
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 56)
-        .background(Color.white)
+func sampleCounts(added: Int, deleted: Int, size: CGFloat) -> some View {
+    HStack(spacing: 6) {
+        Text("+\(added)").foregroundStyle(ReviewSampleSpec.color(AgentGitPalette.additionText))
+        Text("-\(deleted)").foregroundStyle(ReviewSampleSpec.color(AgentGitPalette.deletionText))
     }
-}
-
-func diffCounts(added: Int, deleted: Int) -> some View {
-    HStack(spacing: 8) {
-        Text("+\(added)").foregroundStyle(Color(nsColor: AgentGitPalette.additionText))
-        Text("−\(deleted)").foregroundStyle(Color(nsColor: AgentGitPalette.deletionText))
-    }
-    .monospacedDigit()
+    .font(ReviewSampleSpec.font(size).monospacedDigit())
     .fixedSize()
 }
 
 struct ReviewSampleFileHeader: View {
     let file: ReviewFixture.File
-    var compact = false
 
     var body: some View {
         HStack(spacing: 0) {
             Image(systemName: "chevron.down")
                 .font(.system(size: 10, weight: .regular))
-                .foregroundStyle(ReviewSampleSpec.secondary)
-                .frame(width: 32)
-            Text("M")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(Color(nsColor: AgentGitPalette.statusModified))
-                .frame(width: 32)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(file.name).font(ReviewSampleSpec.font(13.5)).foregroundStyle(ReviewSampleSpec.primary)
-                Text(file.directory).font(ReviewSampleSpec.font(11.5)).foregroundStyle(ReviewSampleSpec.secondary)
-            }
-            .lineLimit(1)
-            .frame(width: compact ? 180 : 280, alignment: .leading)
-            diffCounts(added: file.added, deleted: file.deleted)
-                .font(ReviewSampleSpec.font(11.5))
-                .frame(width: 72, alignment: .trailing)
-                .padding(.trailing, 18)
-            ReviewSampleButton(symbol: "doc.text", title: compact ? nil : "Whole file")
-            ReviewSampleButton(symbol: "square")
-            ReviewSampleButton(symbol: "ellipsis")
+                .foregroundStyle(ReviewSampleSpec.tertiary)
+                .frame(width: 13)
+                .padding(.leading, 14)
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(ReviewSampleSpec.tertiary)
+                .frame(width: 16)
+                .padding(.leading, 6)
+            Text(file.name)
+                .font(ReviewSampleSpec.font(14))
+                .foregroundStyle(ReviewSampleSpec.primary)
+                .padding(.leading, 6)
+            Text(file.directory)
+                .font(ReviewSampleSpec.font(13))
+                .foregroundStyle(ReviewSampleSpec.tertiary)
+                .padding(.leading, 8)
+            sampleCounts(added: file.added, deleted: file.deleted, size: 13)
+                .padding(.leading, 10)
             Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                ReviewSampleIconButton(symbol: "doc.text", title: "Whole file")
+                ReviewSampleIconButton(symbol: "square")
+                ReviewSampleIconButton(symbol: "ellipsis")
+            }
+            .padding(.trailing, 12)
         }
-        .padding(.leading, 16)
-        .frame(height: 52)
-        .background(Color.white)
+        .lineLimit(1)
+        .frame(height: ReviewSampleSpec.fileHeaderHeight)
+        .background(ReviewSampleSpec.color(AgentGitPalette.reviewFileHeaderBackground))
+        .overlay(alignment: .top) { Rectangle().fill(ReviewSampleSpec.divider).frame(height: 1) }
     }
 }
 
-func highlightedCode(_ source: String) -> Text {
-    let pattern = #"(#[^\n]*|//[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:def|class|if|else|return|True|False|None|import|from|self|for|with|new|public|void)\b)"#
-    let expression = try! NSRegularExpression(pattern: pattern)
-    let sourceText = source as NSString
-    let matches = expression.matches(in: source, range: NSRange(location: 0, length: sourceText.length))
-    var cursor = 0
+/// 和主应用 `DiffSyntaxHighlighter` 同一套分词，颜色取调色板。
+func highlightedCode(_ source: String, language: GitSyntaxLanguage) -> Text {
+    let text = source as NSString
     var result = AttributedString()
-    func append(_ text: String, color: NSColor) {
-        var run = AttributedString(text)
-        run.foregroundColor = Color(nsColor: color)
+    var cursor = 0
+    func append(_ range: NSRange, _ color: NSColor) {
+        guard range.length > 0 else { return }
+        var run = AttributedString(text.substring(with: range))
+        run.foregroundColor = ReviewSampleSpec.color(color)
         result.append(run)
     }
-    for match in matches {
-        if match.range.location > cursor {
-            append(sourceText.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), color: AgentGitPalette.codeText)
+    for span in DiffSyntaxHighlighter.spans(in: source, language: language) where span.location >= cursor {
+        let color: NSColor = switch span.kind {
+        case .keyword: AgentGitPalette.syntaxKeyword
+        case .type: AgentGitPalette.syntaxType
+        case .string: AgentGitPalette.syntaxString
+        case .number: AgentGitPalette.syntaxNumber
+        case .comment: AgentGitPalette.syntaxComment
+        case .heading: AgentGitPalette.syntaxHeading
         }
-        let token = sourceText.substring(with: match.range)
-        let color = token.hasPrefix("#") || token.hasPrefix("//") ? AgentGitPalette.syntaxComment
-            : token.hasPrefix("\"") || token.hasPrefix("'") ? AgentGitPalette.syntaxString : AgentGitPalette.syntaxKeyword
-        append(token, color: color)
-        cursor = NSMaxRange(match.range)
+        append(NSRange(location: cursor, length: span.location - cursor), AgentGitPalette.codeText)
+        append(NSRange(location: span.location, length: min(span.length, text.length - span.location)), color)
+        cursor = span.location + span.length
     }
-    if cursor < sourceText.length {
-        append(sourceText.substring(from: cursor), color: AgentGitPalette.codeText)
-    }
-    return Text(result)
+    append(NSRange(location: cursor, length: max(0, text.length - cursor)), AgentGitPalette.codeText)
+    return Text(result.characters.isEmpty ? AttributedString(" ") : result)
 }
 
 struct ReviewSampleCodeLine: View {
     let line: ReviewFixture.Line
+    let language: GitSyntaxLanguage
+
+    private var accent: NSColor? {
+        switch line.kind {
+        case "addition": AgentGitPalette.additionText
+        case "deletion": AgentGitPalette.deletionText
+        default: nil
+        }
+    }
 
     var body: some View {
+        // 代码按原宽度排开，GeometryReader 让超出部分只被裁掉，不撑宽整列。
         GeometryReader { _ in
-            HStack(spacing: 0) {
-                Text(line.old.map(String.init) ?? "")
-                    .frame(width: 32, alignment: .trailing)
-                Text(line.new.map(String.init) ?? "")
-                    .frame(width: 32, alignment: .trailing)
-                Text(line.kind == "addition" ? "+" : line.kind == "deletion" ? "−" : "")
-                    .foregroundStyle(line.kind == "addition" ? Color(nsColor: AgentGitPalette.additionText) : Color(nsColor: AgentGitPalette.deletionText))
-                    .frame(width: 16)
-                highlightedCode(line.text)
-                    .font(Font(AgentGitTypography.code))
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 0)
-            }
-            .font(.system(size: 11.5, design: .monospaced))
-            .foregroundStyle(Color(nsColor: AgentGitPalette.codeLineNumber))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .clipped()
+            content
         }
-        .frame(height: 20)
-        .background(line.kind == "addition" ? Color(nsColor: AgentGitPalette.additionBackground)
-            : line.kind == "deletion" ? Color(nsColor: AgentGitPalette.deletionBackground) : Color.white)
+        .frame(height: ReviewSampleSpec.lineHeight)
+        .background(ReviewSampleSpec.color(
+            line.kind == "addition" ? AgentGitPalette.additionBackground
+                : line.kind == "deletion" ? AgentGitPalette.deletionBackground
+                : AgentGitPalette.codeBackground
+        ))
         .clipped()
+    }
+
+    private var content: some View {
+        HStack(spacing: 0) {
+            Rectangle()
+                .fill(accent.map(ReviewSampleSpec.color) ?? .clear)
+                .frame(width: AgentGitPalette.diffChangeBarWidth)
+            Text((line.kind == "deletion" ? line.old : line.new ?? line.old).map(String.init) ?? "")
+                .foregroundStyle(ReviewSampleSpec.color(accent ?? AgentGitPalette.codeLineNumber))
+                .frame(width: 40, alignment: .trailing)
+                .padding(.leading, 1)
+            Text(line.kind == "addition" ? "+" : line.kind == "deletion" ? "-" : "")
+                .foregroundStyle(ReviewSampleSpec.color(accent ?? AgentGitPalette.codeLineNumber))
+                .frame(width: 12)
+                .padding(.leading, 2)
+            highlightedCode(line.text, language: language)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.leading, ReviewSampleSpec.codeLeading - 58)
+            Spacer(minLength: 0)
+        }
+        .font(Font(AgentGitTypography.code))
+        .frame(height: ReviewSampleSpec.lineHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// hunk 之间的分隔行：「N unmodified lines」加函数名，没有折叠行时只剩一条矮行。
+struct ReviewSampleGapRow: View {
+    let hiddenLineCount: Int
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if hiddenLineCount > 0 {
+                Text(hiddenLineCount == 1 ? "1 unmodified line" : "\(hiddenLineCount) unmodified lines")
+                    .font(ReviewSampleSpec.font(13))
+                    .foregroundStyle(ReviewSampleSpec.secondary)
+            }
+            if !title.isEmpty {
+                Text(title)
+                    .font(ReviewSampleSpec.font(12))
+                    .foregroundStyle(ReviewSampleSpec.tertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+        .padding(.leading, 14)
+        .frame(height: hiddenLineCount > 0 ? ReviewSampleSpec.gapHeight : ReviewSampleSpec.hunkHeight)
+        .background(ReviewSampleSpec.background)
     }
 }
 
 struct ReviewSampleDiff: View {
     let fixture: ReviewFixture
-    var compact = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ReviewSampleToolbar(fixture: fixture, compact: compact)
-            Rectangle().fill(ReviewSampleSpec.separator).frame(height: 0.5)
-            VStack(spacing: 8) {
-                ForEach(fixture.files) { file in
-                    VStack(spacing: 0) {
-                        ReviewSampleFileHeader(file: file, compact: compact)
-                        ForEach(file.hunks) { hunk in
-                            HStack(spacing: 8) {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 11, weight: .regular))
-                                    .frame(width: 16)
-                                Text(hunk.title.isEmpty ? hunk.header : hunk.title)
-                                    .font(ReviewSampleSpec.font(11.5))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "clock.arrow.circlepath")
-                                    .font(.system(size: 10))
-                                    .padding(.trailing, 16)
-                            }
-                            .foregroundStyle(ReviewSampleSpec.secondary.opacity(0.85))
-                            .padding(.leading, 56)
-                            .frame(height: 24)
-                            .background(ReviewSampleSpec.hunk)
-                            ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
-                                ReviewSampleCodeLine(line: line)
-                            }
-                        }
+            ForEach(fixture.files) { file in
+                let language = GitSyntaxLanguage(path: file.path)
+                ReviewSampleFileHeader(file: file)
+                ForEach(Array(file.hunks.enumerated()), id: \.element.id) { index, hunk in
+                    let previousEnd = index == 0 ? 1 : file.hunks[index - 1].newRange.start + file.hunks[index - 1].newRange.count
+                    ReviewSampleGapRow(hiddenLineCount: max(0, hunk.newRange.start - previousEnd), title: hunk.title)
+                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                        ReviewSampleCodeLine(line: line, language: language)
                     }
                 }
             }
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.white)
+        .background(ReviewSampleSpec.background)
         .clipped()
     }
 }
 
 struct ReviewSampleWorkspace: View {
     let fixture: ReviewFixture
-    var compact = false
+    var showsNavigation = true
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            ReviewSampleNavigation(fixture: fixture)
-            Rectangle().fill(ReviewSampleSpec.separator).frame(width: ReviewSampleSpec.dividerWidth)
-            ReviewSampleDiff(fixture: fixture, compact: compact)
+        VStack(spacing: 0) {
+            ReviewSampleTopBar(fixture: fixture)
+            HStack(alignment: .top, spacing: 0) {
+                if showsNavigation {
+                    ReviewSampleNavigation(fixture: fixture)
+                    Rectangle().fill(ReviewSampleSpec.divider).frame(width: 1)
+                }
+                ReviewSampleDiff(fixture: fixture)
+            }
         }
-        .background(Color.white)
+        .background(ReviewSampleSpec.background)
     }
 }
 
@@ -415,7 +506,6 @@ struct ReviewSampleWorkspace: View {
 struct RenderReviewSample {
     @MainActor static func main() throws {
         _ = NSApplication.shared
-        NSApp.appearance = NSAppearance(named: .aqua)
         _ = AgentGitTypography.interface()
         guard NSFont(name: "AnthropicSansVariable-TextLight", size: 14) != nil else {
             fatalError("Anthropic Sans Text Light is required for this comparison")
@@ -424,46 +514,62 @@ struct RenderReviewSample {
         let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         let fixture = try JSONDecoder().decode(ReviewFixture.self, from: Data(contentsOf: fixtureURL))
 
-        func render<V: View>(_ view: V, size: CGSize, name: String) throws {
+        func render<V: View>(_ view: V, size: CGSize, name: String, dark: Bool = false) throws {
+            let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+            NSApp.appearance = appearance
             let content = view
                 .frame(width: size.width / ReviewSampleSpec.zoom, height: size.height / ReviewSampleSpec.zoom, alignment: .topLeading)
                 .scaleEffect(ReviewSampleSpec.zoom, anchor: .topLeading)
                 .frame(width: size.width, height: size.height, alignment: .topLeading)
-                .background(Color.white)
+                .background(ReviewSampleSpec.background)
                 .clipped()
-                .environment(\.colorScheme, .light)
-            let renderer = ImageRenderer(content: content)
-            renderer.scale = ReviewSampleSpec.retina
-            guard let image = renderer.cgImage,
-                  let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-                fatalError("Unable to render \(name)")
+                .environment(\.colorScheme, dark ? .dark : .light)
+            var png: Data?
+            appearance.performAsCurrentDrawingAppearance {
+                let renderer = ImageRenderer(content: content)
+                renderer.scale = ReviewSampleSpec.retina
+                png = renderer.cgImage.flatMap {
+                    NSBitmapImageRep(cgImage: $0).representation(using: .png, properties: [:])
+                }
             }
+            guard let png else { fatalError("Unable to render \(name)") }
             try png.write(to: destination.appendingPathComponent("\(name).png"))
         }
         try render(ReviewSampleWorkspace(fixture: fixture), size: ReviewSampleSpec.physicalSize, name: "proposal")
-        try render(ReviewSampleWorkspace(fixture: fixture, compact: true), size: CGSize(width: 1160, height: 820), name: "proposal-narrow")
+        try render(ReviewSampleWorkspace(fixture: fixture), size: ReviewSampleSpec.physicalSize, name: "proposal-dark", dark: true)
+        try render(ReviewSampleWorkspace(fixture: fixture, showsNavigation: false), size: CGSize(width: 1160, height: 820), name: "proposal-narrow")
         let states = VStack(alignment: .leading, spacing: 18) {
-            ForEach(["普通", "悬停", "选中", "禁用"], id: \.self) { title in
-                let state: SampleInteraction = title == "普通" ? .normal : title == "悬停" ? .hover : title == "选中" ? .selected : .disabled
+            ForEach(["普通", "悬停", "选中", "开关打开", "禁用"], id: \.self) { title in
+                let state: SampleInteraction = switch title {
+                case "悬停": .hover
+                case "选中": .selected
+                case "开关打开": .toggledOn
+                case "禁用": .disabled
+                default: .normal
+                }
                 HStack(spacing: 24) {
-                    Text(title).font(ReviewSampleSpec.font(12)).frame(width: 40)
-                    ReviewSampleCommitRow(commit: fixture.commits[0], state: state, showsReference: true)
-                        .frame(width: 348)
-                    ReviewSampleButton(symbol: "doc.text", title: "Whole file", state: state)
-                    ReviewSampleButton(symbol: "square", state: state)
+                    Text(title).font(ReviewSampleSpec.font(12)).frame(width: 56)
+                    ReviewSampleCommitRow(commit: fixture.commits[0], state: state == .toggledOn ? .normal : state)
+                        .frame(width: 300)
+                    ReviewSampleIconButton(symbol: "doc.text", title: "Whole file", state: state)
+                    ReviewSampleIconButton(symbol: "list.bullet", state: state)
                 }
             }
         }
         .padding(24)
         .foregroundStyle(ReviewSampleSpec.secondary)
-        .background(Color.white)
-        try render(states, size: CGSize(width: 740, height: 385), name: "states")
+        .background(ReviewSampleSpec.background)
+        try render(states, size: CGSize(width: 740, height: 440), name: "states")
         let metadata: [String: Any] = [
             "zoom": ReviewSampleSpec.zoom, "retina": ReviewSampleSpec.retina,
-            "workspace_pixels": [4292, 2652], "navigation_pixels": 792,
+            "workspace_pixels": [Int(ReviewSampleSpec.physicalSize.width * ReviewSampleSpec.retina),
+                                 Int(ReviewSampleSpec.physicalSize.height * ReviewSampleSpec.retina)],
+            "navigation_pt": ReviewSampleSpec.navigationWidth,
             "font": "AnthropicSansVariable-TextLight",
-            "sizes_pt": ["commit_title": 14, "metadata": 11.5, "review_title": 15.5, "file_title": 13.5, "code": 13],
-            "row_heights_pt": ["commit": 56, "toolbar": 56, "file": 52, "hunk": 24, "code": 20],
+            "sizes_pt": ["review_title": 14.5, "file_title": 14, "tree_row": 14, "commit_title": 14, "metadata": 12, "code": 13],
+            "row_heights_pt": ["toolbar": ReviewSampleSpec.toolbarHeight, "file": ReviewSampleSpec.fileHeaderHeight,
+                               "gap": ReviewSampleSpec.gapHeight, "hunk": ReviewSampleSpec.hunkHeight,
+                               "code": ReviewSampleSpec.lineHeight, "commit": 54],
             "files": fixture.files.count, "hunks": fixture.files.reduce(0) { $0 + $1.hunks.count },
             "added": fixture.added, "deleted": fixture.deleted
         ]

@@ -170,7 +170,10 @@ final class ReviewDiffMetadataCache {
         fileID: String, compactDiff: GitFileDiff, contextSourceDiff: GitFileDiff?,
         revealedLineCountByGapID: [String: Int], revealsWholeFile: Bool
     ) -> [DiffStackContextGap] {
-        let counts = revealsWholeFile ? [] : zip(compactDiff.hunks, compactDiff.hunks.dropFirst()).map {
+        let leadingCount = compactDiff.hunks.first.map {
+            revealedLineCountByGapID["\(fileID):context:start->\($0.id)"] ?? 0
+        }
+        let counts = revealsWholeFile ? [] : [leadingCount ?? 0] + zip(compactDiff.hunks, compactDiff.hunks.dropFirst()).map {
             revealedLineCountByGapID["\(fileID):context:\($0.id)->\($1.id)"] ?? 0
         }
         let stamp = ContextStamp(
