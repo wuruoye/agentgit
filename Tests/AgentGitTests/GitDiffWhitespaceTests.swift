@@ -107,6 +107,65 @@ func ignoringWhitespaceWithWholeFileSourceMatchesGit(recomputesSectionHeadings: 
     ])
 }
 
+/// 新建或删除整个文件时 hunk 只有一侧，忽略空白后原样保留。
+@Test(arguments: ["@@ -0,0 +1,2 @@\n+  one\n+two", "@@ -1,2 +0,0 @@\n-  one\n-two"])
+func ignoringWhitespaceKeepsOneSidedHunk(patch: String) throws {
+    let diff = try whitespaceFixtureDiff(patch)
+
+    for source in [nil, diff] {
+        let ignored = GitDiffWhitespaceFilter.ignoringWhitespace(diff, context: .lines(3), wholeFileSource: source)
+        #expect(renderedHunks(ignored) == renderedHunks(diff))
+    }
+}
+
+/// 随机组合只差空白的行、空行和缺行尾换行，各种上下文和整文件来源下都不崩溃，行号连续、计数对得上。
+@Test func ignoringWhitespaceHandlesRandomHunks() throws {
+    let variants = ["}", "  }", "\t}", "a b", "a  b", "", "  ", "x", " x", "y"]
+    var seed: UInt64 = 0x5EED
+    func next(_ bound: Int) -> Int {
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Int((seed >> 33) % UInt64(bound))
+    }
+
+    for _ in 0..<1_500 {
+        var oldCount = 0
+        var newCount = 0
+        var body: [String] = []
+        for _ in 0..<(1 + next(30)) {
+            let content = variants[next(variants.count)]
+            switch next(3) {
+            case 0: body.append(" " + content); oldCount += 1; newCount += 1
+            case 1: body.append("-" + content); oldCount += 1
+            default: body.append("+" + content); newCount += 1
+            }
+        }
+        if next(4) == 0 {
+            body.append("\\ No newline at end of file")
+        }
+        let header = "@@ -\(oldCount == 0 ? 0 : 1),\(oldCount) +\(newCount == 0 ? 0 : 1),\(newCount) @@"
+        let wholeFile = try whitespaceFixtureDiff(([header] + body).joined(separator: "\n"))
+
+        for context in [GitDiffContext.lines(0), .lines(3), .wholeFile] {
+            let compact = GitDiffContextTrimmer.trimming(wholeFile, to: context, recomputesSectionHeadings: true)
+            for source in [nil, wholeFile] {
+                let ignored = GitDiffWhitespaceFilter.ignoringWhitespace(
+                    compact, context: context, recomputesSectionHeadings: true, wholeFileSource: source
+                )
+                let lines = ignored.hunks.flatMap(\.lines)
+                #expect(Set(lines.map(\.id)).count == lines.count)
+                for hunk in ignored.hunks {
+                    #expect(hunk.lines.count { $0.oldLineNumber != nil } == hunk.oldCount)
+                    #expect(hunk.lines.count { $0.newLineNumber != nil } == hunk.newCount)
+                }
+                if context == .wholeFile, source != nil, !ignored.hunks.isEmpty {
+                    #expect(lines.compactMap(\.oldLineNumber) == Array(0..<oldCount).map { $0 + 1 })
+                    #expect(lines.compactMap(\.newLineNumber) == Array(0..<newCount).map { $0 + 1 })
+                }
+            }
+        }
+    }
+}
+
 private func whitespaceFixtureDiff(_ patch: String) throws -> GitFileDiff {
     let change = GitFileChange(
         path: "preview.dart", originalPath: nil, indexStatus: "M", worktreeStatus: ".", kind: .ordinary

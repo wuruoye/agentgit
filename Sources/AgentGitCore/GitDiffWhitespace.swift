@@ -206,7 +206,8 @@ private enum GitDiffReshaper {
             case .metadata: return nil
             }
         }
-        guard entries.contains(where: \.isChange) else {
+        // 一侧没有任何行（新建或删除整个文件）时没有可对齐的内容。
+        guard !oldSide.isEmpty, !newSide.isEmpty, entries.contains(where: \.isChange) else {
             return nil
         }
 

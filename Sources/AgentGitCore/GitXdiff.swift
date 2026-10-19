@@ -68,7 +68,7 @@ enum GitXdiff {
         }
 
         var changedLines: [Bool] {
-            Array(flags[1...count])
+            Array(flags[1..<(count + 1)])
         }
 
         func isChanged(_ line: Int) -> Bool {
