@@ -479,7 +479,11 @@ Settings 的 Agents 页面显示已登记的会话数量；存储 JSON 损坏时
 主 App 只在选中 worktree 的标题栏显示会话按钮，侧栏项目列表保持纯 Git 信息。点击按钮
 直接打开对应会话，悬停显示会话详情。Codex 会话使用规范 thread UUID 打开；Claude 的规范
 session UUID 与 Desktop 内部 session ID 可能不同，主 App 在后台只读 Claude Desktop 的
-JSON 会话索引，按精确 `cliSessionId` 解析当前 Desktop session ID，不读取 transcript 正文。
+JSON 会话索引解析 Desktop session ID，不读取 transcript 正文。记录里有 `host_session_id`
+时直接按它找未归档的 Desktop 会话；否则按 `cliSessionId` 匹配。会话回退、清空或撤销清空后
+CLI 会话 ID 会换，旧 ID 留在索引的 `priorCliSessionIds`、`preClearCliSessionId`、
+`unarchivedCliSessionId` 里，也算命中，但排在当前 ID 命中的会话之后。新旧 ID 解析到同一个
+Desktop 会话时，会话按钮、侧栏右键菜单和选区的 Send to Agent 只显示一条。
 索引映射已经失效的关联显示为 Unavailable，并排到仍可打开的会话之后，可从右键菜单移除。
 
 AgentGit 不扫描 transcript，唯一的例外是查 Codex `create_worktree` 建的 worktree 属于哪个线程时，

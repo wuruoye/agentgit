@@ -219,13 +219,17 @@ final class AgentAssociationController {
         worktreeCreators[path].map { $0.association(worktreePath: path) }
     }
 
-    /// 这个 worktree 的全部会话：创建者排最前，其余按可跳转程度和更新时间。
+    /// 这个 worktree 的全部会话：创建者排最前，其余按可跳转程度和更新时间；
+    /// 指向同一个会话的多条关联只留排在前面的那条。
     func sessionAssociations(for worktree: GitWorktree) -> [AgentAssociation] {
         let stored = associations(for: worktree)
-        guard let creator = creatorAssociation(forWorktreeAt: worktree.id) else {
-            return stored
-        }
-        return [creator] + stored.filter { $0.id != creator.id }
+        let ordered = creatorAssociation(forWorktreeAt: worktree.id).map { creator in
+            [creator] + stored.filter { $0.id != creator.id }
+        } ?? stored
+        return uniqueAgentSessions(
+            ordered,
+            targetURLs: navigationResolutions.compactMapValues(\.target?.url)
+        )
     }
 
     /// 项目刷新完成和启动时调用：读记录目录，仍没有记录的 worktree 按宿主会话元数据查一次，
@@ -557,6 +561,23 @@ final class AgentAssociationController {
     }
 }
 
+/// 会话回退或清空后会换 CLI 会话 ID，新旧两条关联指向同一个会话。按跳转目标去重，
+/// 还没解析出目标的按 Desktop 会话 ID 去重；都没有的照常保留。保留排在前面的那条。
+func uniqueAgentSessions(
+    _ associations: [AgentAssociation],
+    targetURLs: [AgentAssociation.ID: URL]
+) -> [AgentAssociation] {
+    var seen: Set<String> = []
+    return associations.filter { association in
+        let key = targetURLs[association.id].map { "url:\($0.absoluteString)" }
+            ?? association.hostSessionID.map { "\(association.provider.rawValue)-host:\($0)" }
+        guard let key else {
+            return true
+        }
+        return seen.insert(key).inserted
+    }
+}
+
 func retainedAgentNavigationResolutions(
     current: [AgentAssociation.ID: AgentSessionNavigationResolution],
     associations: [AgentAssociation]
@@ -585,7 +606,8 @@ private extension AgentWorktreeCreator {
             sessionID: sessionID,
             worktreePath: worktreePath,
             title: title ?? "",
-            updatedAt: createdAt
+            updatedAt: createdAt,
+            hostSessionID: hostSessionID
         )
     }
 }

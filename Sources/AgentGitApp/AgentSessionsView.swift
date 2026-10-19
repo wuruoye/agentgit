@@ -78,7 +78,8 @@ struct AgentSessionsButton: View {
                 sessionID: association.sessionID,
                 worktreePath: association.worktreePath,
                 title: model.agentAssociations.displayTitle(for: association),
-                updatedAt: association.updatedAt
+                updatedAt: association.updatedAt,
+                hostSessionID: association.hostSessionID
             )
         }
     }

@@ -16,19 +16,24 @@ public struct AgentAssociation: Codable, Hashable, Identifiable, Sendable {
     public let worktreePath: String
     public let title: String
     public let updatedAt: Date
+    /// Claude Desktop 的 `local_*` 会话 ID。会话回退或清空后 CLI 会话 ID 会换，这个 ID 不变；
+    /// 只有在 Claude Desktop 里记下的关联才有，旧的关联文件里没有这个字段。
+    public let hostSessionID: String?
 
     public init(
         provider: AgentProvider,
         sessionID: String,
         worktreePath: String,
         title: String,
-        updatedAt: Date
+        updatedAt: Date,
+        hostSessionID: String? = nil
     ) {
         self.provider = provider
         self.sessionID = sessionID
         self.worktreePath = URL(fileURLWithPath: worktreePath).standardizedFileURL.path
         self.title = title
         self.updatedAt = updatedAt
+        self.hostSessionID = hostSessionID
     }
 
     public var id: String {
@@ -154,6 +159,7 @@ public final class AgentAssociationStore: @unchecked Sendable {
             let existing = associations.first { $0.id == association.id }
             if let existing,
                (association.title.isEmpty || association.title == existing.title),
+               (association.hostSessionID == nil || association.hostSessionID == existing.hostSessionID),
                association.updatedAt.timeIntervalSince(existing.updatedAt) < minimumRefreshInterval {
                 return associations
             }
@@ -165,7 +171,8 @@ public final class AgentAssociationStore: @unchecked Sendable {
                 sessionID: association.sessionID,
                 worktreePath: association.worktreePath,
                 title: retainedTitle,
-                updatedAt: max(existing?.updatedAt ?? .distantPast, association.updatedAt)
+                updatedAt: max(existing?.updatedAt ?? .distantPast, association.updatedAt),
+                hostSessionID: association.hostSessionID ?? existing?.hostSessionID
             )
             associations.removeAll { $0.id == association.id }
             associations.append(storedAssociation)

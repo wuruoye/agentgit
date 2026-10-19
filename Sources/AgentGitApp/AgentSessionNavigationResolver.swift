@@ -118,20 +118,20 @@ struct AgentSessionNavigationResolver: Sendable {
         guard !Task.isCancelled else {
             return [:]
         }
+        let claudeAssociations = associations.filter { $0.provider == .claude }
         let requestedClaudeSessionIDs = Set<String>(
-            associations.compactMap { association in
-                guard association.provider == .claude else {
-                    return nil
-                }
-                return normalizedUUID(association.sessionID)
-            }
+            claudeAssociations.compactMap { normalizedUUID($0.sessionID) }
+        )
+        let requestedHostSessionIDs = Set<String>(
+            claudeAssociations.compactMap(\.hostSessionID).filter(isSafeNativeSessionID)
         )
         let claudeRecords: [ClaudeDesktopSessionRecord]
         let claudeIndexError: String?
-        if !requestedClaudeSessionIDs.isEmpty {
+        if !requestedClaudeSessionIDs.isEmpty || !requestedHostSessionIDs.isEmpty {
             do {
                 claudeRecords = try loadClaudeDesktopSessionRecords(
-                    matching: requestedClaudeSessionIDs
+                    matching: requestedClaudeSessionIDs,
+                    hostSessionIDs: requestedHostSessionIDs
                 )
                 claudeIndexError = nil
             } catch is CancellationError {
@@ -329,18 +329,26 @@ struct AgentSessionNavigationResolver: Sendable {
         return titles
     }
 
+    /// 先按记下的 Desktop 会话 ID 找；没有这个 ID，或那条会话已归档、已删除时，按 CLI 会话 ID 找。
+    /// 会话回退、清空后会换 CLI 会话 ID，旧 ID 记在 `priorCliSessionIds` 等字段里，也算命中，
+    /// 但排在当前 ID 命中的会话后面。
     private func resolveClaude(
         _ association: AgentAssociation,
         records: [ClaudeDesktopSessionRecord],
         indexError: String?
     ) -> AgentSessionNavigationResolution {
+        if let hostSessionID = association.hostSessionID,
+           let record = records.first(where: { $0.sessionID == hostSessionID }),
+           record.isArchived != true {
+            return claudeNavigation(to: record)
+        }
         guard let sessionID = normalizedUUID(association.sessionID) else {
             return .unavailable("The Claude session ID is invalid.")
         }
         if let indexError {
             return .unavailable(indexError)
         }
-        let matches = records.filter { $0.cliSessionID == sessionID }
+        let matches = records.filter { $0.claimRank(for: sessionID) != nil }
         guard let selected = matches.max(by: {
             isClaudeRecord($1, preferredOver: $0, sessionID: sessionID)
         }) else {
@@ -348,6 +356,12 @@ struct AgentSessionNavigationResolver: Sendable {
                 "Claude Desktop no longer has an exact mapping for this session."
             )
         }
+        return claudeNavigation(to: selected)
+    }
+
+    private func claudeNavigation(
+        to selected: ClaudeDesktopSessionRecord
+    ) -> AgentSessionNavigationResolution {
         guard isSafeNativeSessionID(selected.sessionID),
               let encodedID = selected.sessionID.addingPercentEncoding(
                   withAllowedCharacters: .urlPathAllowed
@@ -360,9 +374,11 @@ struct AgentSessionNavigationResolver: Sendable {
         return .available(url, title: selected.title)
     }
 
-    /// `requestedSessionIDs` 为 nil 时返回全部记录。
+    /// `requestedSessionIDs` 为 nil 时返回全部记录；否则返回认领了其中某个 CLI 会话 ID，
+    /// 或 Desktop 会话 ID 在 `hostSessionIDs` 里的记录。
     private func loadClaudeDesktopSessionRecords(
-        matching requestedSessionIDs: Set<String>?
+        matching requestedSessionIDs: Set<String>?,
+        hostSessionIDs: Set<String> = []
     ) throws -> [ClaudeDesktopSessionRecord] {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(
@@ -400,8 +416,8 @@ struct AgentSessionNavigationResolver: Sendable {
                 records.append(record)
                 continue
             }
-            if let sessionID = normalizedUUID(record.cliSessionID),
-               requestedSessionIDs.contains(sessionID) {
+            if hostSessionIDs.contains(record.sessionID)
+                || !record.claimedCLISessionIDs.isDisjoint(with: requestedSessionIDs) {
                 records.append(record)
             }
         }
@@ -428,6 +444,7 @@ struct AgentSessionNavigationResolver: Sendable {
         sessionID: String
     ) -> [Int64] {
         [
+            Int64(record.claimRank(for: sessionID) ?? -1),
             record.isArchived == true ? 0 : 1,
             record.sessionID == "local_\(sessionID)" ? 0 : 1,
             record.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -487,6 +504,12 @@ private struct ClaudeDesktopSessionRecord: Decodable, Sendable {
     let lastActivityAt: Int64?
     let createdAt: Int64?
     let worktreePath: String?
+    /// 归档后再恢复时留下的 CLI 会话 ID。
+    let unarchivedCLISessionID: String?
+    /// 清空会话前的 CLI 会话 ID，撤销清空时切回它。
+    let preClearCLISessionID: String?
+    /// 回退、清空等操作换掉的旧 CLI 会话 ID。
+    let priorCLISessionIDs: [String]
 
     private enum CodingKeys: String, CodingKey {
         case sessionID = "sessionId"
@@ -497,7 +520,51 @@ private struct ClaudeDesktopSessionRecord: Decodable, Sendable {
         case completedTurns
         case lastActivityAt
         case createdAt
+        case unarchivedCLISessionID = "unarchivedCliSessionId"
+        case preClearCLISessionID = "preClearCliSessionId"
+        case priorCLISessionIDs = "priorCliSessionIds"
     }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        cliSessionID = try container.decode(String.self, forKey: .cliSessionID)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived)
+        completedTurns = try container.decodeIfPresent(Int64.self, forKey: .completedTurns)
+        lastActivityAt = try container.decodeIfPresent(Int64.self, forKey: .lastActivityAt)
+        createdAt = try container.decodeIfPresent(Int64.self, forKey: .createdAt)
+        worktreePath = try container.decodeIfPresent(String.self, forKey: .worktreePath)
+        // 这几个字段只用来找回旧 ID，格式不对时忽略，不连累整条记录。
+        unarchivedCLISessionID = try? container.decodeIfPresent(String.self, forKey: .unarchivedCLISessionID)
+        preClearCLISessionID = try? container.decodeIfPresent(String.self, forKey: .preClearCLISessionID)
+        priorCLISessionIDs = (try? container.decodeIfPresent([String].self, forKey: .priorCLISessionIDs)) ?? []
+    }
+
+    /// 这条记录认领的全部 CLI 会话 ID（已统一成小写 UUID）。
+    var claimedCLISessionIDs: Set<String> {
+        Set(
+            ([cliSessionID, unarchivedCLISessionID, preClearCLISessionID].compactMap { $0 } + priorCLISessionIDs)
+                .compactMap(normalizedClaudeSessionUUID)
+        )
+    }
+
+    /// 认领强弱：2 是当前 ID，1 是归档前的 ID，0 是回退、清空前的旧 ID；没认领时为 nil。
+    func claimRank(for sessionID: String) -> Int? {
+        if normalizedClaudeSessionUUID(cliSessionID) == sessionID {
+            return 2
+        }
+        if unarchivedCLISessionID.flatMap(normalizedClaudeSessionUUID) == sessionID {
+            return 1
+        }
+        let historical = ([preClearCLISessionID].compactMap { $0 } + priorCLISessionIDs)
+            .compactMap(normalizedClaudeSessionUUID)
+        return historical.contains(sessionID) ? 0 : nil
+    }
+}
+
+private func normalizedClaudeSessionUUID(_ value: String) -> String? {
+    UUID(uuidString: value)?.uuidString.lowercased()
 }
 
 private enum AgentSessionNavigationResolverError: LocalizedError {

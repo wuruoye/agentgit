@@ -691,11 +691,7 @@ struct ContentView: View {
             .id(worktree.id)
             .accessibilityAddTraits(!showsOverview && model.selectedWorktreeID == worktree.id ? .isSelected : [])
             .contextMenu {
-                let sessions = model.agentAssociations.associations(for: worktree.worktree)
-                let creator = model.agentAssociations.creatorAssociation(forWorktreeAt: worktree.id)
-                let linkedSessions = creator.map { creator in
-                    [creator] + sessions.filter { $0.id != creator.id }
-                } ?? sessions
+                let linkedSessions = model.agentAssociations.sessionAssociations(for: worktree.worktree)
                 ForEach(linkedSessions) { association in
                     Button("Open \(model.agentAssociations.displayTitle(for: association))") {
                         model.agentAssociations.open(association)
