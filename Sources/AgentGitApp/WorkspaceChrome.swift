@@ -215,6 +215,10 @@ struct WorktreeOverview: View {
                                         Divider()
                                         Button("Open in Terminal") { openInTerminal(snapshot.worktree.rootURL) }
                                         Button("Reveal in Finder") { revealInFinder(snapshot.worktree.rootURL) }
+                                        WorktreeOpenWithMenuItems(
+                                            entries: model.openWithSettings.entries(for: project.id),
+                                            worktreeRootURL: snapshot.worktree.rootURL
+                                        )
                                         Button("Copy Path") { copyToPasteboard(snapshot.worktree.rootURL.path) }
                                     }
                                 }

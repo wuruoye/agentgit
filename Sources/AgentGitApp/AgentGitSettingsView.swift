@@ -1,10 +1,12 @@
 import AgentGitCore
 import AgentGitIntegrationShared
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
     case review
     case worktrees
+    case openWith
     case agents
 
     var id: Self { self }
@@ -13,6 +15,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
         switch self {
         case .review: "Review"
         case .worktrees: "Worktrees"
+        case .openWith: "Open With"
         case .agents: "Agents"
         }
     }
@@ -21,6 +24,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
         switch self {
         case .review: "Configure diff presentation and review behavior."
         case .worktrees: "Automatically remove clean worktrees after a period of inactivity."
+        case .openWith: "Add applications to the worktree context menu for each repository."
         case .agents: "Manage optional AgentGit integrations and local sessions."
         }
     }
@@ -29,6 +33,7 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
         switch self {
         case .review: "rectangle.split.2x1"
         case .worktrees: "arrow.triangle.branch"
+        case .openWith: "arrow.up.forward.app"
         case .agents: "sparkles.rectangle.stack"
         }
     }
@@ -37,9 +42,16 @@ enum AgentGitSettingsSection: Hashable, CaseIterable, Identifiable {
         switch self {
         case .review: 590
         case .worktrees: 620
+        case .openWith: 620
         case .agents: 620
         }
     }
+}
+
+/// 从右键菜单跳到设置时要打开的分区和仓库。
+struct AgentGitSettingsDestination: Equatable {
+    let section: AgentGitSettingsSection
+    var projectID: GitProject.ID?
 }
 
 private struct ReviewSettingsPreview: View {
@@ -155,6 +167,7 @@ struct AgentGitSettingsView: View {
     @State private var creatorHookInstalled: Bool?
     @State private var creatorHookError: String?
     @State private var collapseRulesProjectID: GitProject.ID?
+    @State private var openWithProjectID: GitProject.ID?
     let fixedContentHeight: CGFloat?
 
     init(
@@ -168,6 +181,7 @@ struct AgentGitSettingsView: View {
     private static let contextChoices: [GitDiffContext] = [
         .lines(3), .lines(8), .lines(25), .wholeFile
     ]
+    private static let openWithChooseTitles = ["Choose App…", "Choose Folder…"]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -185,6 +199,8 @@ struct AgentGitSettingsView: View {
                             reviewSettings
                         case .worktrees:
                             worktreeSettings
+                        case .openWith:
+                            openWithSettings
                         case .agents:
                             agentSettings
                         }
@@ -202,7 +218,21 @@ struct AgentGitSettingsView: View {
         .background(Color(nsColor: AgentGitPalette.canvas))
         .onAppear {
             collapseRulesProjectID = model.projectID(for: model.selectedWorktreeID)
+            openWithProjectID = collapseRulesProjectID
+            applyRequestedDestination()
         }
+        .onChange(of: model.requestedSettingsDestination) {
+            applyRequestedDestination()
+        }
+    }
+
+    private func applyRequestedDestination() {
+        guard let destination = model.requestedSettingsDestination else { return }
+        selectedSection = destination.section
+        if let projectID = destination.projectID {
+            openWithProjectID = projectID
+        }
+        model.requestedSettingsDestination = nil
     }
 
     private var settingsSidebar: some View {
@@ -374,21 +404,7 @@ struct AgentGitSettingsView: View {
                 image: "chevron.right.square"
             )
             if let project = collapseRulesProject {
-                Picker("Repository", selection: Binding(
-                    get: { project.id },
-                    set: { collapseRulesProjectID = $0 }
-                )) {
-                    ForEach(model.projects) { state in
-                        Text("\(state.project.displayName) · \(state.project.rootURL.deletingLastPathComponent().path)")
-                            .tag(state.id)
-                    }
-                }
-                .font(.agentGitInterface(size: 12))
-
-                Text(verbatim: project.project.rootURL.path)
-                    .font(.agentGitInterface(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                repositoryPicker(project) { collapseRulesProjectID = $0 }
 
                 TextEditor(text: Binding(
                     get: { model.commitFileCollapseSettings.text(for: project.id) },
@@ -420,6 +436,267 @@ struct AgentGitSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func repositoryPicker(
+        _ project: ProjectState,
+        select: @escaping (GitProject.ID) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Repository", selection: Binding(
+                get: { project.id },
+                set: select
+            )) {
+                ForEach(model.projects) { state in
+                    Text("\(state.project.displayName) · \(state.project.rootURL.deletingLastPathComponent().path)")
+                        .tag(state.id)
+                }
+            }
+            .font(.agentGitInterface(size: 12))
+
+            Text(verbatim: project.project.rootURL.path)
+                .font(.agentGitInterface(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var openWithProject: ProjectState? {
+        let projectID = openWithProjectID ?? model.projectID(for: model.selectedWorktreeID)
+        return model.projects.first { $0.id == projectID } ?? model.projects.first
+    }
+
+    private var openWithSettings: some View {
+        AgentGitSettingsCard {
+            VStack(alignment: .leading, spacing: 12) {
+                settingsCardHeading(
+                    "Worktree Context Menu",
+                    detail: "Applications are saved separately for each repository and shared by its worktrees. They appear after Open with Visual Studio Code when you right-click a worktree.",
+                    image: "arrow.up.forward.app"
+                )
+                if let project = openWithProject {
+                    repositoryPicker(project) { openWithProjectID = $0 }
+
+                    let entries = model.openWithSettings.entries(for: project.id)
+                    if entries.isEmpty {
+                        Text("No applications for this repository yet.")
+                            .font(.agentGitInterface(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(entries) { entry in
+                        openWithEntryEditor(entry, project: project)
+                    }
+                    Button("Add Application…") {
+                        addOpenWithApplication(to: project)
+                    }
+
+                    Text(verbatim: "Folder is relative to the root of the worktree you right-click, for example MMFlutter/CrossPlatform. Leave it empty to open the worktree root. Absolute paths, “..”, and symbolic links that lead outside the worktree are rejected. Changes are saved automatically.")
+                        .font(.agentGitInterface(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Add a Git project to configure its applications.")
+                        .font(.agentGitInterface(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func openWithEntryEditor(
+        _ entry: WorktreeOpenWithEntry,
+        project: ProjectState
+    ) -> some View {
+        let applicationURL = entry.applicationURL()
+        let title = entry.menuTitle(applicationURL: applicationURL)
+        let folderStatus: (text: String, isError: Bool) = {
+            do {
+                let folder = try WorktreeOpenWithPath.normalize(entry.relativePath)
+                return (folder.isEmpty ? "Opens the worktree root." : "Opens <worktree>/\(folder)", false)
+            } catch {
+                return (error.localizedDescription, true)
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSWorkspace.shared.icon(
+                    forFile: applicationURL?.path ?? "/Applications"
+                ))
+                .resizable()
+                .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.agentGitInterface(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text(applicationURL.map { ($0.path as NSString).abbreviatingWithTildeInPath }
+                        ?? "Application not found")
+                        .font(.agentGitInterface(size: 10.5))
+                        .foregroundStyle(applicationURL == nil ? Color.red : Color.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    model.openWithSettings.remove(id: entry.id, for: project.id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove from the context menu")
+                .accessibilityLabel("Remove \(title)")
+            }
+            // 两个选择按钮按较长的标题取同一宽度，左侧输入框也就一样宽。
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+                GridRow {
+                    settingsFieldLabel("Name")
+                    TextField(
+                        "Name",
+                        text: openWithBinding(entry, project: project, \.name),
+                        prompt: Text(entry.applicationName(for: applicationURL))
+                    )
+                    .labelsHidden()
+                }
+                GridRow {
+                    settingsFieldLabel("Bundle ID")
+                    HStack {
+                        TextField(
+                            "Bundle ID",
+                            text: Binding(
+                                get: { entry.bundleIdentifier },
+                                set: { identifier in
+                                    // 手填 bundle id 时不再使用之前选的 .app 路径。
+                                    updateOpenWithEntry(entry.id, project: project) {
+                                        $0.bundleIdentifier = identifier
+                                        $0.applicationPath = ""
+                                    }
+                                }
+                            ),
+                            prompt: Text("com.example.App")
+                        )
+                        .labelsHidden()
+                        Button {
+                            if let url = chooseApplicationURL() {
+                                updateOpenWithEntry(entry.id, project: project) {
+                                    $0.applicationPath = url.path
+                                    $0.bundleIdentifier = Bundle(url: url)?.bundleIdentifier ?? ""
+                                }
+                            }
+                        } label: {
+                            StableButtonTitle(title: "Choose App…", alternatives: Self.openWithChooseTitles)
+                        }
+                    }
+                }
+                GridRow {
+                    settingsFieldLabel("Folder")
+                    HStack {
+                        TextField(
+                            "Folder",
+                            text: openWithBinding(entry, project: project, \.relativePath),
+                            prompt: Text("Worktree root")
+                        )
+                        .labelsHidden()
+                        Button {
+                            chooseOpenWithFolder(for: entry, project: project)
+                        } label: {
+                            StableButtonTitle(title: "Choose Folder…", alternatives: Self.openWithChooseTitles)
+                        }
+                    }
+                }
+                GridRow {
+                    Color.clear.frame(width: 82, height: 1)
+                    Text(folderStatus.text)
+                        .font(.agentGitInterface(size: 10.5))
+                        .foregroundStyle(folderStatus.isError ? Color.red : Color.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(folderStatus.text)
+                }
+            }
+            .font(.agentGitInterface(size: 12))
+        }
+        .padding(12)
+        .background(
+            Color(nsColor: AgentGitPalette.canvas),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: AgentGitPalette.reviewControlBorder), lineWidth: 1)
+        }
+    }
+
+    private func openWithBinding(
+        _ entry: WorktreeOpenWithEntry,
+        project: ProjectState,
+        _ keyPath: WritableKeyPath<WorktreeOpenWithEntry, String>
+    ) -> Binding<String> {
+        Binding(
+            get: { entry[keyPath: keyPath] },
+            set: { value in
+                updateOpenWithEntry(entry.id, project: project) { $0[keyPath: keyPath] = value }
+            }
+        )
+    }
+
+    /// 每次都从存储里取最新的配置再改，避免用到界面上一轮留下的旧值。
+    private func updateOpenWithEntry(
+        _ id: WorktreeOpenWithEntry.ID,
+        project: ProjectState,
+        change: (inout WorktreeOpenWithEntry) -> Void
+    ) {
+        guard var entry = model.openWithSettings.entries(for: project.id)
+            .first(where: { $0.id == id }) else { return }
+        change(&entry)
+        model.openWithSettings.update(entry, for: project.id)
+    }
+
+    private func addOpenWithApplication(to project: ProjectState) {
+        guard let url = chooseApplicationURL() else { return }
+        model.openWithSettings.append(
+            WorktreeOpenWithEntry(
+                applicationPath: url.path,
+                bundleIdentifier: Bundle(url: url)?.bundleIdentifier ?? ""
+            ),
+            for: project.id
+        )
+    }
+
+    private func chooseApplicationURL() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    /// 在仓库的任一 worktree 里选文件夹，换算成相对该 worktree 根目录的路径。
+    private func chooseOpenWithFolder(for entry: WorktreeOpenWithEntry, project: ProjectState) {
+        let worktreeRootURLs = (project.snapshot?.worktrees.map(\.worktree.rootURL) ?? [])
+            + [project.project.rootURL]
+        let selectedRootURL = model.projectID(for: model.selectedWorktreeID) == project.id
+            ? model.selectedWorktree?.worktree.rootURL
+            : nil
+        let rootURL = selectedRootURL ?? project.project.rootURL
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = (try? WorktreeOpenWithPath.resolveDirectory(entry.relativePath, in: rootURL))
+            ?? rootURL
+        panel.prompt = "Choose Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let relativePath = WorktreeOpenWithPath.relativePath(of: url, inAnyOf: worktreeRootURLs) else {
+            presentOpenWithFailure(
+                title: "Folder Is Outside the Repository",
+                message: "Choose a folder inside one of the worktrees of \(project.project.displayName)."
+            )
+            return
+        }
+        updateOpenWithEntry(entry.id, project: project) { $0.relativePath = relativePath }
     }
 
     private var worktreeSettings: some View {

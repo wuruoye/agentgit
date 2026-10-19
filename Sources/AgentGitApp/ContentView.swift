@@ -12,6 +12,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.fontScaleSettings) private var suppliedFontSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openSettings) private var openSettings
     @State private var viewportWidth = CGFloat.infinity
     private var fontSettings: FontScaleSettings { suppliedFontSettings ?? .shared }
     private var usesCompactFontLayout: Bool { viewportWidth / fontSettings.scale < 1_100 }
@@ -493,6 +494,14 @@ struct ContentView: View {
         sidebarWorktrees.count { worktreeReviewStatus($0).needsAttention }
     }
 
+    private func openOpenWithSettings(projectID: GitProject.ID) {
+        model.requestedSettingsDestination = AgentGitSettingsDestination(
+            section: .openWith,
+            projectID: projectID
+        )
+        openSettings()
+    }
+
     @ViewBuilder
     private func projectContextMenu(_ projectState: ProjectState) -> some View {
         let projectIndex = model.projects.firstIndex(where: {
@@ -522,6 +531,9 @@ struct ContentView: View {
             get: { model.isProjectExcludedFromCleanup(id: projectState.id) },
             set: { model.setProjectCleanupExcluded($0, id: projectState.id) }
         ))
+        Button("Customize Open With…") {
+            openOpenWithSettings(projectID: projectState.id)
+        }
         Divider()
         Button("Move Up") {
             guard let projectIndex, projectIndex > 0 else {
@@ -592,7 +604,7 @@ struct ContentView: View {
         if state.snapshot != nil {
             let presentation = sidebarPresentation(state)
             ForEach(presentation.visibleWorktrees) { worktree in
-                sidebarWorktreeButton(worktree)
+                sidebarWorktreeButton(worktree, projectID: state.id)
             }
             if presentation.hiddenWorktreeCount > 0 {
                 let showsAll = projectsShowingAllWorktrees.contains(state.id)
@@ -661,7 +673,10 @@ struct ContentView: View {
         return presentation
     }
 
-    private func sidebarWorktreeButton(_ worktree: GitWorktreeSnapshot) -> some View {
+    private func sidebarWorktreeButton(
+        _ worktree: GitWorktreeSnapshot,
+        projectID: GitProject.ID
+    ) -> some View {
         Button {
             openWorktree(worktree.id)
             isSidebarListFocused = true
@@ -717,6 +732,13 @@ struct ContentView: View {
                     }
                 }
                 .disabled(visualStudioCodeURL == nil)
+                WorktreeOpenWithMenuItems(
+                    entries: model.openWithSettings.entries(for: projectID),
+                    worktreeRootURL: worktree.worktree.rootURL
+                )
+                Button("Customize Open With…") {
+                    openOpenWithSettings(projectID: projectID)
+                }
                 Divider()
                 Button("Copy Path") {
                     copyToPasteboard(worktree.worktree.rootURL.path)

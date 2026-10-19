@@ -37,3 +37,51 @@ func openInVisualStudioCode(_ url: URL, applicationURL: URL) {
         configuration: NSWorkspace.OpenConfiguration()
     )
 }
+
+/// 用自定义应用打开 worktree 里的文件夹。目录或应用找不到时弹窗说明原因。
+@MainActor
+func openWorktreeFolder(_ entry: WorktreeOpenWithEntry, worktreeRootURL: URL) {
+    let directoryURL: URL
+    do {
+        directoryURL = try WorktreeOpenWithPath.resolveDirectory(
+            entry.relativePath,
+            in: worktreeRootURL
+        )
+    } catch {
+        presentOpenWithFailure(title: "Couldn’t Open Folder", message: error.localizedDescription)
+        return
+    }
+    guard let applicationURL = entry.applicationURL() else {
+        presentOpenWithFailure(
+            title: "Couldn’t Open Application",
+            message: WorktreeOpenWithError.applicationNotFound(
+                entry.applicationName(for: nil)
+            ).localizedDescription
+        )
+        return
+    }
+    NSWorkspace.shared.open(
+        [directoryURL],
+        withApplicationAt: applicationURL,
+        configuration: NSWorkspace.OpenConfiguration()
+    ) { _, error in
+        guard let error else { return }
+        let message = error.localizedDescription
+        Task { @MainActor in
+            presentOpenWithFailure(title: "Couldn’t Open Application", message: message)
+        }
+    }
+}
+
+@MainActor
+func presentOpenWithFailure(title: String, message: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = title
+    alert.informativeText = message
+    if let window = NSApp.keyWindow {
+        alert.beginSheetModal(for: window)
+    } else {
+        alert.runModal()
+    }
+}

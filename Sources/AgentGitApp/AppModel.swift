@@ -148,6 +148,7 @@ final class AppModel {
         didSet { persistDiffPreferences() }
     }
     let commitFileCollapseSettings: CommitFileCollapseSettings
+    let openWithSettings: WorktreeOpenWithSettings
     var collapsedProjectIDs: Set<GitProject.ID> {
         didSet {
             defaults.set(
@@ -182,6 +183,8 @@ final class AppModel {
     ] = [:]
     private(set) var isApplicationActive = true
     var isWorktreeSwitcherPresented = false
+    /// 从右键菜单打开设置时要定位的分区和仓库，设置窗口读到后清空。
+    var requestedSettingsDestination: AgentGitSettingsDestination?
     var selectedWorktreeID: GitWorktreeSnapshot.ID? {
         didSet {
             persistSelectedWorktreeSelection()
@@ -242,6 +245,7 @@ final class AppModel {
             defaults: defaults,
             legacyProjectID: defaults.string(forKey: Self.selectedWorktreeProjectIDKey)
         )
+        self.openWithSettings = WorktreeOpenWithSettings(defaults: defaults)
         self.collapsedProjectIDs = Set(
             defaults.stringArray(forKey: Self.collapsedProjectIDsKey) ?? []
         )
@@ -734,6 +738,7 @@ final class AppModel {
                 selectedWorktreeProjectID = resolved.id
             }
             commitFileCollapseSettings.moveRules(from: original.id, to: resolved.id)
+            openWithSettings.moveEntries(from: original.id, to: resolved.id)
             if originalCompleteProjectIDs.contains(original.id) {
                 normalizedCompleteProjectIDs.insert(resolved.id)
             }
