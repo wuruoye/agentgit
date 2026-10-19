@@ -114,12 +114,45 @@ enum AgentGitPalette {
     static let sidebarBackground = adaptive(light: srgb(248, 248, 248), dark: srgb(28, 28, 28))
     static let inputBackground = adaptive(light: srgb(250, 250, 250), dark: srgb(42, 42, 42))
     static let sidebarHover = blended(foreground: .labelColor, background: sidebarBackground, fraction: 0.045)
-    static let codeBackground = NSColor.textBackgroundColor
-    static let reviewContextGap = adaptive(light: srgb(245, 247, 251), dark: srgb(30, 35, 43))
-    static let reviewContextGapText = adaptive(light: srgb(114, 126, 145), dark: srgb(141, 154, 175))
-    static let fileHeader = card
-    static let fileContext = adaptive(light: srgb(249, 249, 249), dark: srgb(32, 32, 32))
-    static let hunkHeader = adaptive(light: srgb(252, 252, 252), dark: srgb(39, 39, 39))
+    // Review 区按 Claude Desktop 的 diff 面板配色：整块白底，文件标题行浅灰，分隔只用一条细线。
+    // 深色沿用同样的层次：底色和 card 一致，标题行略亮一级，增删底色压低饱和度。
+    static let reviewBackground = card
+    static let reviewPrimaryText = adaptive(
+        light: srgb(41, 40, 37), dark: srgb(236, 234, 228),
+        highContrastLight: srgb(10, 10, 10), highContrastDark: srgb(250, 250, 250)
+    )
+    static let reviewSecondaryText = adaptive(
+        light: srgb(115, 114, 108), dark: srgb(163, 161, 153),
+        highContrastLight: srgb(70, 70, 66), highContrastDark: srgb(205, 204, 198)
+    )
+    static let reviewTertiaryText = adaptive(
+        light: srgb(160, 159, 153), dark: srgb(118, 117, 111),
+        highContrastLight: srgb(100, 100, 96), highContrastDark: srgb(170, 169, 163)
+    )
+    static let reviewDivider = adaptive(
+        light: srgb(232, 231, 228), dark: srgb(56, 56, 54),
+        highContrastLight: srgb(150, 150, 146), highContrastDark: srgb(140, 140, 136)
+    )
+    static let reviewFileHeaderBackground = adaptive(
+        light: srgb(245, 245, 244), dark: srgb(44, 44, 42),
+        highContrastLight: srgb(232, 232, 230), highContrastDark: srgb(58, 58, 56)
+    )
+    static let reviewRowSelection = adaptive(
+        light: srgb(240, 239, 236), dark: srgb(54, 54, 51),
+        highContrastLight: srgb(210, 209, 205), highContrastDark: srgb(84, 84, 80)
+    )
+    static let reviewRowHover = adaptive(light: srgb(246, 246, 244), dark: srgb(45, 45, 43))
+    /// 顶栏切换按钮的选中态：浅蓝圆角底配蓝色图标。
+    static let reviewToggleSelectedBackground = adaptive(light: srgb(226, 236, 252), dark: srgb(36, 52, 80))
+    static let reviewToggleSelectedText = adaptive(light: srgb(37, 99, 214), dark: srgb(128, 174, 250))
+    static let codeBackground = reviewBackground
+    static let reviewContextGap = reviewRowHover
+    static let reviewContextGapText = reviewSecondaryText
+    static let fileHeader = reviewFileHeaderBackground
+    static let fileContext = reviewBackground
+    static let hunkHeader = reviewBackground
+    /// 增删行最左侧的实心竖条宽度。
+    static let diffChangeBarWidth: CGFloat = 3
     static let reviewActionConfirmationBackground = adaptive(light: srgb(255, 234, 234), dark: srgb(76, 41, 40))
     static let reviewActionConfirmationText = adaptive(light: srgb(181, 46, 44), dark: srgb(255, 133, 130))
     static let commitPrimaryText = NSColor.labelColor
@@ -149,89 +182,85 @@ enum AgentGitPalette {
     static let sidebarMetadata = commitSecondaryText
     static let sidebarDivider = cardBorder
     static let reviewChrome = card
-    static let reviewNavigationBackground = canvas
-    static let reviewTabBarBackground = canvas
-    static let reviewHeaderBorder = cardBorder
+    static let reviewNavigationBackground = reviewBackground
+    static let reviewTabBarBackground = reviewBackground
+    static let reviewHeaderBorder = reviewDivider
     static let reviewControlBackground = card
     static let reviewControlBorder = cardBorder
-    static let reviewHover = controlHover
+    static let reviewHover = reviewRowHover
     static let reviewHunkText = commitPrimaryText
     static let reviewActionBackground = inputBackground
     static let commitCountBackground = inputBackground
-    static let groupHeader = card
-    static let folderHeader = inputBackground
-    static let fileListRow = card
-    static let fileHeaderBoundary = cardBorder
+    static let groupHeader = reviewBackground
+    static let folderHeader = reviewBackground
+    static let fileListRow = reviewFileHeaderBackground
+    static let fileHeaderBoundary = reviewDivider
     static let sidebarSelection = adaptive(
         light: srgb(239, 239, 239), dark: srgb(55, 55, 55),
         highContrastLight: srgb(203, 203, 203), highContrastDark: srgb(86, 86, 86)
     )
-    static let fileHeaderFocused = blended(foreground: activeControl, background: card, fraction: 0.045)
+    static let fileHeaderFocused = blended(foreground: activeControl, background: reviewFileHeaderBackground, fraction: 0.05)
 
     static let codeText = adaptive(
-        light: srgb(51, 51, 51),
-        dark: srgb(215, 215, 215)
+        light: srgb(41, 40, 37),
+        dark: srgb(222, 220, 214)
     )
     static let codeLineNumber = adaptive(
-        light: srgb(153, 153, 153),
-        dark: srgb(132, 132, 132)
+        light: srgb(163, 162, 156),
+        dark: srgb(112, 111, 106)
     )
-    static let codeGutter = adaptive(
-        light: srgb(246, 247, 248),
-        dark: srgb(38, 39, 42)
-    )
+    static let codeGutter = reviewBackground
+    /// Split 视图里一侧没有对应行时的空白格。
     static let codeFiller = adaptive(
-        light: srgb(247, 248, 250),
-        dark: srgb(29, 33, 40)
+        light: srgb(250, 250, 249),
+        dark: srgb(31, 31, 30)
     )
     /// 跨行选区底色。系统选中色直接铺满会盖掉增删色带，压一点透明度让行底色透出来。
     static let codeSelection = NSColor.selectedTextBackgroundColor
         .withAlphaComponent(0.7)
     static let separator = cardBorder
 
-    static let additionBackground = blended(
-        foreground: additionText,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.10,
-        darkFraction: 0.16,
-        highContrastFraction: 0.22
+    // 增删行整行铺浅绿、浅红；行号、符号和左侧竖条用同色系的实色。深色下底色压暗、降饱和，
+    // 只让竖条和行号保持可辨的亮度。
+    static let additionBackground = adaptive(
+        light: srgb(233, 245, 233),
+        dark: srgb(34, 53, 38),
+        highContrastLight: srgb(210, 236, 212),
+        highContrastDark: srgb(30, 72, 40)
     )
-    static let deletionBackground = blended(
-        foreground: deletionText,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.10,
-        darkFraction: 0.16,
-        highContrastFraction: 0.22
+    static let deletionBackground = adaptive(
+        light: srgb(252, 235, 235),
+        dark: srgb(64, 35, 35),
+        highContrastLight: srgb(246, 212, 212),
+        highContrastDark: srgb(92, 34, 34)
     )
     static let metadataBackground = blended(
         foreground: NSColor.unemphasizedSelectedContentBackgroundColor,
-        background: NSColor.textBackgroundColor,
+        background: reviewBackground,
         fraction: 0.24
     )
-    static let additionInline = blended(
-        foreground: additionText,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.28,
-        darkFraction: 0.30,
-        highContrastFraction: 0.40
+    static let additionInline = adaptive(
+        light: srgb(196, 232, 199),
+        dark: srgb(44, 88, 54),
+        highContrastLight: srgb(160, 214, 166),
+        highContrastDark: srgb(42, 112, 58)
     )
-    static let deletionInline = blended(
-        foreground: deletionText,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.28,
-        darkFraction: 0.30,
-        highContrastFraction: 0.40
+    static let deletionInline = adaptive(
+        light: srgb(246, 204, 204),
+        dark: srgb(104, 46, 46),
+        highContrastLight: srgb(236, 170, 170),
+        highContrastDark: srgb(140, 44, 44)
     )
     static let additionText = adaptive(
-        light: srgb(35, 132, 87),
-        dark: srgb(111, 208, 101),
-        highContrastLight: srgb(15, 91, 49),
+        light: srgb(46, 140, 62),
+        dark: srgb(98, 190, 112),
+        highContrastLight: srgb(15, 91, 37),
         highContrastDark: srgb(137, 234, 148)
     )
     static let deletionText = adaptive(
-        light: srgb(192, 65, 78),
-        dark: srgb(255, 110, 110),
-        highContrastLight: srgb(157, 35, 47),
+        light: srgb(207, 59, 59),
+        dark: srgb(236, 112, 108),
+        highContrastLight: srgb(157, 30, 30),
         highContrastDark: srgb(255, 156, 160)
     )
 
@@ -246,11 +275,7 @@ enum AgentGitPalette {
 
     /// Split 视图左右两栏之间的中缝。系统 separator 压在代码底色上看不出来，这里用标签色
     /// 淡淡混一层，浅色深色下都是一条能看见但不刺眼的灰线。
-    static let splitPaneDivider = blended(
-        foreground: NSColor.labelColor,
-        background: NSColor.textBackgroundColor,
-        fraction: 0.22
-    )
+    static let splitPaneDivider = reviewDivider
 
     static let commitEdge0 = adaptive(light: srgb(130, 130, 130), dark: srgb(150, 150, 150))
     static let commitEdge1 = adaptive(
@@ -274,28 +299,29 @@ enum AgentGitPalette {
         dark: srgb(59, 205, 205)
     )
 
-    // 浅色这一套原来直接沿用了深色主题的粉紫、淡绿、浅橙，压在白底上全是低对比，代码看着一片糊。
-    // 字符串原来还是绿色，落在新增行的绿底上几乎读不出来，所以浅色下改成红棕，和增删底色错开。
+    // 语法色对齐 Claude Desktop：关键字和注解橙棕，类型名紫色，注释灰色，其余用正文色。
+    // 字符串和数字用蓝青色，落在增删行的绿、红底上都还读得清。
     static let syntaxKeyword = adaptive(
-        light: srgb(155, 35, 147),
-        dark: srgb(198, 149, 198)
+        light: srgb(184, 92, 36),
+        dark: srgb(232, 152, 98)
+    )
+    static let syntaxType = adaptive(
+        light: srgb(130, 80, 200),
+        dark: srgb(192, 154, 242)
     )
     static let syntaxString = adaptive(
-        light: srgb(184, 30, 26),
-        dark: srgb(153, 204, 150)
+        light: srgb(30, 104, 160),
+        dark: srgb(122, 180, 230)
     )
     static let syntaxNumber = adaptive(
-        light: srgb(28, 60, 178),
-        dark: srgb(249, 184, 113)
+        light: srgb(18, 118, 138),
+        dark: srgb(108, 198, 208)
     )
     static let syntaxComment = adaptive(
-        light: srgb(106, 115, 125),
-        dark: srgb(142, 149, 155)
+        light: srgb(150, 148, 140),
+        dark: srgb(132, 130, 122)
     )
-    static let syntaxHeading = adaptive(
-        light: srgb(178, 80, 26),
-        dark: srgb(240, 126, 132)
-    )
+    static let syntaxHeading = syntaxKeyword
 
     private static func readableStatusColor(_ color: NSColor) -> NSColor {
         blended(

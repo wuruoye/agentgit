@@ -4,27 +4,23 @@
 主应用的 `AgentGitTypography` 与代码配色，界面文字采用 Anthropic Sans Text Light，
 代码使用 Menlo。输出目录中的真实提交内容与截图只用于本地对照，不加入版本控制。
 
-## 比较条件
+## 样板内容
 
-- 缩放为 110%，所有字号、间距、按钮和代码行同步放大，再以 2× Retina 导出。
-- 当前界面截图为 5120 × 2820 像素；审阅区裁剪坐标为 `(828, 104, 5120, 2756)`。
-- 当前界面与样板均为 4292 × 2652 像素，提交导航宽度均为 792 像素。
-- 使用同一真实提交的 3 个文件、4 个 hunk、`+4 −9`，保留全部 37 行 diff 内容。
-- 并排与局部对照只裁剪和拼接，不缩放任何比较面板。
-
-## 样板规格
+样板按 Claude Desktop（Code 标签页）diff 审阅面板的布局重画 Review 区：横跨全宽的顶栏、
+上半文件树下半 Commits 的左栏、单行浅灰文件标题、「N unmodified lines」分隔行，以及
+单列行号加增删竖条的代码行。颜色、字体和语法高亮直接取主应用的 `AgentGitPalette`、
+`AgentGitTypography` 和 `DiffSyntaxHighlighter`，同一份 fixture 输出浅色和深色两张图。
 
 | 对象 | 100% 下的逻辑值 |
 | --- | --- |
-| 提交标题 / 元数据 | 14 / 11.5 pt，Light |
-| Review 标题 / 统计 | 15.5 / 12 pt，Light |
-| 文件名 / 路径 | 13.5 / 11.5 pt，Light |
-| 代码 / 代码行高 | Menlo 13 pt / 20 pt |
-| 提交行 / 顶栏 | 56 / 56 pt |
-| 文件头 / hunk 标题条 | 52 / 24 pt |
+| 顶栏 / 标题 | 44 pt / 14.5 pt，Light |
+| 文件树行 / 字号 | 26 pt / 14 pt |
+| 提交行 / 标题 / 元数据 | 54 / 14 / 12 pt，SHA 用等宽字体 |
+| 文件标题行 / 文件名 / 目录 | 36 / 14 / 13 pt |
+| 折叠上下文行 / 无折叠的 hunk 行 | 44 / 24 pt |
+| 代码 / 代码行高 / 增删竖条 | Menlo 13 pt / 20 pt / 3 pt |
 
-提交的作者、分支和时间保持次级显示。文件级操作集中在文件头；hunk 标题用接近白色的
-背景，减少长 diff 中反复出现的粗灰条。`states.png` 展示普通、hover、选中和禁用外观。
+`states.png` 展示普通、悬停、选中、开关打开和禁用外观。
 
 ## 生成
 
@@ -36,6 +32,8 @@ bash Design/Review/render.sh
 python3 Design/Review/compose.py /absolute/path/to/current-screenshot.png
 ```
 
+`render.sh` 输出 `proposal.png`（浅色）、`proposal-dark.png`（深色）、`proposal-narrow.png`
+（收起左栏）和 `states.png`。`compose.py` 需要同尺寸的当前界面截图才能生成下面的对照；
 `comparison.png` 为整体同尺寸对照，`detail-comparison.png` 为提交列表与前两个文件的局部
 对照，`proposal-in-window.png` 将原生样板放回原窗口。`review.html` 内嵌全部图片，可离线
 并排、同步滚动或调整叠图透明度。`measurements.json` 记录尺寸、缩放、字体和内容核对结果。

@@ -1,19 +1,22 @@
 import AppKit
 import SwiftUI
 
+/// Review 区的字号、行高和文字颜色，对齐 Claude Desktop 的 diff 审阅面板。
 enum ReviewWorkspaceStyle {
     static let commitTitleSize: CGFloat = 14
-    static let metadataSize: CGFloat = 11.5
-    static let titleSize: CGFloat = 15.5
-    static let fileTitleSize: CGFloat = 13.5
-    static let commitRowHeight: CGFloat = 56
-    static let toolbarHeight: CGFloat = 56
-    static let fileHeaderHeight: CGFloat = 52
+    static let metadataSize: CGFloat = 12
+    static let titleSize: CGFloat = 14.5
+    static let fileTitleSize: CGFloat = 14
+    static let navigatorRowSize: CGFloat = 14
+    static let commitRowHeight: CGFloat = 54
+    static let toolbarHeight: CGFloat = 44
+    static let fileHeaderHeight: CGFloat = 36
     static let hunkHeaderHeight: CGFloat = 24
-    static let primary = SidebarStyle.primary
-    static let secondary = SidebarStyle.secondary
-    static let selection = SidebarStyle.selection
-    static let hover = SidebarStyle.hover
+    static let primary = AgentGitPalette.reviewPrimaryText
+    static let secondary = AgentGitPalette.reviewSecondaryText
+    static let tertiary = AgentGitPalette.reviewTertiaryText
+    static let selection = AgentGitPalette.reviewRowSelection
+    static let hover = AgentGitPalette.reviewRowHover
 
     static func font(_ size: CGFloat) -> Font {
         .agentGitInterface(size: size, weight: .light)
@@ -150,7 +153,8 @@ struct StableButtonTitle: View {
     }
 }
 
-enum ReviewControlKind: Equatable { case normal, selected, primary, bordered, destructive }
+/// `toggledOn` 是顶栏开关打开时的浅蓝底、蓝色图标。
+enum ReviewControlKind: Equatable { case normal, selected, toggledOn, primary, bordered, destructive }
 
 struct InteractionBackground: View {
     let color: NSColor
@@ -215,6 +219,9 @@ private struct ReviewControlBody: View {
         if kind == .selected {
             return isEnabled && configuration.isPressed ? AgentGitPalette.controlPressed : AgentGitPalette.sidebarSelection
         }
+        if kind == .toggledOn {
+            return AgentGitPalette.reviewToggleSelectedBackground
+        }
         if kind == .destructive {
             return AgentGitPalette.reviewActionConfirmationBackground
         }
@@ -222,12 +229,13 @@ private struct ReviewControlBody: View {
     }
 
     private var showsBackground: Bool {
-        kind == .primary || kind == .selected
+        kind == .primary || kind == .selected || kind == .toggledOn
             || (isEnabled && (isHovered || configuration.isPressed))
     }
 
     private var foreground: Color {
         if kind == .primary { return Color(nsColor: AgentGitPalette.primaryControlText) }
+        if kind == .toggledOn { return Color(nsColor: AgentGitPalette.reviewToggleSelectedText) }
         if kind == .destructive && (isHovered || configuration.isPressed) { return Color(nsColor: AgentGitPalette.reviewActionConfirmationText) }
         return Color(nsColor: kind == .selected || isHovered ? AgentGitPalette.activeControl : AgentGitPalette.controlText)
     }
