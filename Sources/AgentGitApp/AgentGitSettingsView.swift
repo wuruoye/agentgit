@@ -440,7 +440,7 @@ struct AgentGitSettingsView: View {
 
     private func repositoryPicker(
         _ project: ProjectState,
-        select: @escaping (GitProject.ID) -> Void
+        select: @escaping @MainActor (GitProject.ID) -> Void
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Repository", selection: Binding(
