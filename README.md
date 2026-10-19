@@ -292,6 +292,13 @@ Pending。
 Files 导航与 Diff 文件标题的 `…` 菜单或右键菜单可以打开当前工作副本、使用 Visual Studio Code
 打开、在 Finder 中定位，以及复制相对或绝对路径；已经删除或只存在于历史提交中的文件
 会禁用打开操作并保留父目录定位。
+在 Diff 中拖选代码或选中代码行（unified 与 split 均可）后，选区最后一行下方浮出操作条，
+右键菜单提供相同操作。操作条叠在 Diff 上方，出现和消失不移动代码行，按钮标题与宽度固定。
+Send to Agent 把选区连同仓库与 worktree 路径、文件相对路径、新旧两侧行号范围、带 `+` / `-`
+标记的原文和审阅范围（Pending 的 Working / Staged / 未跟踪文件，或 commit / commit range
+的 SHA）交给该 worktree 关联的会话：Codex 线程链接带 `prompt` 参数，打开后填入输入框但不发送；
+Claude Desktop 打开已有会话的链接不接受文字，先复制到剪贴板并提示粘贴，再打开会话。
+关联多个会话时先选择目标，没有关联会话时按钮禁用。Copy as Quote 只复制同样的上下文文本。
 Pending 的 Files 导航按 Working / Staged 分组，同一路径的两份 Diff 保持独立选择；列表获得
 键盘焦点后按 Space 执行当前文件的 Stage 或 Unstage，右键菜单提供相同动作。submodule 仅有
 内部 dirty 内容时继续隐藏无法生效的 Stage。

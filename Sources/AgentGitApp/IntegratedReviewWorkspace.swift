@@ -1,4 +1,5 @@
 import AgentGitCore
+import AgentGitIntegrationShared
 import AppKit
 import SwiftUI
 
@@ -110,6 +111,8 @@ struct IntegratedReviewWorkspace: View {
     @State private var collapsedDiffGroupIDs: Set<String> = []
     @State private var diffCommandSequence: UInt64 = 0
     @State private var diffCommand: DiffStackCommand?
+    @State private var selectionNotice: SelectionActionNotice?
+    @State private var selectionNoticeTask: Task<Void, Never>?
     @Binding private var isReviewFocused: Bool
     @State private var paneBeforeFocus: ReviewPane?
     /// 顶栏左端按钮收起整个左栏（文件树和提交列表）。
@@ -1895,9 +1898,19 @@ struct IntegratedReviewWorkspace: View {
                     onFileAction: performFileAction,
                     onSelectionAction: performSelectionAction,
                     onAllChangesAction: allChangesActionHandler,
-                    onHunkPositionChanged: { hunkPosition = $0 }
+                    onHunkPositionChanged: { hunkPosition = $0 },
+                    selectionActions: selectionActions,
+                    onSelectionContextAction: performSelectionContextAction
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .bottom) {
+                    // 叠在 diff 上方，出现和消失都不挤动代码行。
+                    if let selectionNotice {
+                        SelectionActionNoticeView(notice: selectionNotice)
+                            .padding(.bottom, 14)
+                            .allowsHitTesting(false)
+                    }
+                }
             }
         }
     }
@@ -2110,6 +2123,141 @@ struct IntegratedReviewWorkspace: View {
             diff: displayedDiff(for: item),
             imageDiff: imageDiffsByFileID[item.id]
         )
+    }
+
+    // MARK: - Selection actions
+
+    private enum SelectionActionID {
+        static let sendToAgent = "send-to-agent"
+        static let copyAsQuote = "copy-as-quote"
+    }
+
+    private var selectionAgentSessions: [AgentAssociation] {
+        model.agentAssociations.sessionAssociations(for: snapshot.worktree)
+    }
+
+    /// 选中代码后浮层和右键菜单里的操作。标题固定，按钮宽度不随会话数变化。
+    private var selectionActions: [DiffSelectionAction] {
+        let sessions = selectionAgentSessions
+        let sendHelp: String
+        if let session = sessions.first, sessions.count == 1 {
+            sendHelp = session.provider == .codex
+                ? "Open the Codex session for this worktree with the selection in its composer"
+                : "Copy the selection and open the Claude session for this worktree"
+        } else if sessions.isEmpty {
+            sendHelp = "No agent session is linked to this worktree"
+        } else {
+            sendHelp = "Choose an agent session for this worktree and attach the selection"
+        }
+        return [
+            DiffSelectionAction(
+                id: SelectionActionID.sendToAgent,
+                title: "Send to Agent",
+                systemImage: "paperplane",
+                help: sendHelp,
+                choices: sessions.map { session in
+                    DiffSelectionAction.Choice(
+                        id: session.id,
+                        title: "\(session.provider.displayName) · "
+                            + model.agentAssociations.displayTitle(for: session)
+                    )
+                },
+                isEnabled: !sessions.isEmpty
+            ),
+            DiffSelectionAction(
+                id: SelectionActionID.copyAsQuote,
+                title: "Copy as Quote",
+                systemImage: "text.quote",
+                help: "Copy the selection with its file, line numbers and review scope"
+            )
+        ]
+    }
+
+    private func performSelectionContextAction(
+        actionID: String,
+        choiceID: String?,
+        excerpt: DiffSelectionExcerpt
+    ) {
+        guard let context = selectionContext(for: excerpt) else {
+            return
+        }
+        switch actionID {
+        case SelectionActionID.copyAsQuote:
+            copyToPasteboard(context.text)
+            showSelectionNotice(.init(message: "Copied selection as a quote", systemImage: "doc.on.clipboard"))
+        case SelectionActionID.sendToAgent:
+            guard let session = selectionAgentSessions.first(where: { $0.id == choiceID }) else {
+                showSelectionNotice(.init(
+                    message: "No agent session is linked to this worktree",
+                    systemImage: "exclamationmark.triangle",
+                    isWarning: true
+                ))
+                return
+            }
+            let provider = session.provider.displayName
+            model.agentAssociations.open(session, attaching: context.text) { delivery in
+                switch delivery {
+                case .prefilled:
+                    showSelectionNotice(.init(
+                        message: "Opened \(provider) with the selection in the composer",
+                        systemImage: "paperplane"
+                    ))
+                case .copiedToPasteboard:
+                    showSelectionNotice(.init(
+                        message: "Selection copied — paste it into the \(provider) session (⌘V)",
+                        systemImage: "doc.on.clipboard"
+                    ))
+                case let .failed(message):
+                    showSelectionNotice(.init(
+                        message: message,
+                        systemImage: "exclamationmark.triangle",
+                        isWarning: true
+                    ))
+                }
+            }
+        default:
+            return
+        }
+    }
+
+    private func selectionContext(for excerpt: DiffSelectionExcerpt) -> ReviewSelectionContext? {
+        guard let item = currentFileItems.first(where: { $0.id.stackID == excerpt.fileID }) else {
+            return nil
+        }
+        let scope: ReviewSelectionScope = switch activeContext {
+        case .pending:
+            .uncommitted(
+                item.change.isUntracked ? .untracked : item.scope == .staged ? .staged : .unstaged,
+                headOID: snapshot.worktree.isUnborn ? nil : snapshot.worktree.headOID
+            )
+        case let .commit(commitID):
+            .commit(oid: commit(withID: commitID)?.oid ?? commitID, subject: commit(withID: commitID)?.subject)
+        case let .range(base, head):
+            .range(base: base, head: head)
+        }
+        return ReviewSelectionContext(
+            repositoryPath: model.projectID(for: snapshot.id) ?? snapshot.worktree.rootURL.path,
+            worktreePath: snapshot.worktree.rootURL.path,
+            branchName: snapshot.worktree.branchName,
+            scope: scope,
+            filePath: item.change.path,
+            originalPath: item.change.originalPath,
+            lines: excerpt.lines
+        )
+    }
+
+    private func showSelectionNotice(_ notice: SelectionActionNotice) {
+        selectionNoticeTask?.cancel()
+        withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) {
+            selectionNotice = notice
+        }
+        selectionNoticeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) {
+                selectionNotice = nil
+            }
+        }
     }
 
     // MARK: - Pending mutations
@@ -5479,6 +5627,31 @@ struct RemoteOperationFeedbackView: View {
             .background(feedback.tintColor.opacity(0.1), in: Capsule())
             .help(feedback.message)
             .accessibilityLabel(feedback.message)
+    }
+}
+
+struct SelectionActionNotice: Equatable {
+    let message: String
+    let systemImage: String
+    var isWarning = false
+}
+
+/// 选区操作完成后在 diff 底部短暂显示的结果。
+struct SelectionActionNoticeView: View {
+    let notice: SelectionActionNotice
+
+    var body: some View {
+        Label(notice.message, systemImage: notice.systemImage)
+            .font(.agentGitInterface(.caption).weight(.medium))
+            .foregroundStyle(notice.isWarning ? Color.orange : Color(nsColor: AgentGitPalette.activeControl))
+            .lineLimit(2)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Color(nsColor: AgentGitPalette.card), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color(nsColor: AgentGitPalette.cardBorder)))
+            .shadow(color: .black.opacity(0.12), radius: 5, y: 1)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.updatesFrequently)
     }
 }
 

@@ -465,6 +465,9 @@ struct DiffStackView: NSViewRepresentable {
     let onSelectionAction: (String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void
     var onAllChangesAction: ((GitAllChangesAction) -> Void)? = nil
     var onHunkPositionChanged: ((DiffHunkPosition) -> Void)? = nil
+    var selectionActions: [DiffSelectionAction] = []
+    /// 参数依次是操作 ID、选中的目标（没有可选目标时为 nil）和选区。
+    var onSelectionContextAction: ((String, String?, DiffSelectionExcerpt) -> Void)? = nil
 
     func makeNSView(context: Context) -> DiffStackScrollView {
         let scrollView = DiffStackScrollView()
@@ -491,6 +494,8 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.onSelectionAction = onSelectionAction
         scrollView.onAllChangesAction = onAllChangesAction
         scrollView.onHunkPositionChanged = onHunkPositionChanged
+        scrollView.onSelectionContextAction = onSelectionContextAction
+        scrollView.selectionActions = selectionActions
         scrollView.bind(store: scrollStore, key: scrollKey)
         scrollView.isApplicationActive = isApplicationActive
         scrollView.loadingMessage = loadingMessage
@@ -557,6 +562,16 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     var onFileUtilityAction: ((String, DiffStackFileUtilityAction) -> Void)?
     var onFileAction: ((String, GitPendingSelectionAction) -> Void)?
     var onSelectionAction: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
+    var onSelectionContextAction: ((String, String?, DiffSelectionExcerpt) -> Void)?
+    var selectionActions: [DiffSelectionAction] = [] {
+        didSet {
+            guard selectionActions != oldValue else {
+                return
+            }
+            selectionActionBar.update(actions: selectionActions)
+            refreshSelectionActionBar()
+        }
+    }
     var onAllChangesAction: ((GitAllChangesAction) -> Void)? {
         didSet {
             if (oldValue == nil) != (onAllChangesAction == nil) {
@@ -641,6 +656,17 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var isApplyingPresentationUpdate = false
     private var inactiveScrollAnchor: (key: ReviewStateKey, offset: CGFloat)?
     private var codeSelection: DiffCodeSelection?
+    private let selectionActionBar = DiffSelectionActionBar()
+    private var selectionActionAnchor: SelectionActionAnchor?
+    /// 拖选过程中不显示操作条，松开鼠标后再按最终选区出现。
+    private var isTrackingCodeSelection = false
+
+    /// 操作条贴着的选区：首末行和所在代码列，`.unified` 表示整行。
+    private struct SelectionActionAnchor {
+        let firstRow: Int
+        let lastRow: Int
+        let column: DiffCodeColumn
+    }
 
     private struct PendingHunkAnchor {
         let anchorID: String
@@ -688,6 +714,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         updateColumnWidth()
         updateDocumentHeight()
         updateStickyHeader()
+        positionSelectionActionBar()
     }
 
     fileprivate func moveFocusToReviewContent() {
@@ -960,6 +987,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 changes: changes
             )
         }
+        refreshSelectionActionBar()
 
         guard scrollTarget != appliedScrollTarget else {
             return
@@ -1171,6 +1199,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         publishHunkPosition()
+        refreshSelectionActionBar()
         let visible = tableView.rows(in: tableView.visibleRect)
         guard visible.location != NSNotFound else { return }
         for row in visible.location..<NSMaxRange(visible) {
@@ -2269,6 +2298,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             self?.contextMenu(forFileID: fileID)
         }
         addSubview(stickyClip, positioned: .above, relativeTo: contentView)
+        selectionActionBar.isHidden = true
+        selectionActionBar.actionHandler = { [weak self] action, button in
+            self?.runSelectionAction(action, from: button)
+        }
+        addSubview(selectionActionBar, positioned: .above, relativeTo: stickyClip)
 
         contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
@@ -2313,6 +2347,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             scrollStore?.saveScrollOffset(contentView.bounds.minY, for: scrollKey)
         }
         updateStickyHeader()
+        positionSelectionActionBar()
     }
 
     /// NSScrollView 跟随 document view 翻转，这里 minY 就是视口顶边。
@@ -2710,6 +2745,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
 
         case .line, .sideBySide:
+            addSelectionActionItems(to: menu, clickedRow: clickedRow)
             guard let selection = selectedChangedLines(
                 clickedRow: clickedRow,
                 selectedRows: actionRows
@@ -3301,6 +3337,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         focusFile(atRow: row)
         window?.makeFirstResponder(tableView)
+        isTrackingCodeSelection = true
         tableView.deselectAll(nil)
         let index = textView.characterIndex(forWindowPoint: event.locationInWindow)
         if event.modifierFlags.contains(.shift),
@@ -3337,7 +3374,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             )
         }
         applyCodeSelectionHighlights()
+        refreshSelectionActionBar()
         trackCodeSelectionDrag()
+        isTrackingCodeSelection = false
+        refreshSelectionActionBar()
         return true
     }
 
@@ -3486,6 +3526,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         codeSelection = nil
         applyCodeSelectionHighlights()
+        refreshSelectionActionBar()
     }
 
     func codeSelectionText() -> String {
@@ -3576,6 +3617,226 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 return nil
             }
         }.joined(separator: "\n")
+    }
+
+    // MARK: - 选区操作
+
+    private struct SelectedCode {
+        let fileID: String
+        let rows: [Int]
+        let column: DiffCodeColumn
+        let lines: [GitDiffLine]
+
+        var excerpt: DiffSelectionExcerpt {
+            DiffSelectionExcerpt(fileID: fileID, lines: lines)
+        }
+    }
+
+    private func codeRowFileID(_ row: Int) -> String? {
+        guard rows.indices.contains(row) else {
+            return nil
+        }
+        switch rows[row] {
+        case let .line(_, _, fileID, _, _), let .sideBySide(_, _, fileID, _, _):
+            return fileID
+        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+             .contextEdge, .image, .note:
+            return nil
+        }
+    }
+
+    /// 当前选中的代码，只认同一个文件里的代码行。拖选优先；右键落在拖选范围外时用表格选中的行。
+    private func selectedCode(clickedRow: Int? = nil) -> SelectedCode? {
+        if let codeSelection, !codeSelection.isEmpty,
+           clickedRow.map({ codeSelectionRows(containing: $0) != nil }) ?? true {
+            return selectedCode(in: codeSelection)
+        }
+        return selectedCode(inRows: tableView.selectedRowIndexes)
+    }
+
+    private func selectedCode(in selection: DiffCodeSelection) -> SelectedCode? {
+        let spans = selectedCodeSpans(for: selection, in: rows).sorted { $0.row < $1.row }
+        var fileID: String?
+        var selectedRows: [Int] = []
+        var lines: [GitDiffLine] = []
+        var column = selection.column
+        for (index, span) in spans.enumerated() {
+            // 首尾行只选到行首或行尾外侧时不算；中间的空行长度为 0，照样算。
+            guard span.range.length > 0 || (index > 0 && index < spans.count - 1),
+                  let line = codeLine(atRow: span.row, column: span.column),
+                  let rowFileID = codeRowFileID(span.row) else {
+                continue
+            }
+            if let fileID, fileID != rowFileID {
+                return nil
+            }
+            fileID = rowFileID
+            selectedRows.append(span.row)
+            lines.append(line)
+            column = span.column
+        }
+        guard let fileID, !lines.isEmpty else {
+            return nil
+        }
+        return SelectedCode(fileID: fileID, rows: selectedRows, column: column, lines: lines)
+    }
+
+    private func selectedCode(inRows selectedRows: IndexSet) -> SelectedCode? {
+        var fileID: String?
+        var codeRows: [Int] = []
+        var unifiedLines: [GitDiffLine] = []
+        var pairs: [(row: Int, old: GitDiffLine?, new: GitDiffLine?)] = []
+        for row in selectedRows {
+            guard let rowFileID = codeRowFileID(row) else {
+                continue
+            }
+            if let fileID, fileID != rowFileID {
+                return nil
+            }
+            fileID = rowFileID
+            codeRows.append(row)
+            switch rows[row] {
+            case let .line(line, _, _, _, _):
+                unifiedLines.append(line)
+            case let .sideBySide(pair, _, _, _, _):
+                pairs.append((row, pair.old, pair.new))
+            default:
+                continue
+            }
+        }
+        let lines = unifiedLines + unifiedDiffSelectionOrder(pairs)
+        guard let fileID, !lines.isEmpty else {
+            return nil
+        }
+        return SelectedCode(fileID: fileID, rows: codeRows, column: .unified, lines: lines)
+    }
+
+    /// 选区变了以后重新找操作条的锚点；滚动和尺寸变化只需要 `positionSelectionActionBar`。
+    private func refreshSelectionActionBar() {
+        if isTrackingCodeSelection || selectionActions.isEmpty {
+            selectionActionAnchor = nil
+        } else {
+            selectionActionAnchor = selectedCode().flatMap { selected in
+                guard let first = selected.rows.first, let last = selected.rows.last else {
+                    return nil
+                }
+                return SelectionActionAnchor(firstRow: first, lastRow: last, column: selected.column)
+            }
+        }
+        positionSelectionActionBar()
+    }
+
+    /// 操作条叠在表格上方，贴着选区最后一行的下方、靠所在代码列的右侧；下方放不下时放到首行上方，
+    /// 选区比视口还高时停在视口底部。行的位置不受它影响。
+    private func positionSelectionActionBar() {
+        guard let anchor = selectionActionAnchor,
+              rows.indices.contains(anchor.firstRow),
+              rows.indices.contains(anchor.lastRow),
+              anchor.lastRow < tableView.numberOfRows else {
+            selectionActionBar.isHidden = true
+            return
+        }
+        let gap: CGFloat = 4
+        let size = selectionActionBar.preferredSize
+        let viewport = contentView.frame
+        let topLimit = stickyClip.isHidden ? viewport.minY : max(viewport.minY, stickyClip.frame.maxY)
+        let selectionRect = convert(
+            tableView.rect(ofRow: anchor.firstRow).union(tableView.rect(ofRow: anchor.lastRow)),
+            from: tableView
+        )
+        guard selectionRect.maxY > topLimit, selectionRect.minY < viewport.maxY else {
+            selectionActionBar.isHidden = true
+            return
+        }
+        var y = selectionRect.maxY + gap
+        if y + size.height > viewport.maxY - gap {
+            let above = selectionRect.minY - gap - size.height
+            y = above >= topLimit + gap ? above : viewport.maxY - gap - size.height
+        }
+        y = max(y, topLimit + gap)
+        let cellRect = tableView.frameOfCell(atColumn: 0, row: anchor.lastRow)
+        let columnMaxX = anchor.column == .old ? cellRect.midX : cellRect.maxX
+        let trailing = convert(NSPoint(x: columnMaxX, y: cellRect.minY), from: tableView).x - 12
+        let x = min(max(trailing - size.width, viewport.minX + 8), viewport.maxX - size.width - 8)
+        let frame = NSRect(x: round(x), y: round(y), width: size.width, height: size.height)
+        if selectionActionBar.frame != frame {
+            selectionActionBar.frame = frame
+        }
+        selectionActionBar.isHidden = false
+    }
+
+    private func runSelectionAction(_ action: DiffSelectionAction, from view: NSView) {
+        guard action.isEnabled, let selected = selectedCode() else {
+            return
+        }
+        guard action.choices.count > 1 else {
+            focusFile(selected.fileID)
+            onSelectionContextAction?(action.id, action.choices.first?.id, selected.excerpt)
+            return
+        }
+        let menu = NSMenu()
+        addSelectionChoiceItems(for: action, excerpt: selected.excerpt, to: menu)
+        let y = view.isFlipped ? view.bounds.maxY + 4 : -4
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: y), in: view)
+    }
+
+    private func addSelectionActionItems(to menu: NSMenu, clickedRow: Int) {
+        guard !selectionActions.isEmpty,
+              let selected = selectedCode(clickedRow: clickedRow) else {
+            return
+        }
+        menu.addItem(.separator())
+        for action in selectionActions {
+            guard action.choices.count > 1 else {
+                let item = selectionMenuItem(
+                    title: action.title,
+                    command: DiffSelectionMenuCommand(
+                        actionID: action.id,
+                        choiceID: action.choices.first?.id,
+                        excerpt: selected.excerpt
+                    )
+                )
+                item.isEnabled = action.isEnabled
+                item.toolTip = action.help
+                menu.addItem(item)
+                continue
+            }
+            let submenu = NSMenu(title: action.title)
+            addSelectionChoiceItems(for: action, excerpt: selected.excerpt, to: submenu)
+            let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
+            item.submenu = submenu
+            item.isEnabled = action.isEnabled
+            item.toolTip = action.help
+            menu.addItem(item)
+        }
+    }
+
+    private func addSelectionChoiceItems(
+        for action: DiffSelectionAction,
+        excerpt: DiffSelectionExcerpt,
+        to menu: NSMenu
+    ) {
+        for choice in action.choices {
+            menu.addItem(selectionMenuItem(
+                title: choice.title,
+                command: DiffSelectionMenuCommand(actionID: action.id, choiceID: choice.id, excerpt: excerpt)
+            ))
+        }
+    }
+
+    private func selectionMenuItem(title: String, command: DiffSelectionMenuCommand) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(runSelectionMenuAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = command
+        return item
+    }
+
+    @objc private func runSelectionMenuAction(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? DiffSelectionMenuCommand else {
+            return
+        }
+        focusFile(command.excerpt.fileID)
+        onSelectionContextAction?(command.actionID, command.choiceID, command.excerpt)
     }
 }
 
@@ -4087,6 +4348,110 @@ private final class DiffMutationMenuCommand: NSObject {
 
     init(_ value: Value) {
         self.value = value
+    }
+}
+
+private final class DiffSelectionMenuCommand: NSObject {
+    let actionID: String
+    let choiceID: String?
+    let excerpt: DiffSelectionExcerpt
+
+    init(actionID: String, choiceID: String?, excerpt: DiffSelectionExcerpt) {
+        self.actionID = actionID
+        self.choiceID = choiceID
+        self.excerpt = excerpt
+    }
+}
+
+/// 选中代码后浮在选区旁的操作条。它叠在表格上方，出现、消失都不改变任何行的位置；
+/// 按钮的标题和宽度只随操作列表变化，不随选区或目标会话数变化。
+private final class DiffSelectionActionBar: NSView {
+    private static let padding: CGFloat = 3
+
+    var actionHandler: ((DiffSelectionAction, NSButton) -> Void)?
+    private var actions: [DiffSelectionAction] = []
+    private var buttons: [ReviewActionButton] = []
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = ReviewControlMetrics.cornerRadius + Self.padding
+        layer?.borderWidth = 1
+        layer?.shadowOpacity = 0.14
+        layer?.shadowRadius = 5
+        layer?.shadowOffset = CGSize(width: 0, height: -1)
+        setAccessibilityRole(.toolbar)
+        setAccessibilityLabel("Selection Actions")
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    var preferredSize: NSSize {
+        let widths = buttons.map(\.preferredWidth)
+        let spacing = CGFloat(max(0, widths.count - 1)) * 2
+        return NSSize(
+            width: ceil(widths.reduce(0, +) + spacing + Self.padding * 2),
+            height: ReviewControlMetrics.height + Self.padding * 2
+        )
+    }
+
+    func update(actions: [DiffSelectionAction]) {
+        self.actions = actions
+        if buttons.count != actions.count {
+            buttons.forEach { $0.removeFromSuperview() }
+            buttons = actions.indices.map { index in
+                let button = ReviewActionButton()
+                button.tag = index
+                button.target = self
+                button.action = #selector(buttonPressed(_:))
+                addSubview(button)
+                return button
+            }
+        }
+        for (button, action) in zip(buttons, actions) {
+            button.title = action.title
+            button.image = NSImage(systemSymbolName: action.systemImage, accessibilityDescription: nil)
+            button.isEnabled = action.isEnabled
+            button.toolTip = action.help
+            button.setAccessibilityLabel(action.title)
+            button.setAccessibilityHelp(action.help)
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        var x = Self.padding
+        for button in buttons {
+            let width = button.preferredWidth
+            button.frame = NSRect(x: x, y: Self.padding, width: width, height: ReviewControlMetrics.height)
+            x += width + 2
+        }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = AgentGitPalette.card.cgColor
+            layer?.borderColor = AgentGitPalette.cardBorder.cgColor
+            layer?.shadowColor = NSColor.black.cgColor
+        }
+    }
+
+    /// 点在按钮之间的空白处时不要漏给下面的代码行。
+    override func mouseDown(with event: NSEvent) {}
+
+    @objc private func buttonPressed(_ sender: NSButton) {
+        guard actions.indices.contains(sender.tag) else {
+            return
+        }
+        actionHandler?(actions[sender.tag], sender)
     }
 }
 

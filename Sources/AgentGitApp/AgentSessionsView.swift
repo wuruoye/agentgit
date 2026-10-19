@@ -71,12 +71,8 @@ struct AgentSessionsButton: View {
     }
 
     private var sortedAssociations: [AgentAssociation] {
-        let stored = model.agentAssociations.associations(for: worktree)
-        let associations = creator.map { creator in
-            [creator] + stored.filter { $0.id != creator.id }
-        } ?? stored
         // 标题优先用宿主里的最新标题。
-        return associations.map { association in
+        model.agentAssociations.sessionAssociations(for: worktree).map { association in
             AgentAssociation(
                 provider: association.provider,
                 sessionID: association.sessionID,

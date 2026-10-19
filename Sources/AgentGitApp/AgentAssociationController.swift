@@ -219,6 +219,15 @@ final class AgentAssociationController {
         worktreeCreators[path].map { $0.association(worktreePath: path) }
     }
 
+    /// 这个 worktree 的全部会话：创建者排最前，其余按可跳转程度和更新时间。
+    func sessionAssociations(for worktree: GitWorktree) -> [AgentAssociation] {
+        let stored = associations(for: worktree)
+        guard let creator = creatorAssociation(forWorktreeAt: worktree.id) else {
+            return stored
+        }
+        return [creator] + stored.filter { $0.id != creator.id }
+    }
+
     /// 项目刷新完成和启动时调用：读记录目录，仍没有记录的 worktree 按宿主会话元数据查一次，
     /// 查到的写进记录目录。
     func lookUpCreators(worktreePaths: Set<String>) {
@@ -337,11 +346,20 @@ final class AgentAssociationController {
     }
 
     func open(_ association: AgentAssociation) {
+        open(association, attaching: nil)
+    }
+
+    /// 打开会话并带上一段上下文，交付方式见 `AgentSessionContextHandoff`。
+    func open(
+        _ association: AgentAssociation,
+        attaching context: String?,
+        onDelivery: ((AgentContextDelivery) -> Void)? = nil
+    ) {
         guard let resolution = navigationResolutions[association.id] else {
-            resolveAndOpen(association)
+            resolveAndOpen(association, context: context, onDelivery: onDelivery)
             return
         }
-        open(association, resolution: resolution)
+        open(association, resolution: resolution, context: context, onDelivery: onDelivery)
     }
 
     func remove(_ association: AgentAssociation) {
@@ -466,7 +484,11 @@ final class AgentAssociationController {
         }
     }
 
-    private func resolveAndOpen(_ association: AgentAssociation) {
+    private func resolveAndOpen(
+        _ association: AgentAssociation,
+        context: String?,
+        onDelivery: ((AgentContextDelivery) -> Void)?
+    ) {
         let navigationResolver = navigationResolver
         Task {
             let resolution = await Task.detached(priority: .userInitiated) {
@@ -474,27 +496,64 @@ final class AgentAssociationController {
             }.value
             guard resolvableAssociations.contains(where: { $0.id == association.id }),
                   let resolution else {
+                onDelivery?(.failed("This agent session is no longer linked to the worktree."))
                 return
             }
             navigationResolutions[association.id] = resolution
-            open(association, resolution: resolution)
+            open(association, resolution: resolution, context: context, onDelivery: onDelivery)
         }
     }
 
     private func open(
         _ association: AgentAssociation,
-        resolution: AgentSessionNavigationResolution
+        resolution: AgentSessionNavigationResolution,
+        context: String?,
+        onDelivery: ((AgentContextDelivery) -> Void)?
     ) {
         guard let target = resolution.target else {
-            errorMessage = resolution.errorDescription
+            let message = resolution.errorDescription
                 ?? "Unable to open \(association.provider.displayName) session."
+            errorMessage = message
+            onDelivery?(.failed(message))
             return
         }
-        guard NSWorkspace.shared.open(target.url) else {
-            errorMessage = "macOS did not accept the \(association.provider.displayName) session link."
+        guard let context else {
+            _ = openSessionURL(target.url, provider: association.provider)
             return
+        }
+        let handoff = AgentSessionContextHandoff(
+            provider: association.provider,
+            sessionURL: target.url,
+            context: context
+        )
+        guard handoff.copiesContextToPasteboard else {
+            if let failure = openSessionURL(handoff.url, provider: association.provider) {
+                onDelivery?(.failed(failure))
+            } else {
+                onDelivery?(.prefilled)
+            }
+            return
+        }
+        copyToPasteboard(context)
+        onDelivery?(.copiedToPasteboard)
+        // 宿主一打开就会挡住 AgentGit，留一点时间让“已复制”的提示被看到。
+        Task {
+            try? await Task.sleep(for: .milliseconds(700))
+            if let failure = openSessionURL(handoff.url, provider: association.provider) {
+                onDelivery?(.failed(failure))
+            }
+        }
+    }
+
+    /// 失败时返回错误说明。
+    private func openSessionURL(_ url: URL, provider: AgentProvider) -> String? {
+        guard NSWorkspace.shared.open(url) else {
+            let message = "macOS did not accept the \(provider.displayName) session link."
+            errorMessage = message
+            return message
         }
         errorMessage = nil
+        return nil
     }
 }
 

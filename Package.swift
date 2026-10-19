@@ -22,7 +22,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentGitTests",
-            dependencies: ["AgentGitCore", "AgentGitApp"]
+            dependencies: ["AgentGitCore", "AgentGitIntegrationShared", "AgentGitApp"]
         )
     ],
     swiftLanguageModes: [.v6]
