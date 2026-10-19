@@ -206,17 +206,30 @@ final class ReviewWhitespacePresentationCache {
         let context: GitDiffContext
         let renderID: UInt64
         let recomputesSectionHeadings: Bool
+        /// 从整文件 diff 重算时记下它的 renderID；整文件 diff 到了要换掉只用 hunk 内容算出的结果。
+        let sourceRenderID: UInt64?
     }
 
     struct Request: Sendable {
         let diff: GitFileDiff
         let context: GitDiffContext
+        /// 同一文件的整文件 diff；内容对不上时不用。
+        var wholeFileSource: GitFileDiff?
+
+        init(diff: GitFileDiff, context: GitDiffContext, wholeFileSource: GitFileDiff? = nil) {
+            self.diff = diff
+            self.context = context
+            self.wholeFileSource = wholeFileSource.flatMap {
+                GitDiffWhitespaceFilter.isWholeFileSource($0, of: diff) ? $0 : nil
+            }
+        }
 
         var stamp: Stamp {
             Stamp(
                 changeID: diff.change.id, scope: diff.scope, context: context,
                 renderID: diff.renderID,
-                recomputesSectionHeadings: diff.sourceIdentity?.usesDefaultFunctionNames ?? false
+                recomputesSectionHeadings: diff.sourceIdentity?.usesDefaultFunctionNames ?? false,
+                sourceRenderID: wholeFileSource?.renderID
             )
         }
     }
@@ -224,9 +237,15 @@ final class ReviewWhitespacePresentationCache {
     @ObservationIgnored private var entries: [Stamp: GitFileDiff] = [:]
     private(set) var generation: UInt64 = 0
 
-    func presented(_ diff: GitFileDiff, context: GitDiffContext) -> GitFileDiff {
+    func presented(_ diff: GitFileDiff, context: GitDiffContext, wholeFileSource: GitFileDiff? = nil) -> GitFileDiff {
         _ = generation
-        if let entry = entries[Request(diff: diff, context: context).stamp] {
+        let request = Request(diff: diff, context: context, wholeFileSource: wholeFileSource)
+        if let entry = entries[request.stamp] {
+            return entry.change == diff.change ? entry : entry.withChange(diff.change)
+        }
+        // 整文件 diff 刚到、还没重算时先用只看 hunk 内容的结果。
+        if request.wholeFileSource != nil,
+           let entry = entries[Request(diff: diff, context: context).stamp] {
             return entry.change == diff.change ? entry : entry.withChange(diff.change)
         }
         return diff
@@ -243,7 +262,8 @@ final class ReviewWhitespacePresentationCache {
                 guard prepared[stamp] == nil else { continue }
                 prepared[stamp] = GitDiffWhitespaceFilter.ignoringWhitespace(
                     request.diff, context: request.context,
-                    recomputesSectionHeadings: stamp.recomputesSectionHeadings
+                    recomputesSectionHeadings: stamp.recomputesSectionHeadings,
+                    wholeFileSource: request.wholeFileSource
                 )
             }
             return prepared

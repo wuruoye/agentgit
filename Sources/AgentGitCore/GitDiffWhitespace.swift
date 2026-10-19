@@ -2,20 +2,57 @@ import Foundation
 
 /// 从已有的完整 diff 推出忽略空白后的 diff，切换“忽略空白”时不用再跑一次 git。
 public enum GitDiffWhitespaceFilter {
-    /// 按 `git diff --ignore-all-space` 的比较规则，把只差空白的删除/新增行并成上下文，再按上下文行数重切 hunk。
+    /// 每个 hunk 按 `git diff --ignore-all-space` 的比较规则和 git 的对齐算法重排，只差空白的行成为上下文，再按上下文行数重切 hunk。
     /// `recomputesSectionHeadings` 为 true 时按 git 默认函数名规则重算拆出来的 hunk 标题。
+    ///
+    /// 只有 hunk 内的内容时，结果可能和 git -w 不同：git 按整份文件统计行的出现次数（只含空白的行和空行算同一种），
+    /// 滑动改动后也可能用到 hunk 外的上下文，所以没有只差空白改动的文件也可能变。
+    /// `wholeFileSource` 是同一份内容的整文件 diff，有它就从它重算，结果与 git -w 一致；
+    /// 改动行沿用 `diff` 里同一行的 id（部分暂存按这些 id 生成补丁）。`recomputesSectionHeadings` 为 false 时，
+    /// 整文件按默认规则算出的标题与 `diff` 一致才重算，否则沿用 `diff` 里对应 hunk 的标题。
     public static func ignoringWhitespace(
         _ diff: GitFileDiff,
         context: GitDiffContext,
-        recomputesSectionHeadings: Bool = false
+        recomputesSectionHeadings: Bool = false,
+        wholeFileSource: GitFileDiff? = nil
     ) -> GitFileDiff {
-        GitDiffReshaper.reshape(
+        if let source = wholeFileSource, isWholeFileSource(source, of: diff) {
+            // 不确定是否按默认规则找标题时，先按默认规则从整文件裁一次：与 git 给 `diff` 的标题全部相同就照默认规则重算。
+            let recomputes = recomputesSectionHeadings || GitDiffReshaper.reshape(
+                source,
+                context: context,
+                mergesWhitespace: false,
+                renumbersLines: true,
+                recomputesSectionHeadings: true
+            ).hunks.map(\.header) == diff.hunks.map(\.header)
+            let realigned = GitDiffReshaper.reshape(
+                source,
+                context: context,
+                mergesWhitespace: true,
+                renumbersLines: false,
+                recomputesSectionHeadings: recomputes
+            )
+            return GitDiffReshaper.adoptingLines(of: diff, in: realigned, adoptsSectionHeadings: !recomputes)
+        }
+        return GitDiffReshaper.reshape(
             diff,
             context: context,
             mergesWhitespace: true,
             renumbersLines: false,
             recomputesSectionHeadings: recomputesSectionHeadings
         )
+    }
+
+    /// `source` 是 `diff` 同一份内容的整文件 diff：同一文件、单个从首行开始的 hunk、增删行数相同。
+    public static func isWholeFileSource(_ source: GitFileDiff, of diff: GitFileDiff) -> Bool {
+        guard source.state == .textual, diff.state == .textual,
+              source.change.id == diff.change.id, source.scope == diff.scope,
+              source.addedLineCount == diff.addedLineCount,
+              source.deletedLineCount == diff.deletedLineCount,
+              source.hunks.count == 1, let hunk = source.hunks.first else {
+            return false
+        }
+        return hunk.oldStart <= 1 && hunk.newStart <= 1
     }
 }
 
@@ -36,10 +73,8 @@ public enum GitDiffContextTrimmer {
     }
 }
 
-/// 两个公共入口共用的流程：分组 →（可选）合并只差空白的行 → 按上下文行数重切 → 生成 hunk。
+/// 两个公共入口共用的流程：分组 →（可选）忽略空白重新对齐 → 按上下文行数重切 → 生成 hunk。
 private enum GitDiffReshaper {
-    /// 中段删除数×新增数超过这个值就不做 LCS，整段按改动保留，避免大块改写退化成平方级。
-    private static let maximumAlignedCells = 1_000_000
     /// git `struct func_line` 的缓冲区大小，标题最多取这么多字节。
     private static let maximumSectionHeadingBytes = 80
 
@@ -82,7 +117,8 @@ private enum GitDiffReshaper {
         for hunk in diff.hunks {
             var entries = makeEntries(hunk.lines)
             if mergesWhitespace,
-               mergeWhitespaceOnlyChanges(in: &entries, keys: &keys, nextLineID: &nextMergedLineID) {
+               let realigned = realignIgnoringWhitespace(entries, keys: &keys, nextLineID: &nextMergedLineID) {
+                entries = realigned
                 changed = true
             }
             let ranges = keptRanges(in: entries, contextLimit: contextLimit)
@@ -149,187 +185,118 @@ private enum GitDiffReshaper {
         return entries
     }
 
-    // MARK: - 块内对齐
+    // MARK: - 忽略空白重新对齐
 
-    /// 逐个改动块合并只差空白的行；返回是否有行被并成上下文。
-    private static func mergeWhitespaceOnlyChanges(
-        in entries: inout [Entry],
-        keys: inout WhitespaceInsensitiveKeys,
-        nextLineID: inout Int
-    ) -> Bool {
-        var result: [Entry] = []
-        var merged = false
-        var index = 0
-        while index < entries.count {
-            guard entries[index].isChange else {
-                if merged { result.append(entries[index]) }
-                index += 1
-                continue
-            }
-            let start = index
-            while index < entries.count, entries[index].isChange {
-                index += 1
-            }
-            let block = entries[start..<index]
-            if let realigned = realign(block, keys: &keys, nextLineID: &nextLineID) {
-                if !merged {
-                    result.reserveCapacity(entries.count)
-                    result.append(contentsOf: entries[0..<start])
-                    merged = true
-                }
-                result.append(contentsOf: realigned)
-            } else if merged {
-                result.append(contentsOf: block)
-            }
-        }
-        if merged {
-            entries = result
-        }
-        return merged
-    }
-
-    /// 块内删除、新增各自按原顺序对齐；没有可合并的行时返回 nil，调用方原样保留整块。
-    private static func realign(
-        _ block: ArraySlice<Entry>,
+    /// 整个 hunk 按去空白的键重跑 git 的对齐。原 diff 里凑巧相同的行会把一次缩进改动切成几块，
+    /// 只在块内合并会漏掉跨块的对应行，所以两侧的上下文行也一起参与。结果与原 hunk 相同时返回 nil。
+    private static func realignIgnoringWhitespace(
+        _ entries: [Entry],
         keys: inout WhitespaceInsensitiveKeys,
         nextLineID: inout Int
     ) -> [Entry]? {
-        var deletions: [Entry] = []
-        var additions: [Entry] = []
-        for entry in block {
+        var oldSide: [Int] = []
+        var newSide: [Int] = []
+        for (index, entry) in entries.enumerated() {
             switch entry.line.kind {
-            case .deletion: deletions.append(entry)
-            case .addition: additions.append(entry)
-            case .context, .metadata: return nil
+            case .context:
+                oldSide.append(index)
+                newSide.append(index)
+            case .deletion: oldSide.append(index)
+            case .addition: newSide.append(index)
+            case .metadata: return nil
             }
         }
-        guard !deletions.isEmpty, !additions.isEmpty else {
+        guard entries.contains(where: \.isChange) else {
             return nil
         }
 
-        // 带 metadata 后缀的行（文件末尾无换行）不参与合并，键为 -1 表示永不相等。
-        let deletionKeys = deletions.map { $0.trailing.isEmpty ? keys.key(for: $0.line.content) : -1 }
-        let additionKeys = additions.map { $0.trailing.isEmpty ? keys.key(for: $0.line.content) : -1 }
-        let pairs = matchedPairs(deletionKeys, additionKeys)
-        guard !pairs.isEmpty else {
+        // 缺行尾换行在 git -w 下也算空白，带 metadata 的行照常参与比较。
+        func xdiffLines(_ side: [Int]) -> [GitXdiff.Line] {
+            side.map { index in
+                let content = entries[index].line.content
+                return GitXdiff.Line(key: keys.key(for: content), indent: GitXdiff.indent(of: content))
+            }
+        }
+        guard let changed = GitXdiff.changedLines(old: xdiffLines(oldSide), new: xdiffLines(newSide)) else {
             return nil
         }
 
         var result: [Entry] = []
-        result.reserveCapacity(block.count)
-        var deletionCursor = 0
-        var additionCursor = 0
-        for (deletionIndex, additionIndex) in pairs {
-            result.append(contentsOf: deletions[deletionCursor..<deletionIndex])
-            result.append(contentsOf: additions[additionCursor..<additionIndex])
-            let deletion = deletions[deletionIndex].line
-            let addition = additions[additionIndex].line
-            // git -w 的上下文行取新侧内容；id 另起，避免和原 diff 里的改动行撞号。
-            result.append(
-                Entry(
-                    line: GitDiffLine(
-                        id: nextLineID,
-                        kind: .context,
-                        oldLineNumber: deletion.oldLineNumber,
-                        newLineNumber: addition.newLineNumber,
-                        content: addition.content
-                    ),
-                    oldContent: deletion.content
+        result.reserveCapacity(entries.count)
+        var createdLines = false
+
+        // 新建的行连同它的 metadata 另起 id，避免和原 diff 里的行撞号。
+        func makeEntry(
+            from source: Entry,
+            kind: GitDiffLineKind,
+            oldLineNumber: Int?,
+            newLineNumber: Int?,
+            oldContent: String? = nil
+        ) -> Entry {
+            func fresh(_ line: GitDiffLine, kind: GitDiffLineKind, old: Int?, new: Int?) -> GitDiffLine {
+                defer { nextLineID += 1 }
+                return GitDiffLine(
+                    id: nextLineID, kind: kind, oldLineNumber: old, newLineNumber: new, content: line.content
                 )
-            )
-            nextLineID += 1
-            deletionCursor = deletionIndex + 1
-            additionCursor = additionIndex + 1
-        }
-        result.append(contentsOf: deletions[deletionCursor...])
-        result.append(contentsOf: additions[additionCursor...])
-        return result
-    }
-
-    /// 先剥公共前缀、后缀，中段规模可控时做 LCS。结果按两侧下标递增。
-    private static func matchedPairs(_ old: [Int], _ new: [Int]) -> [(Int, Int)] {
-        func same(_ lhs: Int, _ rhs: Int) -> Bool {
-            lhs >= 0 && lhs == rhs
-        }
-
-        var pairs: [(Int, Int)] = []
-        var prefix = 0
-        while prefix < old.count, prefix < new.count, same(old[prefix], new[prefix]) {
-            pairs.append((prefix, prefix))
-            prefix += 1
-        }
-        var suffix = 0
-        while suffix < old.count - prefix,
-              suffix < new.count - prefix,
-              same(old[old.count - 1 - suffix], new[new.count - 1 - suffix]) {
-            suffix += 1
-        }
-
-        let rows = old.count - prefix - suffix
-        let columns = new.count - prefix - suffix
-        if rows > 0, columns > 0, rows * columns <= maximumAlignedCells {
-            let middle = longestCommonSubsequence(
-                old[prefix..<(prefix + rows)],
-                new[prefix..<(prefix + columns)]
-            )
-            for (row, column) in middle {
-                pairs.append((prefix + row, prefix + column))
             }
+            createdLines = true
+            return Entry(
+                line: fresh(source.line, kind: kind, old: oldLineNumber, new: newLineNumber),
+                trailing: source.trailing.map { fresh($0, kind: .metadata, old: nil, new: nil) },
+                oldContent: oldContent
+            )
         }
 
-        for offset in 0..<suffix {
-            pairs.append((old.count - suffix + offset, new.count - suffix + offset))
-        }
-        return pairs
-    }
-
-    /// 返回的下标相对切片起点。能匹配就尽早匹配，相当于把剩下的改动往后推，与 git 滑动改动组的方向一致。
-    private static func longestCommonSubsequence(
-        _ old: ArraySlice<Int>,
-        _ new: ArraySlice<Int>
-    ) -> [(Int, Int)] {
-        let oldKeys = Array(old)
-        let newKeys = Array(new)
-        let newKeySet = Set(newKeys.lazy.filter { $0 >= 0 })
-        guard oldKeys.contains(where: { $0 >= 0 && newKeySet.contains($0) }) else {
-            return []
-        }
-
-        let rows = oldKeys.count
-        let columns = newKeys.count
-        let width = columns + 1
-        var lengths = [Int32](repeating: 0, count: (rows + 1) * width)
-        lengths.withUnsafeMutableBufferPointer { table in
-            for row in stride(from: rows - 1, through: 0, by: -1) {
-                let key = oldKeys[row]
-                let current = row * width
-                let below = current + width
-                for column in stride(from: columns - 1, through: 0, by: -1) {
-                    if key >= 0, key == newKeys[column] {
-                        table[current + column] = table[below + column + 1] + 1
-                    } else {
-                        table[current + column] = max(table[below + column], table[current + column + 1])
-                    }
+        var oldCursor = 0
+        var newCursor = 0
+        while oldCursor < oldSide.count || newCursor < newSide.count {
+            if oldCursor < oldSide.count, newCursor < newSide.count,
+               !changed.old[oldCursor], !changed.new[newCursor] {
+                let oldIndex = oldSide[oldCursor]
+                let newIndex = newSide[newCursor]
+                if oldIndex == newIndex {
+                    result.append(entries[newIndex])
+                } else {
+                    // git -w 的上下文行取新侧内容和新侧的行尾标记。
+                    let deletion = entries[oldIndex].line
+                    result.append(makeEntry(
+                        from: entries[newIndex], kind: .context,
+                        oldLineNumber: deletion.oldLineNumber,
+                        newLineNumber: entries[newIndex].line.newLineNumber,
+                        oldContent: deletion.content
+                    ))
                 }
+                oldCursor += 1
+                newCursor += 1
+                continue
             }
-        }
 
-        var pairs: [(Int, Int)] = []
-        var row = 0
-        var column = 0
-        while row < rows, column < columns {
-            let key = oldKeys[row]
-            if key >= 0, key == newKeys[column] {
-                pairs.append((row, column))
-                row += 1
-                column += 1
-            } else if lengths[(row + 1) * width + column] >= lengths[row * width + column + 1] {
-                row += 1
-            } else {
-                column += 1
+            // 与 git 输出一致：每组改动先列删除再列新增。
+            let deletionStart = oldCursor
+            while oldCursor < oldSide.count, changed.old[oldCursor] {
+                oldCursor += 1
+            }
+            let additionStart = newCursor
+            while newCursor < newSide.count, changed.new[newCursor] {
+                newCursor += 1
+            }
+            guard oldCursor > deletionStart || newCursor > additionStart else {
+                return nil
+            }
+            for index in oldSide[deletionStart..<oldCursor] {
+                let entry = entries[index]
+                result.append(entry.line.kind == .deletion ? entry : makeEntry(
+                    from: entry, kind: .deletion, oldLineNumber: entry.line.oldLineNumber, newLineNumber: nil
+                ))
+            }
+            for index in newSide[additionStart..<newCursor] {
+                let entry = entries[index]
+                result.append(entry.line.kind == .addition ? entry : makeEntry(
+                    from: entry, kind: .addition, oldLineNumber: nil, newLineNumber: entry.line.newLineNumber
+                ))
             }
         }
-        return pairs
+        return createdLines ? result : nil
     }
 
     // MARK: - 重切 hunk
@@ -531,9 +498,97 @@ private enum GitDiffReshaper {
         while let last = bytes.last, isGitSpace(last) {
             bytes.removeLast()
         }
+        // 截断落在多字节字符中间时，git 输出的标题不带这半个字符；先去空白再丢，前面的空格保留。
+        if let leadIndex = bytes.lastIndex(where: { $0 & 0xC0 != 0x80 }) {
+            let lead = bytes[leadIndex]
+            let length = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1
+            if bytes.count - leadIndex < length {
+                bytes.removeSubrange(leadIndex...)
+            }
+        }
         let text = String(decoding: bytes, as: UTF8.self)
         let parsed = text.trimmingCharacters(in: .whitespaces)
         return SectionHeading(text: text, parsed: parsed.isEmpty ? nil : parsed)
+    }
+}
+
+// MARK: - 整文件来源
+
+extension GitDiffReshaper {
+    /// 从整文件 diff 重算出的结果换回界面已有 diff 的行 id：同一删除行、新增行、上下文行沿用原 id，
+    /// 其余行从原最大 id + 1 起编号。不重算标题时，每个 hunk 取 `displayed` 里起点不晚于它的最后一个 hunk 的标题。
+    static func adoptingLines(
+        of displayed: GitFileDiff,
+        in realigned: GitFileDiff,
+        adoptsSectionHeadings: Bool
+    ) -> GitFileDiff {
+        struct ContextLine: Hashable {
+            let old: Int
+            let new: Int
+        }
+        var deletionIDs: [Int: Int] = [:]
+        var additionIDs: [Int: Int] = [:]
+        var contextIDs: [ContextLine: Int] = [:]
+        var nextID = 0
+        for line in displayed.hunks.lazy.flatMap(\.lines) {
+            nextID = max(nextID, line.id + 1)
+            switch (line.kind, line.oldLineNumber, line.newLineNumber) {
+            case let (.deletion, old?, _): deletionIDs[old] = line.id
+            case let (.addition, _, new?): additionIDs[new] = line.id
+            case let (.context, old?, new?): contextIDs[ContextLine(old: old, new: new)] = line.id
+            default: break
+            }
+        }
+
+        let hunks = realigned.hunks.enumerated().map { index, hunk in
+            let lines = hunk.lines.map { line in
+                let adoptedID: Int? = switch (line.kind, line.oldLineNumber, line.newLineNumber) {
+                case let (.deletion, old?, _): deletionIDs[old]
+                case let (.addition, _, new?): additionIDs[new]
+                case let (.context, old?, new?): contextIDs[ContextLine(old: old, new: new)]
+                default: nil
+                }
+                let id: Int
+                if let adoptedID {
+                    id = adoptedID
+                } else {
+                    id = nextID
+                    nextID += 1
+                }
+                return GitDiffLine(
+                    id: id,
+                    kind: line.kind,
+                    oldLineNumber: line.oldLineNumber,
+                    newLineNumber: line.newLineNumber,
+                    content: line.content,
+                    inlineRanges: line.inlineRanges
+                )
+            }
+            var header = hunk.header
+            var sectionHeading = hunk.sectionHeading
+            if adoptsSectionHeadings {
+                let source = displayed.hunks.last { $0.oldStart <= hunk.oldStart }
+                header = hunkHeader(
+                    oldStart: hunk.oldStart,
+                    oldCount: hunk.oldCount,
+                    newStart: hunk.newStart,
+                    newCount: hunk.newCount,
+                    sectionHeading: source.flatMap { sourceSectionHeadingText($0.header) }
+                )
+                sectionHeading = source?.sectionHeading
+            }
+            return GitDiffHunk(
+                id: index,
+                header: header,
+                sectionHeading: sectionHeading,
+                oldStart: hunk.oldStart,
+                oldCount: hunk.oldCount,
+                newStart: hunk.newStart,
+                newCount: hunk.newCount,
+                lines: lines
+            )
+        }
+        return GitFileDiff(change: displayed.change, scope: displayed.scope, hunks: hunks, state: realigned.state)
     }
 }
 
@@ -542,7 +597,7 @@ private func isGitSpace(_ byte: UInt8) -> Bool {
     byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
 }
 
-/// 去掉空白后的行内容映射成整数，块内 LCS 只比整数。
+/// 去掉空白后的行内容映射成整数，对齐时只比整数。
 private struct WhitespaceInsensitiveKeys {
     private var keysByContent: [[UInt8]: Int] = [:]
 

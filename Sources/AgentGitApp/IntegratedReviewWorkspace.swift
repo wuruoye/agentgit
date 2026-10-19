@@ -41,6 +41,8 @@ struct IntegratedReviewWorkspace: View {
     @State private var whitespacePresentation = ReviewWhitespacePresentationCache()
     @State private var imageDiffsByFileID: [IntegratedFileID: GitImageDiff] = [:]
     @State private var wholeFileDiffsByFileID: [IntegratedFileID: GitFileDiff] = [:]
+    /// 忽略空白时取整文件 diff 失败的文件，记下当时的 renderID；内容变了再试。
+    @State private var unavailableWhitespaceSourceRenderIDs: [IntegratedFileID: UInt64] = [:]
     @State private var loadingWholeFileIDs: Set<String> = []
     @State private var expandedContextDiffsByFileID: [IntegratedFileID: GitFileDiff] = [:]
     @State private var expandedContextLineCountByFileID: [IntegratedFileID: Int] = [:]
@@ -391,6 +393,9 @@ struct IntegratedReviewWorkspace: View {
         .task(id: whitespacePreparationKey) {
             guard model.diffOptions.ignoresWhitespace else { return }
             try? await whitespacePresentation.prepare(whitespacePresentationRequests)
+        }
+        .task(id: whitespaceSourceLoadKey) {
+            await loadWhitespaceSources(for: whitespaceSourceLoadKey)
         }
         .task(id: workingFileAvailabilityKey) {
             await loadWorkingFileAvailability(for: workingFileAvailabilityKey)
@@ -2752,18 +2757,26 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func displayedDiff(for item: IntegratedFileItem) -> GitFileDiff? {
-        presentedDiff(diffsByFileID[item.id], context: compactDiffOptions.context)
+        presentedDiff(
+            diffsByFileID[item.id], context: compactDiffOptions.context,
+            wholeFileSource: wholeFileDiffsByFileID[item.id]
+        )
     }
 
-    /// 忽略空白只影响显示：从已有的完整 diff 重切 hunk，不再为它单独跑 Git。
-    private func presentedDiff(_ diff: GitFileDiff?, context: GitDiffContext) -> GitFileDiff? {
+    /// 忽略空白只影响显示：从已有的完整 diff 重切 hunk。只看 hunk 内的内容可能和 git -w 不同，
+    /// 有改动的文件另取整文件 diff 重算，没取到之前先用 hunk 内的内容算。
+    private func presentedDiff(
+        _ diff: GitFileDiff?, context: GitDiffContext, wholeFileSource: GitFileDiff? = nil
+    ) -> GitFileDiff? {
         guard let diff, model.diffOptions.ignoresWhitespace else { return diff }
-        return whitespacePresentation.presented(diff, context: context)
+        return whitespacePresentation.presented(diff, context: context, wholeFileSource: wholeFileSource)
     }
 
     private var whitespacePresentationRequests: [ReviewWhitespacePresentationCache.Request] {
-        var requests = diffsByFileID.values.map {
-            ReviewWhitespacePresentationCache.Request(diff: $0, context: compactDiffOptions.context)
+        var requests = diffsByFileID.map { id, diff in
+            ReviewWhitespacePresentationCache.Request(
+                diff: diff, context: compactDiffOptions.context, wholeFileSource: wholeFileDiffsByFileID[id]
+            )
         }
         requests += wholeFileDiffsByFileID.values.map {
             ReviewWhitespacePresentationCache.Request(diff: $0, context: .wholeFile)
@@ -2779,6 +2792,44 @@ struct IntegratedReviewWorkspace: View {
 
     private var whitespacePreparationKey: Set<ReviewWhitespacePresentationCache.Stamp> {
         model.diffOptions.ignoresWhitespace ? Set(whitespacePresentationRequests.map(\.stamp)) : []
+    }
+
+    /// 忽略空白时要另取整文件 diff 的文件：两侧都有内容、还能取整文件内容、上次没取失败。
+    /// 新增或删除整个文件时忽略空白不会变，不用取。不排除已取到的文件，取到一个不会让正在进行的加载重启。
+    private var whitespaceSourceLoadKey: WhitespaceSourceLoadKey? {
+        guard model.diffOptions.ignoresWhitespace else { return nil }
+        let fileIDs = currentFileItems.compactMap { item -> IntegratedFileID? in
+            guard let diff = diffsByFileID[item.id],
+                  unavailableWhitespaceSourceRenderIDs[item.id] != diff.renderID,
+                  diff.hunks.contains(where: { $0.oldCount > 0 && $0.newCount > 0 }),
+                  canLoadWholeFileContext(item) else { return nil }
+            return item.id
+        }
+        return fileIDs.isEmpty ? nil : WhitespaceSourceLoadKey(diff: diffLoadKey, fileIDs: fileIDs)
+    }
+
+    private func loadWhitespaceSources(for key: WhitespaceSourceLoadKey?) async {
+        guard let key else { return }
+        let requestedContext = activeContext
+        let fileIDs = Set(key.fileIDs)
+        for item in currentFileItems where fileIDs.contains(item.id) {
+            guard wholeFileDiffsByFileID[item.id] == nil, let compactDiff = diffsByFileID[item.id] else { continue }
+            do {
+                let diff = try await loadWholeFileDiff(for: item, context: requestedContext)
+                try Task.checkCancellation()
+                guard acceptsDiffLoad(key.diff) else { return }
+                guard GitDiffWhitespaceFilter.isWholeFileSource(diff, of: compactDiff) else {
+                    throw IntegratedReviewLoadError.contextUnavailable
+                }
+                wholeFileDiffsByFileID[item.id] = diff
+            } catch is CancellationError {
+                return
+            } catch {
+                // 取不到时继续用 hunk 内的内容算，不打扰用户。
+                guard acceptsDiffLoad(key.diff) else { return }
+                unavailableWhitespaceSourceRenderIDs[item.id] = compactDiff.renderID
+            }
+        }
     }
 
     private func contextSourceDiff(for item: IntegratedFileItem) -> GitFileDiff? {
@@ -3147,6 +3198,7 @@ struct IntegratedReviewWorkspace: View {
         whitespacePresentation.removeAll()
         imageDiffsByFileID = [:]
         wholeFileDiffsByFileID = [:]
+        unavailableWhitespaceSourceRenderIDs = [:]
         loadingWholeFileIDs = []
         expandedContextDiffsByFileID = [:]
         expandedContextLineCountByFileID = [:]
@@ -4556,7 +4608,8 @@ struct IntegratedReviewWorkspace: View {
             if let baseContextLineCount {
                 for item in items where !showsWholeFile(item) {
                     guard let compactDiff = presentedDiff(
-                        loaded[item.id], context: compactDiffOptions.context
+                        loaded[item.id], context: compactDiffOptions.context,
+                        wholeFileSource: wholeFileDiffsByFileID[item.id]
                     ) else {
                         continue
                     }
@@ -6159,6 +6212,11 @@ func shouldFinalizeDiffCache(
     missingItemCount: Int
 ) -> Bool {
     entry?.isComplete == false && missingItemCount == 0
+}
+
+struct WhitespaceSourceLoadKey: Hashable {
+    let diff: IntegratedDiffLoadKey
+    let fileIDs: [IntegratedFileID]
 }
 
 struct IntegratedDiffLoadKey: Hashable {
