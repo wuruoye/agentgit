@@ -38,17 +38,17 @@ func openInVisualStudioCode(_ url: URL, applicationURL: URL) {
     )
 }
 
-/// 用自定义应用打开 worktree 里的文件夹。目录或应用找不到时弹窗说明原因。
+/// 用自定义应用打开 worktree 里的文件或文件夹。目标或应用找不到时弹窗说明原因。
 @MainActor
-func openWorktreeFolder(_ entry: WorktreeOpenWithEntry, worktreeRootURL: URL) {
-    let directoryURL: URL
+func openWorktreePath(_ entry: WorktreeOpenWithEntry, worktreeRootURL: URL) {
+    let targetURL: URL
     do {
-        directoryURL = try WorktreeOpenWithPath.resolveDirectory(
+        targetURL = try WorktreeOpenWithPath.resolve(
             entry.relativePath,
             in: worktreeRootURL
         )
     } catch {
-        presentOpenWithFailure(title: "Couldn’t Open Folder", message: error.localizedDescription)
+        presentOpenWithFailure(title: "Couldn’t Open File or Folder", message: error.localizedDescription)
         return
     }
     guard let applicationURL = entry.applicationURL() else {
@@ -61,7 +61,7 @@ func openWorktreeFolder(_ entry: WorktreeOpenWithEntry, worktreeRootURL: URL) {
         return
     }
     NSWorkspace.shared.open(
-        [directoryURL],
+        [targetURL],
         withApplicationAt: applicationURL,
         configuration: NSWorkspace.OpenConfiguration()
     ) { _, error in

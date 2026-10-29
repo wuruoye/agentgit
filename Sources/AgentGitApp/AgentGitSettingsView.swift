@@ -181,7 +181,7 @@ struct AgentGitSettingsView: View {
     private static let contextChoices: [GitDiffContext] = [
         .lines(3), .lines(8), .lines(25), .wholeFile
     ]
-    private static let openWithChooseTitles = ["Choose App…", "Choose Folder…"]
+    private static let openWithChooseTitles = ["Choose App…", "Choose Path…"]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -490,7 +490,7 @@ struct AgentGitSettingsView: View {
                         addOpenWithApplication(to: project)
                     }
 
-                    Text(verbatim: "Folder is relative to the root of the worktree you right-click, for example MMFlutter/CrossPlatform. Leave it empty to open the worktree root. Absolute paths, “..”, and symbolic links that lead outside the worktree are rejected. Changes are saved automatically.")
+                    Text(verbatim: "Path is a file or folder relative to the root of the worktree you right-click, for example MMFlutter/CrossPlatform or App.xcworkspace. Leave it empty to open the worktree root. Absolute paths, “..”, and symbolic links that lead outside the worktree are rejected. Changes are saved automatically.")
                         .font(.agentGitInterface(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -509,10 +509,10 @@ struct AgentGitSettingsView: View {
     ) -> some View {
         let applicationURL = entry.applicationURL()
         let title = entry.menuTitle(applicationURL: applicationURL)
-        let folderStatus: (text: String, isError: Bool) = {
+        let pathStatus: (text: String, isError: Bool) = {
             do {
-                let folder = try WorktreeOpenWithPath.normalize(entry.relativePath)
-                return (folder.isEmpty ? "Opens the worktree root." : "Opens <worktree>/\(folder)", false)
+                let path = try WorktreeOpenWithPath.normalize(entry.relativePath)
+                return (path.isEmpty ? "Opens the worktree root." : "Opens <worktree>/\(path)", false)
             } catch {
                 return (error.localizedDescription, true)
             }
@@ -587,29 +587,30 @@ struct AgentGitSettingsView: View {
                     }
                 }
                 GridRow {
-                    settingsFieldLabel("Folder")
+                    settingsFieldLabel("Path")
                     HStack {
                         TextField(
-                            "Folder",
+                            "File or Folder",
                             text: openWithBinding(entry, project: project, \.relativePath),
                             prompt: Text("Worktree root")
                         )
                         .labelsHidden()
                         Button {
-                            chooseOpenWithFolder(for: entry, project: project)
+                            chooseOpenWithPath(for: entry, project: project)
                         } label: {
-                            StableButtonTitle(title: "Choose Folder…", alternatives: Self.openWithChooseTitles)
+                            StableButtonTitle(title: "Choose Path…", alternatives: Self.openWithChooseTitles)
                         }
+                        .help("Choose a file or folder inside a worktree")
                     }
                 }
                 GridRow {
                     Color.clear.frame(width: 82, height: 1)
-                    Text(folderStatus.text)
+                    Text(pathStatus.text)
                         .font(.agentGitInterface(size: 10.5))
-                        .foregroundStyle(folderStatus.isError ? Color.red : Color.secondary)
+                        .foregroundStyle(pathStatus.isError ? Color.red : Color.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help(folderStatus.text)
+                        .help(pathStatus.text)
                 }
             }
             .font(.agentGitInterface(size: 12))
@@ -673,8 +674,8 @@ struct AgentGitSettingsView: View {
         return panel.url
     }
 
-    /// 在仓库的任一 worktree 里选文件夹，换算成相对该 worktree 根目录的路径。
-    private func chooseOpenWithFolder(for entry: WorktreeOpenWithEntry, project: ProjectState) {
+    /// 在仓库的任一 worktree 里选文件或文件夹，换算成相对该 worktree 根目录的路径。
+    private func chooseOpenWithPath(for entry: WorktreeOpenWithEntry, project: ProjectState) {
         let worktreeRootURLs = (project.snapshot?.worktrees.map(\.worktree.rootURL) ?? [])
             + [project.project.rootURL]
         let selectedRootURL = model.projectID(for: model.selectedWorktreeID) == project.id
@@ -682,17 +683,28 @@ struct AgentGitSettingsView: View {
             : nil
         let rootURL = selectedRootURL ?? project.project.rootURL
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = (try? WorktreeOpenWithPath.resolveDirectory(entry.relativePath, in: rootURL))
-            ?? rootURL
-        panel.prompt = "Choose Folder"
+        panel.treatsFilePackagesAsDirectories = false
+        if let targetURL = try? WorktreeOpenWithPath.resolve(entry.relativePath, in: rootURL) {
+            let isPackage = (try? targetURL.resourceValues(forKeys: [.isPackageKey]).isPackage) == true
+            panel.directoryURL = targetURL.hasDirectoryPath && !isPackage
+                ? targetURL
+                : targetURL.deletingLastPathComponent()
+            if !targetURL.hasDirectoryPath || isPackage {
+                panel.nameFieldStringValue = targetURL.lastPathComponent
+            }
+        } else {
+            panel.directoryURL = rootURL
+        }
+        panel.prompt = "Choose"
+        panel.message = "Choose a file or folder to open with this application."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard let relativePath = WorktreeOpenWithPath.relativePath(of: url, inAnyOf: worktreeRootURLs) else {
             presentOpenWithFailure(
-                title: "Folder Is Outside the Repository",
-                message: "Choose a folder inside one of the worktrees of \(project.project.displayName)."
+                title: "Path Is Outside the Repository",
+                message: "Choose a file or folder inside one of the worktrees of \(project.project.displayName)."
             )
             return
         }

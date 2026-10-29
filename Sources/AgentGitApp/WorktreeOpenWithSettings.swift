@@ -13,7 +13,7 @@ struct WorktreeOpenWithEntry: Codable, Equatable, Identifiable, Sendable {
     var applicationPath: String
     /// 应用被移走或只填了 bundle id 时，用它向系统查找应用。
     var bundleIdentifier: String
-    /// 相对 worktree 根目录的文件夹，留空表示根目录。
+    /// 相对 worktree 根目录的文件或文件夹，留空表示根目录。
     var relativePath: String
 
     init(
@@ -77,11 +77,11 @@ struct WorktreeOpenWithEntry: Codable, Equatable, Identifiable, Sendable {
             return "Open with \(customName)"
         }
         let applicationName = applicationName(for: applicationURL)
-        let folder = (try? WorktreeOpenWithPath.normalize(relativePath))
+        let path = (try? WorktreeOpenWithPath.normalize(relativePath))
             ?? relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        return folder.isEmpty
+        return path.isEmpty
             ? "Open with \(applicationName)"
-            : "Open \(folder) with \(applicationName)"
+            : "Open \(path) with \(applicationName)"
     }
 
     static func displayName(ofApplicationAt url: URL) -> String {
@@ -94,29 +94,26 @@ enum WorktreeOpenWithError: LocalizedError, Equatable {
     case absolutePath(String)
     case parentReference(String)
     case outsideWorktree(String)
-    case missingDirectory(relativePath: String, path: String)
-    case notDirectory(relativePath: String, path: String)
+    case missingPath(relativePath: String, path: String)
     case applicationNotFound(String)
 
     var errorDescription: String? {
         switch self {
         case let .absolutePath(path):
-            "“\(path)” is an absolute path. Enter a folder relative to the worktree root, such as Sources/App."
+            "“\(path)” is an absolute path. Enter a file or folder relative to the worktree root, such as Sources/App."
         case let .parentReference(path):
-            "“\(path)” uses “..”. The folder must stay inside the worktree."
+            "“\(path)” uses “..”. The file or folder must stay inside the worktree."
         case let .outsideWorktree(path):
             "“\(path)” points outside the worktree through a symbolic link."
-        case let .missingDirectory(relativePath, path):
-            "The folder “\(relativePath)” doesn’t exist in this worktree.\n\(path)"
-        case let .notDirectory(relativePath, path):
-            "“\(relativePath)” is a file, not a folder.\n\(path)"
+        case let .missingPath(relativePath, path):
+            "The file or folder “\(relativePath)” doesn’t exist in this worktree.\n\(path)"
         case let .applicationNotFound(name):
             "“\(name)” isn’t installed or can’t be found. Choose the application again in Settings."
         }
     }
 }
 
-/// 自定义打开方式的相对目录：先按字面规范化，打开前再按真实路径确认没有跳出 worktree。
+/// 自定义打开方式的相对路径：先按字面规范化，打开前再按真实路径确认没有跳出 worktree。
 enum WorktreeOpenWithPath {
     /// 去掉空白、多余的斜杠和 `.`，空字符串表示根目录；拒绝绝对路径和 `..`。
     static func normalize(_ rawPath: String) throws -> String {
@@ -138,36 +135,32 @@ enum WorktreeOpenWithPath {
         return components.joined(separator: "/")
     }
 
-    /// 返回要打开的目录。目录必须存在，解析符号链接后仍在 worktree 内。
-    static func resolveDirectory(_ rawPath: String, in worktreeRootURL: URL) throws -> URL {
+    /// 返回要打开的文件或目录。目标必须存在，解析符号链接后仍在 worktree 内。
+    static func resolve(_ rawPath: String, in worktreeRootURL: URL) throws -> URL {
         let relativePath = try normalize(rawPath)
         let rootURL = worktreeRootURL.standardizedFileURL
-        let directoryURL = relativePath.isEmpty
+        let targetURL = relativePath.isEmpty
             ? rootURL
-            : rootURL.appending(path: relativePath, directoryHint: .isDirectory)
+            : rootURL.appending(path: relativePath, directoryHint: .checkFileSystem)
         let displayPath = relativePath.isEmpty ? "." : relativePath
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directoryURL.path, isDirectory: &isDirectory) else {
-            throw WorktreeOpenWithError.missingDirectory(relativePath: displayPath, path: directoryURL.path)
-        }
-        guard isDirectory.boolValue else {
-            throw WorktreeOpenWithError.notDirectory(relativePath: displayPath, path: directoryURL.path)
+        guard FileManager.default.fileExists(atPath: targetURL.path) else {
+            throw WorktreeOpenWithError.missingPath(relativePath: displayPath, path: targetURL.path)
         }
         guard let rootPath = canonicalPath(rootURL.path),
-              let directoryPath = canonicalPath(directoryURL.path),
-              isPath(directoryPath, inside: rootPath) else {
+              let targetPath = canonicalPath(targetURL.path),
+              isPath(targetPath, inside: rootPath) else {
             throw WorktreeOpenWithError.outsideWorktree(displayPath)
         }
-        return directoryURL
+        return targetURL
     }
 
-    /// 把设置里选中的文件夹换算成相对路径。worktree 互相嵌套时取最近的一层。
-    static func relativePath(of directoryURL: URL, inAnyOf worktreeRootURLs: [URL]) -> String? {
-        let directoryPath = canonicalPath(directoryURL.path) ?? directoryURL.standardizedFileURL.path
+    /// 把设置里选中的文件或文件夹换算成相对路径。worktree 互相嵌套时取最近的一层。
+    static func relativePath(of targetURL: URL, inAnyOf worktreeRootURLs: [URL]) -> String? {
+        let targetPath = canonicalPath(targetURL.path) ?? targetURL.standardizedFileURL.path
         return worktreeRootURLs.compactMap { rootURL -> String? in
             let rootPath = canonicalPath(rootURL.path) ?? rootURL.standardizedFileURL.path
-            guard isPath(directoryPath, inside: rootPath) else { return nil }
-            return String(directoryPath.dropFirst(rootPath.count).drop { $0 == "/" })
+            guard isPath(targetPath, inside: rootPath) else { return nil }
+            return String(targetPath.dropFirst(rootPath.count).drop { $0 == "/" })
         }
         .min { $0.count < $1.count }
     }
@@ -256,7 +249,7 @@ struct WorktreeOpenWithMenuItems: View {
         ForEach(entries) { entry in
             let applicationURL = entry.applicationURL()
             Button(entry.menuTitle(applicationURL: applicationURL)) {
-                openWorktreeFolder(entry, worktreeRootURL: worktreeRootURL)
+                openWorktreePath(entry, worktreeRootURL: worktreeRootURL)
             }
             .disabled(applicationURL == nil)
         }

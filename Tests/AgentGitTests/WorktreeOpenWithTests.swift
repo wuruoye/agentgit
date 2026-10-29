@@ -31,7 +31,7 @@ import Testing
     }
 }
 
-@Test func openWithFolderMustExistInsideTheWorktree() throws {
+@Test func openWithPathMustExistInsideTheWorktree() throws {
     let base = FileManager.default.temporaryDirectory
         .appending(path: "AgentGitTests.OpenWith.\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: base) }
@@ -45,37 +45,33 @@ import Testing
     try fileManager.createSymbolicLink(at: root.appending(path: "escape"), withDestinationURL: outside)
     try fileManager.createSymbolicLink(atPath: root.appending(path: "MMFlutter/up").path, withDestinationPath: "../..")
 
-    #expect(try WorktreeOpenWithPath.resolveDirectory("", in: root).path == root.path)
+    #expect(try WorktreeOpenWithPath.resolve("", in: root).path == root.path)
     #expect(
-        try WorktreeOpenWithPath.resolveDirectory(" ./MMFlutter//CrossPlatform/ ", in: root).path
+        try WorktreeOpenWithPath.resolve(" ./MMFlutter//CrossPlatform/ ", in: root).path
             == root.appending(path: "MMFlutter/CrossPlatform").path
     )
     // 指向 worktree 内部的符号链接可以用。
     #expect(
-        try WorktreeOpenWithPath.resolveDirectory("flutter/CrossPlatform", in: root).path
+        try WorktreeOpenWithPath.resolve("flutter/CrossPlatform", in: root).path
             == root.appending(path: "flutter/CrossPlatform").path
     )
 
-    #expect(throws: WorktreeOpenWithError.missingDirectory(
+    #expect(throws: WorktreeOpenWithError.missingPath(
         relativePath: "MMFlutter/Missing",
         path: root.appending(path: "MMFlutter/Missing").path
     )) {
-        try WorktreeOpenWithPath.resolveDirectory("MMFlutter/Missing", in: root)
+        try WorktreeOpenWithPath.resolve("MMFlutter/Missing", in: root)
     }
-    #expect(throws: WorktreeOpenWithError.notDirectory(
-        relativePath: "README.md",
-        path: root.appending(path: "README.md").path
-    )) {
-        try WorktreeOpenWithPath.resolveDirectory("README.md", in: root)
-    }
+    #expect(try WorktreeOpenWithPath.resolve("README.md", in: root).path
+        == root.appending(path: "README.md").path)
     #expect(throws: WorktreeOpenWithError.outsideWorktree("escape")) {
-        try WorktreeOpenWithPath.resolveDirectory("escape", in: root)
+        try WorktreeOpenWithPath.resolve("escape", in: root)
     }
     #expect(throws: WorktreeOpenWithError.outsideWorktree("MMFlutter/up")) {
-        try WorktreeOpenWithPath.resolveDirectory("MMFlutter/up", in: root)
+        try WorktreeOpenWithPath.resolve("MMFlutter/up", in: root)
     }
     #expect(throws: WorktreeOpenWithError.parentReference("../outside")) {
-        try WorktreeOpenWithPath.resolveDirectory("../outside", in: root)
+        try WorktreeOpenWithPath.resolve("../outside", in: root)
     }
 }
 
