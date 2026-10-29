@@ -484,6 +484,8 @@ JSON 会话索引解析 Desktop session ID，不读取 transcript 正文。记�
 CLI 会话 ID 会换，旧 ID 留在索引的 `priorCliSessionIds`、`preClearCliSessionId`、
 `unarchivedCliSessionId` 里，也算命中，但排在当前 ID 命中的会话之后。新旧 ID 解析到同一个
 Desktop 会话时，会话按钮、侧栏右键菜单和选区的 Send to Agent 只显示一条。
+本地 Desktop 会话使用 `claude://code/continue?session=local_…` 在运行中的窗口里直接切换；
+其他格式的 Desktop session ID 使用 `claude://claude.ai/claude-code-desktop/<id>` 打开。
 索引映射已经失效的关联显示为 Unavailable，并排到仍可打开的会话之后，可从右键菜单移除。
 
 AgentGit 不扫描 transcript，唯一的例外是查 Codex `create_worktree` 建的 worktree 属于哪个线程时，

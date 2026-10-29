@@ -51,7 +51,7 @@ private func claudeAssociation(_ sessionID: String, host: String? = nil) -> Agen
 }
 
 private func target(_ localID: String) -> URL? {
-    URL(string: "claude://claude.ai/claude-code-desktop/\(localID)")
+    URL(string: "claude://code/continue?session=\(localID)")
 }
 
 @Test func rewoundClaudeSessionResolvesByHostSessionID() throws {

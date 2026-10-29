@@ -362,16 +362,34 @@ struct AgentSessionNavigationResolver: Sendable {
     private func claudeNavigation(
         to selected: ClaudeDesktopSessionRecord
     ) -> AgentSessionNavigationResolution {
-        guard isSafeNativeSessionID(selected.sessionID),
-              let encodedID = selected.sessionID.addingPercentEncoding(
-                  withAllowedCharacters: .urlPathAllowed
-              ),
-              let url = URL(
-                  string: "claude://claude.ai/claude-code-desktop/\(encodedID)"
-              ) else {
+        guard isSafeNativeSessionID(selected.sessionID) else {
+            return .unavailable("Claude Desktop returned an invalid session mapping.")
+        }
+        var components = URLComponents()
+        components.scheme = "claude"
+        if isClaudeLocalSessionID(selected.sessionID) {
+            // 和 Claude Desktop 的会话通知一样，直接在运行中的窗口里切换会话。
+            components.host = "code"
+            components.path = "/continue"
+            components.queryItems = [URLQueryItem(name: "session", value: selected.sessionID)]
+        } else {
+            components.host = "claude.ai"
+            components.path = "/claude-code-desktop/\(selected.sessionID)"
+        }
+        guard let url = components.url else {
             return .unavailable("Claude Desktop returned an invalid session mapping.")
         }
         return .available(url, title: selected.title)
+    }
+
+    /// `code/continue` 只接受 `local_` 加 1～64 位 ASCII 字母、数字或连字符。
+    private func isClaudeLocalSessionID(_ value: String) -> Bool {
+        guard value.hasPrefix("local_") else { return false }
+        let suffix = value.dropFirst("local_".count)
+        return (1...64).contains(suffix.count)
+            && suffix.unicodeScalars.allSatisfy {
+                ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-"
+            }
     }
 
     /// `requestedSessionIDs` 为 nil 时返回全部记录；否则返回认领了其中某个 CLI 会话 ID，

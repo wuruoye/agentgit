@@ -191,7 +191,7 @@ enum AgentContextDelivery: Equatable {
 }
 
 /// Codex 的线程链接支持 `prompt` 参数，打开后填进输入框、不自动发送；Claude Desktop 打开
-/// 已有会话的链接只透传 artifact/org，带不进文字，只能复制到剪贴板。
+/// 已有会话的链接不接收上下文文字，先把文字复制到剪贴板。
 struct AgentSessionContextHandoff: Equatable {
     /// 链接太长时宿主和系统都可能截断，超过这个字符数改走剪贴板。
     static let maximumPrefillLength = 32_000

@@ -189,7 +189,7 @@ private func context(
 }
 
 @Test func claudeHandoffCopiesContext() throws {
-    let url = try #require(URL(string: "claude://claude.ai/claude-code-desktop/local_abc"))
+    let url = try #require(URL(string: "claude://code/continue?session=local_abc"))
     let handoff = AgentSessionContextHandoff(provider: .claude, sessionURL: url, context: "hello")
     #expect(handoff.copiesContextToPasteboard)
     #expect(handoff.url == url)
