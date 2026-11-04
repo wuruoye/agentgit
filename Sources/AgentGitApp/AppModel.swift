@@ -187,7 +187,9 @@ final class AppModel {
     var requestedSettingsDestination: AgentGitSettingsDestination?
     var selectedWorktreeID: GitWorktreeSnapshot.ID? {
         didSet {
+            guard selectedWorktreeID != oldValue else { return }
             persistSelectedWorktreeSelection()
+            scheduleRepositoryMonitorUpdate()
         }
     }
 
@@ -1619,7 +1621,11 @@ final class AppModel {
             }
         }
         do {
-            let index = RepositoryWatchIndex(projects: projects)
+            let activeWorkingTreeIDs = selectedWorktreeID.map { Set([$0]) } ?? []
+            let index = RepositoryWatchIndex(
+                projects: projects,
+                activeWorkingTreeIDs: activeWorkingTreeIDs
+            )
             let paths = Set(index.watchedPaths)
             let addedPaths = paths.subtracting(monitoredRepositoryPaths)
             let needsCoverage = !monitoredRepositoryPaths.isEmpty && !addedPaths.isEmpty
@@ -1629,7 +1635,7 @@ final class AppModel {
                 // 新路径在建立监听之后再读一次，覆盖加入监听前的文件与 index 变化。
                 receiveRepositoryEvents(
                     RepositoryChangeImpact(metadataWorktreeIDs: index.worktreeIDs(watching: addedPaths)),
-                    eventID: 0
+                    eventID: FSEventsGetCurrentEventId()
                 )
             }
             if repositoryMonitorError != nil { repositoryMonitorError = nil }

@@ -559,6 +559,7 @@ final class ReviewStateStore {
     private let defaults: UserDefaults
     private var states: [ReviewStateKey: ReviewState] = [:]
     private var scrollOffsets: [ReviewStateKey: CGFloat] = [:]
+    private var unpersistedScrollOffsetKeys: Set<ReviewStateKey> = []
     private var updatedAtByKey: [ReviewStateKey: Date] = [:]
     private var lastContextByWorktreeID: [
         GitWorktreeSnapshot.ID: ReviewNavigationState
@@ -615,12 +616,27 @@ final class ReviewStateStore {
         scrollOffsets[key] ?? 0
     }
 
-    func saveScrollOffset(_ offset: CGFloat, for key: ReviewStateKey) {
+    func recordScrollOffsetInMemory(_ offset: CGFloat, for key: ReviewStateKey) {
         guard offset.isFinite else {
             return
         }
         let normalizedOffset = max(0, offset)
         if let current = scrollOffsets[key], abs(current - normalizedOffset) < 0.5 {
+            return
+        }
+        scrollOffsets[key] = normalizedOffset
+        unpersistedScrollOffsetKeys.insert(key)
+    }
+
+    func saveScrollOffset(_ offset: CGFloat, for key: ReviewStateKey) {
+        guard offset.isFinite else {
+            return
+        }
+        let normalizedOffset = max(0, offset)
+        let wasDirty = unpersistedScrollOffsetKeys.remove(key) != nil
+        if !wasDirty,
+           let current = scrollOffsets[key],
+           abs(current - normalizedOffset) < 0.5 {
             return
         }
         scrollOffsets[key] = normalizedOffset
@@ -635,9 +651,7 @@ final class ReviewStateStore {
     }
 
     private func schedulePersistence() {
-        guard persistenceTask == nil else {
-            return
-        }
+        persistenceTask?.cancel()
         persistenceTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(750))
@@ -684,6 +698,13 @@ final class ReviewStateStore {
     }
 
     private func persistNow() {
+        if !unpersistedScrollOffsetKeys.isEmpty {
+            let now = Date()
+            for key in unpersistedScrollOffsetKeys {
+                updatedAtByKey[key] = now
+            }
+            unpersistedScrollOffsetKeys.removeAll()
+        }
         let keys = Set(states.keys).union(scrollOffsets.keys)
         guard !keys.isEmpty || !lastContextByWorktreeID.isEmpty else {
             defaults.removeObject(forKey: Self.persistenceKey)

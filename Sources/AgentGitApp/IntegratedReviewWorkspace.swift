@@ -29,8 +29,8 @@ struct IntegratedReviewWorkspace: View {
     @State private var commits: [GitCommit] = []
     @State private var commitGraphLayout = CommitGraphLayout(commits: [])
     @State private var selection: Set<IntegratedOverviewSelection> = [.pending]
-    @State private var hoveredOverviewSelection: IntegratedOverviewSelection?
-    @State private var hunkPosition = DiffHunkPosition.empty
+    @State private var overviewHover = OverviewHoverState()
+    @State private var hunkPositionState = ReviewHunkPositionState()
     @State private var contextChanges: [GitFileChange] = []
     @State private var contextMessage = ""
     @State private var contextCommitMetadata: GitCommitMetadata?
@@ -53,7 +53,6 @@ struct IntegratedReviewWorkspace: View {
         IntegratedFileID: SupplementalDiffFailure
     ] = [:]
     @State private var pane: ReviewPane = .commits
-    @State private var selectedReviewDocument: ReviewDocumentSelection = .summary
     /// 提交说明按需展开，切换上下文时恢复默认收起。
     @State private var contextMessageExpansionOverride: Bool?
     @State private var review = ReviewState()
@@ -344,9 +343,6 @@ struct IntegratedReviewWorkspace: View {
                 )
             }
         }
-        .onChange(of: currentFileItems.map { $0.id.stackID }, initial: true) {
-            synchronizeReviewDocuments()
-        }
         .onChange(of: commitFilterText) { previousFilter, currentFilter in
             handleHistoryFilterChange(
                 from: previousFilter,
@@ -540,7 +536,7 @@ struct IntegratedReviewWorkspace: View {
         // 缩放放在各自的 hosting view 内，保证 SwiftUI 按钮收到的鼠标坐标与绘制位置一致。
         // NSSplitView 本身使用窗口坐标，列宽按缩放比例换算。
         let scale = (suppliedFontSettings ?? .shared).scale
-        let groups = reviewDocumentStackGroups
+        let groups = stackGroups
         return VStack(spacing: 0) {
             // 顶栏横跨左栏和 diff，和 Claude Desktop 的审阅面板一样不画分隔线。
             FontScaleViewport(settings: suppliedFontSettings) { reviewTopBar(groups: groups) }
@@ -937,7 +933,7 @@ struct IntegratedReviewWorkspace: View {
             .scrollContentBackground(.hidden)
             .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
             .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-                hoveredOverviewSelection = nil
+                overviewHover.hovered = nil
             }
             .id(snapshot.id)
             .onChange(of: selection, initial: true) { _, currentSelection in
@@ -970,9 +966,10 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func overviewRowBackground(_ item: IntegratedOverviewSelection) -> some View {
-        WorkspaceSelectionBackground(
+        OverviewRowSelectionBackground(
+            item: item,
             isSelected: selection.contains(item),
-            isHovered: hoveredOverviewSelection == item
+            hoverState: overviewHover
         )
     }
 
@@ -989,8 +986,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func updateOverviewHover(_ item: IntegratedOverviewSelection, isHovered: Bool) {
-        if isHovered { hoveredOverviewSelection = item }
-        else if hoveredOverviewSelection == item { hoveredOverviewSelection = nil }
+        overviewHover.update(item, isHovered: isHovered)
     }
 
     @ViewBuilder
@@ -1023,6 +1019,9 @@ struct IntegratedReviewWorkspace: View {
                   trigger.hasMore,
                   !trigger.hasError else {
                 return
+            }
+            if trigger.offset > Self.historyPageSize {
+                do { try await Task.sleep(for: .milliseconds(60)) } catch { return }
             }
             await loadMoreHistory()
         }
@@ -1058,6 +1057,9 @@ struct IntegratedReviewWorkspace: View {
                   trigger.hasMore,
                   !trigger.hasError else {
                 return
+            }
+            if trigger.offset > Self.historySearchPageSize {
+                do { try await Task.sleep(for: .milliseconds(60)) } catch { return }
             }
             await loadMoreHistorySearchResults()
         }
@@ -1213,7 +1215,10 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var reviewScrollTarget: String? {
-        diffReviewScrollTarget(
+        guard !isPreparingReviewDiffs else {
+            return nil
+        }
+        return diffReviewScrollTarget(
             focusedFileID: review.focusedFileID,
             fileFocusedFromDiffID: fileFocusedFromDiffID
         )
@@ -1226,7 +1231,12 @@ struct IntegratedReviewWorkspace: View {
         fileFocusedFromDiffID = nil
         navigatorSelection = fileID.map(NavigatorSelection.file)
         if expandsFile, let fileID {
-            openReviewDocument(fileID)
+            if let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
+                let groupID = activeContext == .pending
+                    ? (item.scope == .staged ? "staged" : "working")
+                    : "context"
+                collapsedDiffGroupIDs.remove(groupID)
+            }
             diffCommandSequence &+= 1
             diffCommand = DiffStackCommand(
                 id: diffCommandSequence,
@@ -1243,18 +1253,6 @@ struct IntegratedReviewWorkspace: View {
             model.reviewStates.save(review, for: stateKey)
         }
         updateFocusedFile(fileID)
-    }
-
-    private func openReviewDocument(_ fileID: String) {
-        selectedReviewDocument = .file(fileID)
-    }
-
-    private func synchronizeReviewDocuments() {
-        let validFileIDs = Set(currentFileItems.map { $0.id.stackID })
-        if case let .file(fileID) = selectedReviewDocument,
-           !validFileIDs.contains(fileID) {
-            selectedReviewDocument = .summary
-        }
     }
 
     private func focusFileFromDiff(_ fileID: String) {
@@ -1329,7 +1327,7 @@ struct IntegratedReviewWorkspace: View {
 
     private func reviewPane(groups: [DiffStackGroup]) -> some View {
         VStack(spacing: 0) {
-            if selectedReviewDocument == .summary, isContextMessageExpanded {
+            if isContextMessageExpanded {
                 contextSummaryHeader
                 Rectangle()
                     .fill(Color(nsColor: AgentGitPalette.reviewDivider))
@@ -1352,11 +1350,9 @@ struct IntegratedReviewWorkspace: View {
                     commit: commit,
                     metadata: contextCommitMetadata,
                     message: contextMessage.isEmpty ? commit.subject : contextMessage,
-                    // 文件清单还在读时先用 commit 行里已有的文件数，否则会先显示
-                    // “0 files changed”，看起来像这条 commit 什么都没改。
-                    fileCount: reviewDocumentFileItems.isEmpty
-                        ? (commit.changedFileCount ?? 0)
-                        : reviewDocumentFileItems.count,
+                    fileCount: visibleFileItems.isEmpty && isLoadingContextDetail
+                        ? commit.changedFileCount
+                        : visibleFileItems.count,
                     addedLineCount: totalAddedLineCount,
                     deletedLineCount: totalDeletedLineCount,
                     isLoading: isLoadingContextDetail
@@ -1369,11 +1365,11 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    /// 顶栏按 Claude Desktop 的审阅面板排布：左端是文件树开关和标题，右端只有搜索、更多、
-    /// 展开、关闭四个无边框图标。原来工具条上的布局切换、空白选项和 hunk 导航收进「更多」菜单，
-    /// 文件数和增删统计放进标题的下拉菜单。按钮位置固定，显隐只改透明度。
+    /// 顶栏按 Claude Desktop 的审阅面板排布：左端是文件树开关和标题，右端是搜索、全部展开/收起、
+    /// 更多和专注模式四个无边框图标。按钮位置、尺寸和点击区域保持固定。
     private func reviewTopBar(groups: [DiffStackGroup]) -> some View {
-        HStack(spacing: 6) {
+        let hasExpandedFiles = groups.contains { $0.isExpanded && $0.files.contains(where: \.isExpanded) }
+        return HStack(spacing: 6) {
             Button {
                 withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) {
                     isNavigatorHidden.toggle()
@@ -1406,7 +1402,16 @@ struct IntegratedReviewWorkspace: View {
                 .help(isNavigatorSearchActive ? "Close search" : "Filter files and commits (⌘F)")
                 .accessibilityLabel("Search")
                 .accessibilityValue(isNavigatorSearchActive ? "On" : "Off")
-                reviewMoreMenu(groups: groups)
+                Button {
+                    setEntireFileListExpanded(!hasExpandedFiles)
+                } label: {
+                    ReviewIconView(icon: hasExpandedFiles ? .collapse : .expand)
+                }
+                .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
+                .disabled(isPreparingReviewDiffs || visibleFileItems.isEmpty)
+                .help(hasExpandedFiles ? "Collapse all files" : "Expand all files")
+                .accessibilityLabel(hasExpandedFiles ? "Collapse All Files" : "Expand All Files")
+                reviewMoreMenu
                 Button {
                     withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { isReviewFocused.toggle() }
                 } label: {
@@ -1420,15 +1425,6 @@ struct IntegratedReviewWorkspace: View {
                 .help(isReviewFocused ? "Exit focused review (⇧⌘F)" : "Focus review (⇧⌘F)")
                 .accessibilityLabel("Toggle Review Focus")
                 .accessibilityValue(isReviewFocused ? "On" : "Off")
-                Button { selectedReviewDocument = .summary } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .regular))
-                }
-                .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
-                .keyboardShortcut(.cancelAction)
-                .help("Close this file and show every file in this review (Esc)")
-                .accessibilityLabel("Show All Files")
-                .workspaceControlSlot(isVisible: selectedReviewDocument != .summary)
             }
             .fixedSize()
         }
@@ -1485,12 +1481,8 @@ struct IntegratedReviewWorkspace: View {
         .accessibilityHint("Shows review details and commit message options")
     }
 
-    /// 顶栏标题：提交显示 SHA 加标题，打开单个文件时显示文件名。
+    /// 顶栏标题：显示当前审阅范围（工作区改动、提交 SHA 加标题、提交区间）。
     private var reviewTopBarTitle: String {
-        if case let .file(fileID) = selectedReviewDocument,
-           let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
-            return (item.change.path as NSString).lastPathComponent
-        }
         switch activeContext {
         case .pending:
             return "Uncommitted changes"
@@ -1506,51 +1498,16 @@ struct IntegratedReviewWorkspace: View {
         if currentFileItems.isEmpty, isContextDetailSettled {
             return activeContext == .pending ? "Working tree clean" : "No file changes"
         }
-        return "\(countedLabel(reviewDocumentFileItems.count, singular: "file"))  "
+        return "\(countedLabel(visibleFileItems.count, singular: "file"))  "
             + "+\(totalAddedLineCount)  -\(totalDeletedLineCount)"
     }
 
-    private func reviewMoreMenu(groups: [DiffStackGroup]) -> some View {
-        let hasExpandedFiles = groups.contains { $0.isExpanded && $0.files.contains(where: \.isExpanded) }
-        return Menu {
-            Picker("Diff Layout", selection: Binding(get: { model.diffLayout }, set: { layout in
-                withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { model.diffLayout = layout }
-            })) {
-                ForEach(DiffLayoutMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.inline)
-            Toggle("Ignore Whitespace Changes", isOn: Binding(
-                get: { model.diffOptions.ignoresWhitespace },
-                set: { model.diffOptions.ignoresWhitespace = $0 }
-            ))
-            Divider()
-            Button(hasExpandedFiles ? "Collapse All Files" : "Expand All Files") {
-                setEntireFileListExpanded(!hasExpandedFiles)
-            }
-            .disabled(reviewDocumentFileItems.isEmpty)
-            Divider()
-            Section(visibleHunkCount > 0
-                ? "Hunk \(min(max(1, hunkPosition.index), visibleHunkCount)) of \(visibleHunkCount)"
-                : "No hunks") {
-                Button("Previous Hunk") { moveHunk(by: -1) }
-                    .disabled(visibleHunkCount == 0)
-                Button("Next Hunk") { moveHunk(by: 1) }
-                    .disabled(visibleHunkCount == 0)
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 14, weight: .regular))
-                .rotationEffect(.degrees(90))
-        }
-        .menuStyle(.button)
-        .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
-        .menuIndicator(.hidden)
-        .help(model.diffOptions.ignoresWhitespace
-            ? "Review options — whitespace changes hidden"
-            : "Review options — layout, whitespace, hunks")
-        .accessibilityLabel("Review Options")
+    private var reviewMoreMenu: some View {
+        ReviewMoreMenuButton(
+            hunkPositionState: hunkPositionState,
+            canNavigateHunks: !isPreparingReviewDiffs && !visibleFileItems.isEmpty,
+            onMoveHunk: moveHunk
+        )
     }
 
     /// commit message 原来占着 diff 顶部一大块，现在收在比较条里按需展开。
@@ -1583,14 +1540,6 @@ struct IntegratedReviewWorkspace: View {
         case let .range(base, head):
             return "\(String(base.prefix(7))) ⇄ \(String(head.prefix(7)))"
         }
-    }
-
-    /// 使用 AppKit 实际构建的导航目标，收起文件或分组后同步更新。
-    private var visibleHunkCount: Int {
-        guard !isPreparingReviewDiffs, !reviewDocumentFileItems.isEmpty else {
-            return 0
-        }
-        return hunkPosition.count
     }
 
     private func moveHunk(by offset: Int) {
@@ -1869,7 +1818,7 @@ struct IntegratedReviewWorkspace: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Loading changed files")
-        } else if selectedReviewDocument == .summary, visibleFileItems.isEmpty {
+        } else if visibleFileItems.isEmpty {
             ContentUnavailableView {
                 Label("No Matching Files", systemImage: "line.3.horizontal.decrease.circle")
             } description: {
@@ -1914,7 +1863,9 @@ struct IntegratedReviewWorkspace: View {
                     onFileAction: performFileAction,
                     onSelectionAction: performSelectionAction,
                     onAllChangesAction: allChangesActionHandler,
-                    onHunkPositionChanged: { hunkPosition = $0 },
+                    onHunkPositionChanged: { position in
+                        hunkPositionState.position = position
+                    },
                     selectionActions: selectionActions,
                     onSelectionContextAction: performSelectionContextAction
                 )
@@ -2056,29 +2007,6 @@ struct IntegratedReviewWorkspace: View {
             ]
         }
         return nonEmptyDiffStackGroups(groups)
-    }
-
-    private var reviewDocumentStackGroups: [DiffStackGroup] {
-        switch selectedReviewDocument {
-        case .summary:
-            return stackGroups
-        case let .file(fileID):
-            guard let item = currentFileItems.first(where: {
-                $0.id.stackID == fileID
-            }) else {
-                return []
-            }
-            return [
-                DiffStackGroup(
-                    id: "document",
-                    title: nil,
-                    emptyMessage: "No file changes",
-                    isExpanded: true,
-                    files: [stackFile(for: item)],
-                    folders: []
-                )
-            ]
-        }
     }
 
     private func emptyMessage(_ empty: String, _ filteredAway: String) -> String {
@@ -2283,21 +2211,11 @@ struct IntegratedReviewWorkspace: View {
         fileID: String,
         action: DiffStackFileUtilityAction
     ) {
-        // 删除的文件也能查看 diff，无需工作区文件存在。
-        if action == .openInReview {
-            guard currentFileItems.contains(where: { $0.id.stackID == fileID }) else {
-                return
-            }
-            focusFileFromNavigator(fileID)
-            return
-        }
         guard let item = currentFileItems.first(where: { $0.id.stackID == fileID }),
               let fileURL = workingFileURL(for: item) else {
             return
         }
         switch action {
-        case .openInReview:
-            return
         case .openFile:
             guard existingWorkingFileURL(for: item) != nil else {
                 return
@@ -2967,15 +2885,6 @@ struct IntegratedReviewWorkspace: View {
         filtered(currentFileItems)
     }
 
-    private var reviewDocumentFileItems: [IntegratedFileItem] {
-        switch selectedReviewDocument {
-        case .summary:
-            visibleFileItems
-        case let .file(fileID):
-            currentFileItems.filter { $0.id.stackID == fileID }
-        }
-    }
-
     private func filtered(_ items: [IntegratedFileItem]) -> [IntegratedFileItem] {
         guard !review.filterText.isEmpty else {
             return items
@@ -3068,8 +2977,22 @@ struct IntegratedReviewWorkspace: View {
         guard let key else { return }
         let requestedContext = activeContext
         let fileIDs = Set(key.fileIDs)
+        var pendingDiffs: [IntegratedFileID: GitFileDiff] = [:]
+        var pendingUnavailable: [IntegratedFileID: UInt64] = [:]
+        func flushPending() {
+            if !pendingDiffs.isEmpty {
+                wholeFileDiffsByFileID.merge(pendingDiffs) { _, new in new }
+                pendingDiffs.removeAll(keepingCapacity: true)
+            }
+            if !pendingUnavailable.isEmpty {
+                unavailableWhitespaceSourceRenderIDs.merge(pendingUnavailable) { _, new in new }
+                pendingUnavailable.removeAll(keepingCapacity: true)
+            }
+        }
         for item in currentFileItems where fileIDs.contains(item.id) {
-            guard wholeFileDiffsByFileID[item.id] == nil, let compactDiff = diffsByFileID[item.id] else { continue }
+            guard wholeFileDiffsByFileID[item.id] == nil,
+                  pendingDiffs[item.id] == nil,
+                  let compactDiff = diffsByFileID[item.id] else { continue }
             do {
                 let diff = try await loadWholeFileDiff(for: item, context: requestedContext)
                 try Task.checkCancellation()
@@ -3077,15 +3000,19 @@ struct IntegratedReviewWorkspace: View {
                 guard GitDiffWhitespaceFilter.isWholeFileSource(diff, of: compactDiff) else {
                     throw IntegratedReviewLoadError.contextUnavailable
                 }
-                wholeFileDiffsByFileID[item.id] = diff
+                pendingDiffs[item.id] = diff
             } catch is CancellationError {
                 return
             } catch {
                 // 取不到时继续用 hunk 内的内容算，不打扰用户。
                 guard acceptsDiffLoad(key.diff) else { return }
-                unavailableWhitespaceSourceRenderIDs[item.id] = compactDiff.renderID
+                pendingUnavailable[item.id] = compactDiff.renderID
+            }
+            if pendingDiffs.count + pendingUnavailable.count >= 8 {
+                flushPending()
             }
         }
+        flushPending()
     }
 
     private func contextSourceDiff(for item: IntegratedFileItem) -> GitFileDiff? {
@@ -3133,13 +3060,13 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var totalAddedLineCount: Int {
-        reviewDocumentFileItems.reduce(0) {
+        visibleFileItems.reduce(0) {
             $0 + (displayedDiff(for: $1)?.addedLineCount ?? 0)
         }
     }
 
     private var totalDeletedLineCount: Int {
-        reviewDocumentFileItems.reduce(0) {
+        visibleFileItems.reduce(0) {
             $0 + (displayedDiff(for: $1)?.deletedLineCount ?? 0)
         }
     }
@@ -3467,7 +3394,6 @@ struct IntegratedReviewWorkspace: View {
         remoteOperationError = nil
         isLoadingContextDetail = false
         isLoadingDiffs = false
-        selectedReviewDocument = .summary
         contextMessageExpansionOverride = nil
         collapsedDiffGroupIDs = context == .pending ? ["staged"] : []
         fileFocusedFromDiffID = nil
@@ -3558,7 +3484,7 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private func setEntireFileListExpanded(_ isExpanded: Bool) {
-        let groups = reviewDocumentStackGroups
+        let groups = stackGroups
         let fileIDs = Set(groups.flatMap(\.files).map(\.id))
 
         if isExpanded {
@@ -4002,16 +3928,18 @@ struct IntegratedReviewWorkspace: View {
                 hasMore: page.hasMore,
                 query: nil
             )
-            await model.cacheHistoryPage(
-                GitHistoryPage(
-                    commits: combinedCommits,
-                    nextOffset: page.nextOffset,
-                    hasMore: page.hasMore
-                ),
-                worktreeID: snapshot.id,
-                revision: key.revision,
-                pageSize: Self.historyPageSize
-            )
+            if combinedCommits.count <= 500 {
+                await model.cacheHistoryPage(
+                    GitHistoryPage(
+                        commits: combinedCommits,
+                        nextOffset: page.nextOffset,
+                        hasMore: page.hasMore
+                    ),
+                    worktreeID: snapshot.id,
+                    revision: key.revision,
+                    pageSize: Self.historyPageSize
+                )
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -5310,9 +5238,87 @@ enum IntegratedOverviewSelection: Hashable {
     case commit(GitCommit.ID)
 }
 
-enum ReviewDocumentSelection: Hashable {
-    case summary
-    case file(String)
+@MainActor
+@Observable
+private final class ReviewHunkPositionState {
+    var position = DiffHunkPosition.empty
+}
+
+private struct ReviewMoreMenuButton: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let hunkPositionState: ReviewHunkPositionState
+    let canNavigateHunks: Bool
+    let onMoveHunk: (Int) -> Void
+
+    private var visibleHunkCount: Int {
+        canNavigateHunks ? hunkPositionState.position.count : 0
+    }
+
+    var body: some View {
+        Menu {
+            Picker("Diff Layout", selection: Binding(get: { model.diffLayout }, set: { layout in
+                withAnimation(WorkspaceMotion.layout(reduceMotion: reduceMotion)) { model.diffLayout = layout }
+            })) {
+                ForEach(DiffLayoutMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+            Toggle("Ignore Whitespace Changes", isOn: Binding(
+                get: { model.diffOptions.ignoresWhitespace },
+                set: { model.diffOptions.ignoresWhitespace = $0 }
+            ))
+            Divider()
+            Section(visibleHunkCount > 0
+                ? "Hunk \(min(max(1, hunkPositionState.position.index), visibleHunkCount)) of \(visibleHunkCount)"
+                : "No hunks") {
+                Button("Previous Hunk") { onMoveHunk(-1) }
+                    .disabled(visibleHunkCount == 0)
+                Button("Next Hunk") { onMoveHunk(1) }
+                    .disabled(visibleHunkCount == 0)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .regular))
+                .rotationEffect(.degrees(90))
+        }
+        .menuStyle(.button)
+        .buttonStyle(ReviewToolbarButtonStyle(iconOnly: true))
+        .menuIndicator(.hidden)
+        .help(model.diffOptions.ignoresWhitespace
+            ? "Review options — whitespace changes hidden"
+            : "Review options — layout, whitespace, hunks")
+        .accessibilityLabel("Review Options")
+    }
+}
+
+@MainActor
+@Observable
+private final class OverviewHoverState {
+    var hovered: IntegratedOverviewSelection?
+
+    func update(_ item: IntegratedOverviewSelection, isHovered: Bool) {
+        if isHovered {
+            if hovered != item { hovered = item }
+        } else if hovered == item {
+            hovered = nil
+        }
+    }
+}
+
+private struct OverviewRowSelectionBackground: View {
+    let item: IntegratedOverviewSelection
+    let isSelected: Bool
+    let hoverState: OverviewHoverState
+
+    var body: some View {
+        WorkspaceSelectionBackground(
+            isSelected: isSelected,
+            isHovered: hoverState.hovered == item
+        )
+    }
 }
 
 func normalizedOverviewSelection(
@@ -6698,35 +6704,35 @@ struct ReviewNativeSplitView<Navigation: View, Review: View>:
         self.review = review()
     }
 
-    func makeNSViewController(context: Context) -> ReviewSplitViewController {
+    func makeNSViewController(context: Context) -> ReviewSplitViewController<Navigation, Review> {
         let defaults = defaultsSuiteName.flatMap(UserDefaults.init(suiteName:))
             ?? .standard
         return ReviewSplitViewController(
             defaults: defaults,
             scale: scale,
-            navigation: AnyView(navigation),
-            review: AnyView(review)
+            navigation: navigation,
+            review: review
         )
     }
 
     func updateNSViewController(
-        _ controller: ReviewSplitViewController,
+        _ controller: ReviewSplitViewController<Navigation, Review>,
         context: Context
     ) {
         controller.update(
             scale: scale,
-            navigation: AnyView(navigation),
-            review: AnyView(review)
+            navigation: navigation,
+            review: review
         )
         controller.setNavigationHidden(isNavigationHidden)
     }
 }
 
 @MainActor
-final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
+final class ReviewSplitViewController<Navigation: View, Review: View>: NSViewController, NSSplitViewDelegate {
     let managedSplitView = NSSplitView()
-    private let navigationController: NSHostingController<AnyView>
-    private let reviewController: NSHostingController<AnyView>
+    private let navigationController: NSHostingController<Navigation>
+    private let reviewController: NSHostingController<Review>
     private let defaults: UserDefaults
     private var scale: CGFloat
     private var hasAppliedInitialWidth = false
@@ -6740,8 +6746,8 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
     init(
         defaults: UserDefaults,
         scale: CGFloat = 1,
-        navigation: AnyView,
-        review: AnyView
+        navigation: Navigation,
+        review: Review
     ) {
         self.defaults = defaults
         self.scale = scale
@@ -6839,7 +6845,7 @@ final class ReviewSplitViewController: NSViewController, NSSplitViewDelegate {
         view.needsLayout = true
     }
 
-    func update(scale: CGFloat, navigation: AnyView, review: AnyView) {
+    func update(scale: CGFloat, navigation: Navigation, review: Review) {
         if self.scale != scale {
             self.scale = scale
             hasAppliedInitialWidth = false
@@ -7224,7 +7230,7 @@ struct CommitSummaryHeader: View {
     let commit: GitCommit
     let metadata: GitCommitMetadata?
     let message: String
-    let fileCount: Int
+    let fileCount: Int?
     let addedLineCount: Int
     let deletedLineCount: Int
     let isLoading: Bool
@@ -7329,8 +7335,13 @@ struct CommitSummaryHeader: View {
 
     private var statsBadges: some View {
         HStack(spacing: 6) {
-            Text(countedLabel(fileCount, singular: "file") + " changed")
-                .foregroundStyle(.secondary)
+            if let fileCount {
+                Text(countedLabel(fileCount, singular: "file") + " changed")
+                    .foregroundStyle(.secondary)
+            } else if isLoading {
+                Text("Loading…")
+                    .foregroundStyle(.secondary)
+            }
             Text("−\(deletedLineCount)")
                 .foregroundStyle(Color(nsColor: AgentGitPalette.codeText))
                 .padding(.horizontal, 4)
@@ -7700,7 +7711,10 @@ struct IntegratedCommitRow: View {
     let isSearchResult: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 7) {
+        let references = commit.references
+        let relativeTime = commitListRelativeTime(commit.authoredAt)
+        let accessibilityLabel = commitRowAccessibilityLabel(commit, references: references)
+        return HStack(alignment: .center, spacing: 7) {
             if let graphRow {
                 CommitGraphView(
                     row: graphRow,
@@ -7720,9 +7734,27 @@ struct IntegratedCommitRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                ViewThatFits(in: .horizontal) {
-                    metadataLine(showsReferences: true)
-                    metadataLine(showsReferences: false)
+                Group {
+                    if references.isEmpty {
+                        metadataLine(
+                            references: [],
+                            relativeTime: relativeTime,
+                            showsReferences: false
+                        )
+                    } else {
+                        ViewThatFits(in: .horizontal) {
+                            metadataLine(
+                                references: references,
+                                relativeTime: relativeTime,
+                                showsReferences: true
+                            )
+                            metadataLine(
+                                references: references,
+                                relativeTime: relativeTime,
+                                showsReferences: false
+                            )
+                        }
+                    }
                 }
                 .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.metadataSize))
                 .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
@@ -7730,15 +7762,18 @@ struct IntegratedCommitRow: View {
         }
         .frame(minHeight: CommitGraphMetrics.rowHeight)
         .contentShape(Rectangle())
-        .help(commitRowAccessibilityLabel(commit))
+        .help(accessibilityLabel)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(commitRowAccessibilityLabel(commit))
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Select to review this commit")
     }
 
-    private func metadataLine(showsReferences: Bool) -> some View {
-        let references = commit.references
-        return HStack(spacing: 0) {
+    private func metadataLine(
+        references: [GitReferenceDecoration],
+        relativeTime: String,
+        showsReferences: Bool
+    ) -> some View {
+        HStack(spacing: 0) {
             Text(String(commit.oid.prefix(13)))
                 .font(.system(size: 11.5, design: .monospaced))
                 .fixedSize()
@@ -7747,7 +7782,7 @@ struct IntegratedCommitRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Text(" · ").fixedSize()
-            Text(commitListRelativeTime(commit.authoredAt))
+            Text(relativeTime)
                 .fixedSize()
             if showsReferences, let reference = references.first {
                 CommitReferenceBadge(reference: reference)
@@ -7828,6 +7863,12 @@ private enum CommitListDateFormatting {
     static let monthDay = formatter("MMM d")
     static let yearMonthDay = formatter("yyyy MMM d")
     static let summary = formatter("yyyy, MMM d, EEE, HH:mm")
+    static let accessibility: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     private static func formatter(_ template: String) -> DateFormatter {
         let formatter = DateFormatter()
@@ -7837,16 +7878,20 @@ private enum CommitListDateFormatting {
     }
 }
 
-func commitRowAccessibilityLabel(_ commit: GitCommit) -> String {
+func commitRowAccessibilityLabel(
+    _ commit: GitCommit,
+    references: [GitReferenceDecoration]? = nil
+) -> String {
+    let resolvedReferences = references ?? commit.references
     var details = [
         commit.subject,
         commit.shortOID,
         commit.authorName,
-        commit.authoredAt.formatted(date: .abbreviated, time: .shortened)
+        CommitListDateFormatting.accessibility.string(from: commit.authoredAt)
     ]
-    if !commit.references.isEmpty {
+    if !resolvedReferences.isEmpty {
         details.append(
-            "References " + commit.references.map(\.label).joined(separator: ", ")
+            "References " + resolvedReferences.map(\.label).joined(separator: ", ")
         )
     }
     if let count = commit.changedFileCount {
@@ -7856,6 +7901,8 @@ func commitRowAccessibilityLabel(_ commit: GitCommit) -> String {
 }
 
 private struct CommitReferenceBadge: View {
+    @MainActor private static var widthCache: [String: CGFloat] = [:]
+
     let reference: GitReferenceDecoration
 
     var body: some View {
@@ -7876,11 +7923,19 @@ private struct CommitReferenceBadge: View {
     }
 
     private var badgeWidth: CGFloat {
+        if let cached = Self.widthCache[reference.label] {
+            return cached
+        }
         let font = ReviewWorkspaceStyle.nativeFont(10.5)
         let textWidth = (reference.label as NSString).size(
             withAttributes: [.font: font]
         ).width
-        return min(85, max(12, ceil(textWidth)))
+        let resolved = min(85, max(12, ceil(textWidth)))
+        if Self.widthCache.count >= 512 {
+            Self.widthCache.removeAll(keepingCapacity: true)
+        }
+        Self.widthCache[reference.label] = resolved
+        return resolved
     }
 }
 

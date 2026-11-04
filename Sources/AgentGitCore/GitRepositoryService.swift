@@ -254,6 +254,55 @@ private actor GitHeadCommitDateCache {
     }
 }
 
+private struct GitHistoryReferencesCacheKey: Hashable, Sendable {
+    let worktreePath: String
+    let headOID: String?
+    let branchRef: String?
+}
+
+private actor GitHistoryReferencesCache {
+    private struct Entry {
+        let references: [String: [String]]
+        let storedAt: Date
+    }
+
+    private static let maximumEntryCount = 64
+    private static let paginationTTL: TimeInterval = 60
+    private var entries: [GitHistoryReferencesCacheKey: Entry] = [:]
+    private var inFlight: [GitHistoryReferencesCacheKey: Task<[String: [String]], any Error>] = [:]
+
+    func load(
+        for key: GitHistoryReferencesCacheKey,
+        allowsCachedSnapshot: Bool,
+        loader: @Sendable @escaping () async throws -> [String: [String]]
+    ) async throws -> [String: [String]] {
+        if allowsCachedSnapshot,
+           let entry = entries[key],
+           Date().timeIntervalSince(entry.storedAt) <= Self.paginationTTL {
+            return entry.references
+        }
+        if let existing = inFlight[key] {
+            return try await existing.value
+        }
+        let task = Task {
+            try await loader()
+        }
+        inFlight[key] = task
+        do {
+            let value = try await task.value
+            inFlight[key] = nil
+            if entries.count >= Self.maximumEntryCount, entries[key] == nil {
+                entries.removeAll(keepingCapacity: true)
+            }
+            entries[key] = Entry(references: value, storedAt: Date())
+            return value
+        } catch {
+            inFlight[key] = nil
+            throw error
+        }
+    }
+}
+
 private struct GitFileSystemFingerprint: Hashable, Sendable {
     let path: String
     let modificationDate: Date?
@@ -342,6 +391,7 @@ public struct GitRepositoryService: Sendable {
     private let branchStatusCache: GitBranchStatusCache
     private let diffStatCache: GitDiffStatCache
     private let headCommitDateCache: GitHeadCommitDateCache
+    private let historyReferencesCache: GitHistoryReferencesCache
     private let discardRecoveryStore: GitDiscardRecoveryStore
 
     public init(
@@ -353,6 +403,7 @@ public struct GitRepositoryService: Sendable {
         self.branchStatusCache = GitBranchStatusCache()
         self.diffStatCache = GitDiffStatCache()
         self.headCommitDateCache = GitHeadCommitDateCache()
+        self.historyReferencesCache = GitHistoryReferencesCache()
         self.discardRecoveryStore = discardRecoveryStore
     }
 
@@ -1163,12 +1214,7 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
-            "--raw",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--diff-merges=off",
-            "--root",
+            "--no-patch",
             "--no-decorate",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
@@ -1177,7 +1223,10 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
-        async let loadedReferences = historyReferences(for: worktree)
+        async let loadedReferences = historyReferences(
+            for: worktree,
+            allowsCachedSnapshot: offset > 0
+        )
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
@@ -1186,7 +1235,7 @@ public struct GitRepositoryService: Sendable {
             timeout: Self.repositoryScanTimeout
         )
         let references = try await loadedReferences
-        let loaded = try GitLogParser.parse(data, includesRawDiffs: true).map {
+        let loaded = try GitLogParser.parse(data).map {
             $0.withReferenceNames(references[$0.oid] ?? [])
         }
         let commits = Array(loaded.prefix(pageSize))
@@ -1233,7 +1282,10 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
-        async let loadedReferences = historyReferences(for: worktree)
+        async let loadedReferences = historyReferences(
+            for: worktree,
+            allowsCachedSnapshot: true
+        )
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
@@ -1297,12 +1349,7 @@ public struct GitRepositoryService: Sendable {
         var arguments = [
             "log",
             "-z",
-            "--raw",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--diff-merges=off",
-            "--root",
+            "--no-patch",
             "--no-decorate",
             "--format=\(Self.historyFormat)",
             "--max-count=\(pageSize + 1)",
@@ -1319,7 +1366,10 @@ public struct GitRepositoryService: Sendable {
         if let revision {
             arguments.append(revision)
         }
-        async let loadedReferences = historyReferences(for: worktree)
+        async let loadedReferences = historyReferences(
+            for: worktree,
+            allowsCachedSnapshot: offset > 0
+        )
         let data = try await runner.run(
             arguments: arguments,
             workingDirectory: worktree.rootURL,
@@ -1328,7 +1378,7 @@ public struct GitRepositoryService: Sendable {
             timeout: Self.repositoryScanTimeout
         )
         let references = try await loadedReferences
-        let loaded = try GitLogParser.parse(data, includesRawDiffs: true).map {
+        let loaded = try GitLogParser.parse(data).map {
             $0.withReferenceNames(references[$0.oid] ?? [])
         }
         let commits = Array(loaded.prefix(pageSize))
@@ -1339,52 +1389,88 @@ public struct GitRepositoryService: Sendable {
         )
     }
 
-    private func historyReferences(for worktree: GitWorktree) async throws -> [String: [String]] {
-        let data = try await runner.run(
-            arguments: [
-                "for-each-ref",
-                "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00",
-                "refs/heads", "refs/remotes", "refs/tags", "refs/stash"
-            ],
-            workingDirectory: worktree.rootURL,
-            maximumOutputBytes: Self.maximumHistoryOutputBytes,
-            environment: ["GIT_NO_LAZY_FETCH": "1"],
-            timeout: Self.repositoryScanTimeout
+    private func historyReferences(
+        for worktree: GitWorktree,
+        allowsCachedSnapshot: Bool = false
+    ) async throws -> [String: [String]] {
+        let cacheKey = GitHistoryReferencesCacheKey(
+            worktreePath: worktree.rootURL.standardizedFileURL.path,
+            headOID: worktree.headOID,
+            branchRef: worktree.branchRef
         )
+        let runner = self.runner
+        return try await historyReferencesCache.load(
+            for: cacheKey,
+            allowsCachedSnapshot: allowsCachedSnapshot
+        ) {
+            let data = try await runner.run(
+                arguments: [
+                    "for-each-ref",
+                    "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00",
+                    "refs/heads", "refs/remotes", "refs/tags", "refs/stash"
+                ],
+                workingDirectory: worktree.rootURL,
+                maximumOutputBytes: Self.maximumHistoryOutputBytes,
+                environment: ["GIT_NO_LAZY_FETCH": "1"],
+                timeout: Self.repositoryScanTimeout
+            )
+            var (references, hasAttachedHead) = try Self.parseHistoryReferences(data)
+            if !hasAttachedHead {
+                let headData = try await runner.run(
+                    arguments: ["rev-parse", "--verify", "HEAD"],
+                    workingDirectory: worktree.rootURL,
+                    maximumOutputBytes: 1_024,
+                    environment: ["GIT_NO_LAZY_FETCH": "1"],
+                    timeout: Self.quickMetadataTimeout
+                )
+                let oid = String(decoding: headData, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard Self.isFullObjectID(oid) else {
+                    throw GitLogParseError.malformedRecord(oid)
+                }
+                references[oid, default: []].append("HEAD")
+            }
+            return references
+        }
+    }
+
+    private static func parseHistoryReferences(
+        _ data: Data
+    ) throws -> (references: [String: [String]], hasAttachedHead: Bool) {
         var references: [String: [String]] = [:]
         var hasAttachedHead = false
-        for record in data.split(separator: 10) {
-            guard let text = String(data: Data(record), encoding: .utf8) else {
-                throw GitLogParseError.invalidUTF8
+        try data.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            var lineStart = 0
+            while lineStart < bytes.count {
+                var lineEnd = lineStart
+                while lineEnd < bytes.count, bytes[lineEnd] != 10 {
+                    lineEnd += 1
+                }
+                if lineEnd > lineStart {
+                    let record = UnsafeBufferPointer(rebasing: bytes[lineStart..<lineEnd])
+                    guard let text = String(bytes: record, encoding: .utf8) else {
+                        throw GitLogParseError.invalidUTF8
+                    }
+                    let fields = text.split(separator: "\0", omittingEmptySubsequences: false)
+                    guard fields.count == 5, isFullObjectID(String(fields[0])) else {
+                        throw GitLogParseError.malformedRecord(text)
+                    }
+                    let oid = fields[1].isEmpty ? String(fields[0]) : String(fields[1])
+                    let ref = String(fields[2])
+                    let name: String
+                    if fields[3] == "*" {
+                        name = "HEAD -> \(ref)"
+                        hasAttachedHead = true
+                    } else {
+                        name = ref.hasPrefix("refs/tags/") ? "tag: \(ref)" : ref
+                    }
+                    references[oid, default: []].append(name)
+                }
+                lineStart = lineEnd + 1
             }
-            let fields = text.split(separator: "\0", omittingEmptySubsequences: false)
-            guard fields.count == 5, Self.isFullObjectID(String(fields[0])) else {
-                throw GitLogParseError.malformedRecord(text)
-            }
-            let oid = fields[1].isEmpty ? String(fields[0]) : String(fields[1])
-            let ref = String(fields[2])
-            let name: String
-            if fields[3] == "*" {
-                name = "HEAD -> \(ref)"
-                hasAttachedHead = true
-            } else {
-                name = ref.hasPrefix("refs/tags/") ? "tag: \(ref)" : ref
-            }
-            references[oid, default: []].append(name)
         }
-        if !hasAttachedHead {
-            let headData = try await runner.run(
-                arguments: ["rev-parse", "--verify", "HEAD"],
-                workingDirectory: worktree.rootURL,
-                maximumOutputBytes: 1_024,
-                environment: ["GIT_NO_LAZY_FETCH": "1"],
-                timeout: Self.quickMetadataTimeout
-            )
-            let oid = String(decoding: headData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard Self.isFullObjectID(oid) else { throw GitLogParseError.malformedRecord(oid) }
-            references[oid, default: []].append("HEAD")
-        }
-        return references
+        return (references, hasAttachedHead)
     }
 
     public func loadCommitMessage(

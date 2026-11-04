@@ -1070,6 +1070,13 @@ func projectHeaderHelpText(_ state: ProjectState) -> String {
 }
 
 struct WorktreeRow: View {
+    private static let activityDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     @Environment(AppModel.self) private var model
     let snapshot: GitWorktreeSnapshot
     var isPinned = false
@@ -1077,6 +1084,8 @@ struct WorktreeRow: View {
 
     var body: some View {
         let linkedTitle = linkedSessionTitle
+        let sessionLabel = linkedTitle ?? "No linked session"
+        let detailText = makeDetails(sessionLabel: sessionLabel)
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(snapshot.worktree.displayName)
@@ -1112,13 +1121,11 @@ struct WorktreeRow: View {
             alignment: .top
         )
         .contentShape(Rectangle())
-        .help(details)
+        .help(detailText)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(snapshot.worktree.displayName), \(sessionTitle)")
-        .accessibilityHint(details)
+        .accessibilityLabel("\(snapshot.worktree.displayName), \(sessionLabel)")
+        .accessibilityHint(detailText)
     }
-
-    private var sessionTitle: String { linkedSessionTitle ?? "No linked session" }
 
     private var linkedSessionTitle: String? {
         let association = model.agentAssociations.creatorAssociation(forWorktreeAt: snapshot.id)
@@ -1128,8 +1135,8 @@ struct WorktreeRow: View {
             .split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
-    private var details: String {
-        var sections = [sessionTitle, worktreeRowHelpText(snapshot)]
+    private func makeDetails(sessionLabel: String) -> String {
+        var sections = [sessionLabel, worktreeRowHelpText(snapshot)]
         if snapshot.status.changedFileCount > 0 {
             sections.append(countedLabel(snapshot.status.changedFileCount, singular: "changed file"))
         }
@@ -1137,9 +1144,9 @@ struct WorktreeRow: View {
             sections.append("+\(snapshot.diffStat.addedLineCount), −\(snapshot.diffStat.deletedLineCount)")
         }
         if snapshot.lastActivityAt != .distantPast {
-            sections.append("Last activity: \(snapshot.lastActivityAt.formatted(date: .abbreviated, time: .shortened))")
+            sections.append("Last activity: \(Self.activityDateFormatter.string(from: snapshot.lastActivityAt))")
         }
-        if model.isWorktreePinned(id: snapshot.id) { sections.append("Pinned to top of project") }
+        if isPinned { sections.append("Pinned to top of project") }
         return sections.joined(separator: "\n")
     }
 }

@@ -166,11 +166,11 @@ public enum DiffSyntaxHighlighter {
     ) -> Bool {
         switch language {
         case .swift, .cLike, .json:
-            matches(text, at: index, token: "//")
+            matches2(text, at: index, 0x2F, 0x2F)
         case .python, .shell, .yaml:
             text.character(at: index) == 0x23
         case .sql:
-            matches(text, at: index, token: "--")
+            matches2(text, at: index, 0x2D, 0x2D)
         case .markdown, .plain:
             false
         }
@@ -183,7 +183,7 @@ public enum DiffSyntaxHighlighter {
     ) -> Bool {
         switch language {
         case .swift, .cLike, .json:
-            matches(text, at: index, token: "/*")
+            matches2(text, at: index, 0x2F, 0x2A)
         case .plain, .python, .shell, .yaml, .markdown, .sql:
             false
         }
@@ -221,7 +221,7 @@ public enum DiffSyntaxHighlighter {
     private static func blockCommentEnd(_ text: NSString, from start: Int) -> Int {
         var index = start
         while index + 1 < text.length {
-            if matches(text, at: index, token: "*/") {
+            if matches2(text, at: index, 0x2A, 0x2F) {
                 return index + 2
             }
             index += 1
@@ -314,12 +314,15 @@ public enum DiffSyntaxHighlighter {
             || unit == 0x58
     }
 
-    private static func matches(_ text: NSString, at index: Int, token: String) -> Bool {
-        let tokenLength = (token as NSString).length
-        guard index + tokenLength <= text.length else {
-            return false
-        }
-        return text.substring(with: NSRange(location: index, length: tokenLength)) == token
+    private static func matches2(
+        _ text: NSString,
+        at index: Int,
+        _ first: unichar,
+        _ second: unichar
+    ) -> Bool {
+        index + 1 < text.length
+            && text.character(at: index) == first
+            && text.character(at: index + 1) == second
     }
 
     private static func keywords(for language: GitSyntaxLanguage) -> Set<String> {

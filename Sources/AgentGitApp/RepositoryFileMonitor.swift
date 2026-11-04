@@ -53,7 +53,10 @@ struct RepositoryWatchIndex: Sendable {
     private let worktreeIDsByRefMetadataPath: [String: Set<GitWorktree.ID>]
     private let projectIDs: Set<GitProject.ID>
 
-    init(projects: [ProjectState]) {
+    init(
+        projects: [ProjectState],
+        activeWorkingTreeIDs: Set<GitWorktree.ID>? = nil
+    ) {
         var IDsByPath: [String: Set<GitWorktree.ID>] = [:]
         var worktreeRootPaths: Set<String> = []
         var primaryWorktreeCandidates: [String: GitWorktree.ID] = [:]
@@ -69,13 +72,23 @@ struct RepositoryWatchIndex: Sendable {
             var metadataPathsByWorktree: [Set<String>] = []
             for worktree in snapshot.worktrees {
                 let rootPath = worktree.worktree.rootURL.standardizedFileURL.path
-                worktreeRootPaths.insert(rootPath)
                 let watchURLs = worktree.eventWatchURLs.isEmpty
                     ? [worktree.worktree.rootURL]
                     : worktree.eventWatchURLs
+                let hasSeparateMetadataPaths = watchURLs.contains {
+                    $0.standardizedFileURL.path != rootPath
+                }
+                let watchesWorkingTreeRoot = (activeWorkingTreeIDs?.contains(worktree.id) ?? true)
+                    || !hasSeparateMetadataPaths
+                if watchesWorkingTreeRoot {
+                    worktreeRootPaths.insert(rootPath)
+                }
                 var metadataPaths: Set<String> = []
                 for url in watchURLs {
                     let watchPath = url.standardizedFileURL.path
+                    if watchPath == rootPath, !watchesWorkingTreeRoot {
+                        continue
+                    }
                     IDsByPath[watchPath, default: []].insert(worktree.id)
                     if watchPath != rootPath {
                         metadataPaths.insert(watchPath)
@@ -351,8 +364,21 @@ final class RepositoryFileMonitor: @unchecked Sendable {
             callbackBox.takeUnretainedValue().update(index: index)
             return
         }
-        stop()
-        cursor.restart(from: acknowledgedEventID)
+        let cutoverEventID: FSEventStreamEventId
+        if let existingStream = stream {
+            let currentEventID = FSEventsGetCurrentEventId()
+            let queuedEventID = FSEventStreamFlushAsync(existingStream)
+            stop()
+            if queuedEventID == 0 || cursor.sinceWhen >= queuedEventID {
+                cutoverEventID = max(acknowledgedEventID, currentEventID)
+            } else {
+                cutoverEventID = max(acknowledgedEventID, cursor.sinceWhen)
+            }
+        } else {
+            stop()
+            cutoverEventID = acknowledgedEventID
+        }
+        cursor.restart(from: cutoverEventID)
         guard !nextWatchedPaths.isEmpty else {
             return
         }

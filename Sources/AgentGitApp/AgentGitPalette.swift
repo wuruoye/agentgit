@@ -50,13 +50,12 @@ enum AgentGitTypography {
             ?? .systemFont(ofSize: size, weight: interfaceWeight)
     }
 
-    static var code: NSFont {
-        NSFont(name: "Menlo", size: codeSize)
-            ?? NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
-    }
-    static var codeEmphasized: NSFont {
-        NSFontManager.shared.convert(code, toHaveTrait: .boldFontMask)
-    }
+    @MainActor static let code: NSFont = NSFont(name: "Menlo", size: codeSize)
+        ?? NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
+    @MainActor static let codeEmphasized: NSFont = NSFontManager.shared.convert(
+        code,
+        toHaveTrait: .boldFontMask
+    )
 }
 
 extension Font {
