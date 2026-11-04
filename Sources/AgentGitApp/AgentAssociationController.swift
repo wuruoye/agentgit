@@ -16,6 +16,7 @@ final class AgentAssociationController {
     private var associationNotificationToken: NSObjectProtocol?
     private var auditNotificationToken: NSObjectProtocol?
     private var navigationRefreshTask: Task<Void, Never>?
+    private var contextDeliveryTask: Task<Void, Never>?
     private var navigationAssociationIDsInFlight: Set<AgentAssociation.ID>?
     private var navigationGeneration = 0
     private var hasStarted = false
@@ -359,6 +360,7 @@ final class AgentAssociationController {
         attaching context: String?,
         onDelivery: ((AgentContextDelivery) -> Void)? = nil
     ) {
+        contextDeliveryTask?.cancel()
         guard let resolution = navigationResolutions[association.id] else {
             resolveAndOpen(association, context: context, onDelivery: onDelivery)
             return
@@ -495,9 +497,14 @@ final class AgentAssociationController {
     ) {
         let navigationResolver = navigationResolver
         Task {
+            let started = ContinuousClock.now
             let resolution = await Task.detached(priority: .userInitiated) {
                 navigationResolver.resolve([association])[association.id]
             }.value
+            AgentGitDiagnostics.shared.record("agent.session.resolve", fields: [
+                "provider": association.provider.rawValue,
+                "elapsed": String(describing: ContinuousClock.now - started)
+            ])
             guard resolvableAssociations.contains(where: { $0.id == association.id }),
                   let resolution else {
                 onDelivery?(.failed("This agent session is no longer linked to the worktree."))
@@ -539,18 +546,50 @@ final class AgentAssociationController {
             return
         }
         copyToPasteboard(context)
-        onDelivery?(.copiedToPasteboard)
-        // 宿主一打开就会挡住 AgentGit，留一点时间让“已复制”的提示被看到。
-        Task {
-            try? await Task.sleep(for: .milliseconds(700))
-            if let failure = openSessionURL(handoff.url, provider: association.provider) {
-                onDelivery?(.failed(failure))
-            }
+        let canFillClaude = association.provider == .claude && ClaudeComposerHandoff.requestAccessIfNeeded()
+        let activatedExistingSession = canFillClaude && ClaudeComposerHandoff.activateExistingSession(handoff.url)
+        if !activatedExistingSession,
+           let failure = openSessionURL(handoff.url, provider: association.provider) {
+            onDelivery?(.failed(failure))
+            return
+        }
+        guard canFillClaude else {
+            onDelivery?(.copiedToPasteboard)
+            return
+        }
+        contextDeliveryTask = Task {
+            let started = ContinuousClock.now
+            let filled = await ClaudeComposerHandoff.fill(context, sessionURL: handoff.url)
+            guard !Task.isCancelled else { return }
+            AgentGitDiagnostics.shared.record("agent.context.delivery", fields: [
+                "provider": association.provider.rawValue,
+                "delivery": filled ? "prefilled" : "clipboard",
+                "elapsed": String(describing: ContinuousClock.now - started)
+            ])
+            onDelivery?(filled ? .prefilled : .copiedToPasteboard)
         }
     }
 
     /// 失败时返回错误说明。
     private func openSessionURL(_ url: URL, provider: AgentProvider) -> String? {
+        let started = ContinuousClock.now
+        defer {
+            AgentGitDiagnostics.shared.record("agent.session.open", fields: [
+                "provider": provider.rawValue,
+                "elapsed": String(describing: ContinuousClock.now - started)
+            ])
+        }
+        if provider == .claude,
+           let appURL = NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop")
+            .first?.bundleURL {
+            NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                guard let error else { return }
+                let message = error.localizedDescription
+                Task { @MainActor in self?.errorMessage = message }
+            }
+            errorMessage = nil
+            return nil
+        }
         guard NSWorkspace.shared.open(url) else {
             let message = "macOS did not accept the \(provider.displayName) session link."
             errorMessage = message

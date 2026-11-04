@@ -4,7 +4,7 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// 仓库级的自定义打开方式，出现在 worktree 右键菜单里，所有 worktree 共用。
+/// 仓库级的自定义打开方式，出现在 worktree 和文件右键菜单里，所有 worktree 共用。
 struct WorktreeOpenWithEntry: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     /// 菜单里显示的名字，留空时用应用名。
@@ -71,12 +71,15 @@ struct WorktreeOpenWithEntry: Codable, Equatable, Identifiable, Sendable {
         return identifier.isEmpty ? "Application" : identifier
     }
 
-    func menuTitle(applicationURL: URL?) -> String {
+    func menuTitle(applicationURL: URL?, opensSelectedFile: Bool = false) -> String {
         let customName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !customName.isEmpty {
             return "Open with \(customName)"
         }
         let applicationName = applicationName(for: applicationURL)
+        if opensSelectedFile {
+            return "Open with \(applicationName)"
+        }
         let path = (try? WorktreeOpenWithPath.normalize(relativePath))
             ?? relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         return path.isEmpty

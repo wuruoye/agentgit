@@ -470,8 +470,8 @@ struct AgentGitSettingsView: View {
         AgentGitSettingsCard {
             VStack(alignment: .leading, spacing: 12) {
                 settingsCardHeading(
-                    "Worktree Context Menu",
-                    detail: "Applications are saved separately for each repository and shared by its worktrees. They appear after Open with Visual Studio Code when you right-click a worktree.",
+                    "Worktree and File Context Menus",
+                    detail: "Applications are saved separately for each repository and shared by its worktrees. They appear when you right-click a worktree, file, or code line.",
                     image: "arrow.up.forward.app"
                 )
                 if let project = openWithProject {
@@ -490,7 +490,7 @@ struct AgentGitSettingsView: View {
                         addOpenWithApplication(to: project)
                     }
 
-                    Text(verbatim: "Path is a file or folder relative to the root of the worktree you right-click, for example MMFlutter/CrossPlatform or App.xcworkspace. Leave it empty to open the worktree root. Absolute paths, “..”, and symbolic links that lead outside the worktree are rejected. Changes are saved automatically.")
+                    Text(verbatim: "For worktrees, Path is a file or folder relative to the worktree root, for example MMFlutter/CrossPlatform or App.xcworkspace. Leave it empty to open the worktree root. Absolute paths, “..”, and symbolic links that lead outside the worktree are rejected. For files and code lines, the selected file is opened regardless of Path. Android Studio opens it in its existing project when available and navigates to the clicked line. Changes are saved automatically.")
                         .font(.agentGitInterface(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

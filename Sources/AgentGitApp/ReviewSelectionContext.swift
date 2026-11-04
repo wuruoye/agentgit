@@ -6,6 +6,7 @@ import Foundation
 struct DiffSelectionExcerpt: Equatable {
     let fileID: String
     let lines: [GitDiffLine]
+    var includesSelectedCode = true
 }
 
 /// 选中代码后可执行的操作。diff 视图只负责显示按钮、回传选区，新操作在工作区里加一项即可。
@@ -107,6 +108,17 @@ struct ReviewSelectionContext: Equatable {
         """
     }
 
+    /// 第一行留给用户输入；此处生成最终文本，交付时原样粘贴。
+    func agentDraft(includingCode: Bool) -> String {
+        var parts = ["", "文件：\(filePath)", "行号：\(lineRangeDescription)"]
+        if includingCode, !lines.isEmpty {
+            let code = quotedCode
+            let fence = Self.fence(for: code)
+            parts.append("\(fence)diff\n\(code)\n\(fence)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
     static func markedText(_ line: GitDiffLine) -> String {
         switch line.kind {
         case .addition: "+" + line.content
@@ -191,7 +203,7 @@ enum AgentContextDelivery: Equatable {
 }
 
 /// Codex 的线程链接支持 `prompt` 参数，打开后填进输入框、不自动发送；Claude Desktop 打开
-/// 已有会话的链接不接收上下文文字，先把文字复制到剪贴板。
+/// 已有会话的链接不接收上下文文字，先复制到剪贴板，再由控制器通过辅助功能填写。
 struct AgentSessionContextHandoff: Equatable {
     /// 链接太长时宿主和系统都可能截断，超过这个字符数改走剪贴板。
     static let maximumPrefillLength = 32_000

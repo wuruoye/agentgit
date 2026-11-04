@@ -1271,6 +1271,11 @@ struct IntegratedReviewWorkspace: View {
         model.reviewStates.save(review, for: stateKey)
     }
 
+    private var fileOpenWithEntries: [WorktreeOpenWithEntry] {
+        guard let projectID = model.projectID(for: snapshot.id) else { return [] }
+        return model.openWithSettings.entries(for: projectID)
+    }
+
     @ViewBuilder
     private func fileUtilityMenu(for item: IntegratedFileItem) -> some View {
         if let mutationMode = primaryPendingMutationMode(
@@ -1298,6 +1303,16 @@ struct IntegratedReviewWorkspace: View {
             )
         }
         .disabled(!canOpen || Self.visualStudioCodeURL == nil)
+        ForEach(fileOpenWithEntries) { entry in
+            let applicationURL = entry.applicationURL()
+            Button(entry.menuTitle(applicationURL: applicationURL, opensSelectedFile: true)) {
+                performFileUtilityAction(
+                    fileID: item.id.stackID,
+                    action: .openWithApplication(entry.id)
+                )
+            }
+            .disabled(!canOpen || applicationURL == nil)
+        }
         Button("Reveal in Finder") {
             performFileUtilityAction(fileID: item.id.stackID, action: .revealInFinder)
         }
@@ -1884,6 +1899,7 @@ struct IntegratedReviewWorkspace: View {
                         : "Loading diff…",
                     mutationActionsEnabled: allowsPendingMutations,
                     loadingContextGapIDs: loadingContextGapIDs,
+                    fileOpenWithEntries: fileOpenWithEntries,
                     command: diffCommand,
                     onFocusFile: focusFileFromDiff,
                     onToggleFile: toggleFile,
@@ -2143,7 +2159,7 @@ struct IntegratedReviewWorkspace: View {
         if let session = sessions.first, sessions.count == 1 {
             sendHelp = session.provider == .codex
                 ? "Open the Codex session for this worktree with the selection in its composer"
-                : "Copy the selection and open the Claude session for this worktree"
+                : "Open the Claude session for this worktree and fill its composer with the selection"
         } else if sessions.isEmpty {
             sendHelp = "No agent session is linked to this worktree"
         } else {
@@ -2195,7 +2211,8 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             let provider = session.provider.displayName
-            model.agentAssociations.open(session, attaching: context.text) { delivery in
+            let draft = context.agentDraft(includingCode: excerpt.includesSelectedCode)
+            model.agentAssociations.open(session, attaching: draft) { delivery in
                 switch delivery {
                 case .prefilled:
                     showSelectionNotice(.init(
@@ -2292,6 +2309,12 @@ struct IntegratedReviewWorkspace: View {
                 return
             }
             openInVisualStudioCode(fileURL, applicationURL: applicationURL)
+        case let .openWithApplication(entryID, lineNumber):
+            guard existingWorkingFileURL(for: item) != nil,
+                  let entry = fileOpenWithEntries.first(where: { $0.id == entryID }) else {
+                return
+            }
+            openFile(fileURL, with: entry, lineNumber: lineNumber)
         case .revealInFinder:
             revealInFinder(nearestExistingURL(from: fileURL))
         case .copyRelativePath:

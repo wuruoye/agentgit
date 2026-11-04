@@ -42,6 +42,7 @@ enum DiffStackFileUtilityAction: Hashable {
     case openInReview
     case openFile
     case openInVisualStudioCode
+    case openWithApplication(UUID, lineNumber: Int? = nil)
     case revealInFinder
     case copyRelativePath
     case copyAbsolutePath
@@ -450,6 +451,7 @@ struct DiffStackView: NSViewRepresentable {
     let loadingMessage: String
     let mutationActionsEnabled: Bool
     var loadingContextGapIDs: Set<String> = []
+    var fileOpenWithEntries: [WorktreeOpenWithEntry] = []
     let command: DiffStackCommand?
     let onFocusFile: (String) -> Void
     let onToggleFile: (String) -> Void
@@ -490,6 +492,7 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.onShowHunkHistory = onShowHunkHistory
         scrollView.onExpandContext = onExpandContext
         scrollView.onFileUtilityAction = onFileUtilityAction
+        scrollView.fileOpenWithEntries = fileOpenWithEntries
         scrollView.onFileAction = onFileAction
         scrollView.onSelectionAction = onSelectionAction
         scrollView.onAllChangesAction = onAllChangesAction
@@ -518,6 +521,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         static let imageHeight: CGFloat = 360
         static let contextEdgeHeight = DiffHunkCellView.gapHeight
         static let fileContextToggleHeight: CGFloat = 22
+        static let fileFooterHeight: CGFloat = 30
         static let fileHeight = ReviewWorkspaceStyle.fileHeaderHeight
         static let folderHeight: CGFloat = 24
         static let groupHeight: CGFloat = 32
@@ -560,6 +564,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     var onShowHunkHistory: ((String, Int, Int) -> Void)?
     var onExpandContext: ((String, String) -> Void)?
     var onFileUtilityAction: ((String, DiffStackFileUtilityAction) -> Void)?
+    var fileOpenWithEntries: [WorktreeOpenWithEntry] = []
     var onFileAction: ((String, GitPendingSelectionAction) -> Void)?
     var onSelectionAction: ((String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void)?
     var onSelectionContextAction: ((String, String?, DiffSelectionExcerpt) -> Void)?
@@ -656,6 +661,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var isApplyingPresentationUpdate = false
     private var inactiveScrollAnchor: (key: ReviewStateKey, offset: CGFloat)?
     private var codeSelection: DiffCodeSelection?
+    private var rowSelectionIncludesCode = true
     private let selectionActionBar = DiffSelectionActionBar()
     private var selectionActionAnchor: SelectionActionAnchor?
     /// 拖选过程中不显示操作条，松开鼠标后再按最终选区出现。
@@ -1135,6 +1141,12 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 }
             )
             return cell
+        case let .fileFooter(fileID):
+            let cell = reusableCell(DiffFileFooterCellView.self, identifier: DiffFileFooterCellView.identifier)
+            cell.update(fileID: fileID) { [weak self] fileID in
+                self?.handleFooterCollapse(fileID: fileID)
+            }
+            return cell
         case let .fileContextToggle(fileID, showsWholeFile, isLoading):
             let cell = reusableCell(
                 DiffFileContextToggleCellView.self,
@@ -1198,6 +1210,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        rowSelectionIncludesCode = true
         publishHunkPosition()
         refreshSelectionActionBar()
         let visible = tableView.rows(in: tableView.visibleRect)
@@ -1221,6 +1234,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .hunk(hunk): hunk.contextGap == nil ? Metrics.hunkHeight : DiffHunkCellView.gapHeight
         case .contextEdge: Metrics.contextEdgeHeight
         case .fileContextToggle: Metrics.fileContextToggleHeight
+        case .fileFooter: Metrics.fileFooterHeight
         case .line, .sideBySide: Metrics.lineHeight
         case .image: Metrics.imageHeight
         case .note: Metrics.noteHeight
@@ -1233,7 +1247,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         return switch rows[row] {
         case .hunk, .line, .sideBySide: true
-        case .summary, .group, .folder, .file, .fileContextToggle, .contextEdge,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .contextEdge,
              .image, .note:
             false
         }
@@ -1581,7 +1595,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                             hunkID: hunkID,
                             mutationMode: granularMutationMode
                         )
-                    case .summary, .group, .folder, .file, .fileContextToggle,
+                    case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter,
                          .hunk, .contextEdge, .image, .note:
                         break
                     }
@@ -1613,6 +1627,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         guard file.isExpanded else {
             return
         }
+        defer { rows.append(.fileFooter(fileID: file.id)) }
         guard let diff = file.diff else {
             rows.append(.note(loadingMessage))
             return
@@ -1825,7 +1840,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                         displayedColumnCount(pair.new?.content ?? "")
                     )
                 )
-            case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+            case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
                  .contextEdge, .image, .note:
                 break
             }
@@ -2005,7 +2020,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .line(_, _, fileID, _, _),
              let .sideBySide(_, _, fileID, _, _):
             fileID
-        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
              .contextEdge, .image, .note:
             nil
         }
@@ -2173,7 +2188,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 (hunkID == nil || $0.kind != .context)
                     && ($0.oldLineNumber != nil || $0.newLineNumber != nil)
             }
-        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
              .contextEdge, .image, .note:
             return nil
         }
@@ -2260,8 +2275,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         tableView.rowClickHandler = { [weak self] row in
             self?.handleClick(onRow: row) ?? false
         }
-        tableView.dynamicMenuProvider = { [weak self] row, selectedRows in
-            self?.contextMenu(clickedRow: row, selectedRows: selectedRows)
+        tableView.dynamicMenuProvider = { [weak self] row, selectedRows, hadSelection in
+            self?.contextMenu(clickedRow: row, selectedRows: selectedRows, includesSelectedCode: hadSelection)
         }
         tableView.hunkNavigationHandler = { [weak self] offset in
             self?.moveHunk(by: offset) ?? false
@@ -2570,6 +2585,13 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         onToggleFile?(fileID)
     }
 
+    private func handleFooterCollapse(fileID: String) {
+        guard let index = fileSectionIndexByID[fileID], fileSections[index].file.isExpanded else {
+            return
+        }
+        handleStickyClick(fileID: fileID)
+    }
+
     private func handleClick(onRow row: Int) -> Bool {
         guard rows.indices.contains(row) else {
             return false
@@ -2585,7 +2607,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .group(group, _):
             onToggleGroup?(group.id)
             return true
-        case .summary, .hunk, .line, .sideBySide, .fileContextToggle,
+        case .summary, .hunk, .line, .sideBySide, .fileContextToggle, .fileFooter,
              .contextEdge, .image, .note:
             focusFile(atRow: row)
             return false
@@ -2622,7 +2644,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         return nil
     }
 
-    func contextMenu(clickedRow: Int, selectedRows: IndexSet) -> NSMenu {
+    func contextMenu(clickedRow: Int, selectedRows: IndexSet, includesSelectedCode: Bool? = nil) -> NSMenu {
+        if let includesSelectedCode {
+            rowSelectionIncludesCode = includesSelectedCode && rowSelectionIncludesCode
+        }
         focusFile(atRow: clickedRow)
         // 拖出来的跨行选区没有走表格的行选中，右键时要按选区所在的行来出菜单。
         let actionRows = codeSelectionRows(containing: clickedRow) ?? selectedRows
@@ -2662,6 +2687,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 to: menu,
                 isEnabled: file.canOpenWorkingFile && file.canOpenInVisualStudioCode
             )
+            addCustomOpenWithItems(for: file, to: menu)
             addMenuItem(
                 "Reveal in Finder",
                 command: .fileUtility(file.id, .revealInFinder),
@@ -2746,6 +2772,17 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
 
         case .line, .sideBySide:
             addSelectionActionItems(to: menu, clickedRow: clickedRow)
+            if !fileOpenWithEntries.isEmpty,
+               let section = fileSection(containingRow: clickedRow) {
+                if !menu.items.isEmpty {
+                    menu.addItem(.separator())
+                }
+                addCustomOpenWithItems(
+                    for: section.file,
+                    lineNumber: workingLineNumber(atRow: clickedRow, file: section.file),
+                    to: menu
+                )
+            }
             guard let selection = selectedChangedLines(
                 clickedRow: clickedRow,
                 selectedRows: actionRows
@@ -2777,11 +2814,48 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                 )
             }
 
-        case .summary, .group, .folder, .fileContextToggle, .contextEdge, .image,
+        case .summary, .group, .folder, .fileContextToggle, .fileFooter, .contextEdge, .image,
              .note:
             break
         }
         return menu
+    }
+
+    private func addCustomOpenWithItems(
+        for file: DiffStackFile,
+        lineNumber: Int? = nil,
+        to menu: NSMenu
+    ) {
+        for entry in fileOpenWithEntries {
+            let applicationURL = entry.applicationURL()
+            addMenuItem(
+                entry.menuTitle(applicationURL: applicationURL, opensSelectedFile: true),
+                command: .fileUtility(file.id, .openWithApplication(entry.id, lineNumber: lineNumber)),
+                to: menu,
+                isEnabled: file.canOpenWorkingFile && applicationURL != nil
+            )
+        }
+    }
+
+    /// 打开工作区文件时使用新行号；删除行定位到删除位置附近仍存在的行。
+    private func workingLineNumber(atRow row: Int, file: DiffStackFile) -> Int? {
+        guard let line = representativeLine(in: rows[row], fileID: file.id) else { return nil }
+        if let lineNumber = line.newLineNumber {
+            return lineNumber
+        }
+        guard let hunk = file.diff?.hunks.first(where: { hunk in
+            hunk.lines.contains { $0.id == line.id }
+        }) else { return nil }
+        var nextLineNumber = max(1, hunk.newStart + (hunk.newCount == 0 ? 1 : 0))
+        for candidate in hunk.lines {
+            if candidate.id == line.id {
+                return nextLineNumber
+            }
+            if let lineNumber = candidate.newLineNumber {
+                nextLineNumber = lineNumber + 1
+            }
+        }
+        return nil
     }
 
     private func contextMenu(forFileID fileID: String) -> NSMenu? {
@@ -2830,7 +2904,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                         return line.id
                     }
                 )
-            case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+            case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
                  .contextEdge, .image, .note:
                 continue
             }
@@ -3053,7 +3127,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             }
             let paneX = cellPoint.x.truncatingRemainder(dividingBy: paneWidth)
             return paneX >= Metrics.sideCodeLeading ? hunkID : nil
-        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
              .contextEdge, .image, .note:
             return nil
         }
@@ -3073,7 +3147,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             case let .line(_, _, _, candidateHunkID, _),
                  let .sideBySide(_, _, _, candidateHunkID, _):
                 hunkID = candidateHunkID
-            case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+            case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
                  .contextEdge, .image, .note:
                 continue
             }
@@ -3218,6 +3292,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         case let .hunk(hunk): return [.hunk(hunk.anchorID)]
         case let .contextEdge(gap, _): return [.contextGap(gap.id)]
         case let .fileContextToggle(fileID, _, _): return [.contextToggle(fileID)]
+        case let .fileFooter(fileID): return [.fileFooter(fileID)]
         default: return Set(codeCells(in: row).map { .line($0.reference) })
         }
     }
@@ -3491,8 +3566,8 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             textView.mouseDownHandler = { [weak self] textView, event in
                 self?.beginCodeSelection(with: event, textView: textView) ?? false
             }
-            textView.contextMenuHandler = { [weak self] _, event in
-                self?.codeContextMenu(for: event)
+            textView.contextMenuHandler = { [weak self] textView, event in
+                self?.codeContextMenu(for: event, textView: textView)
             }
             let range: NSRange = if let codeSelection {
                 codeSelection.range(inRow: row, column: column, length: textView.textLength)
@@ -3504,20 +3579,24 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     /// 右键同样直接落在文本视图上，这里换回 diff 自己的菜单。
-    private func codeContextMenu(for event: NSEvent) -> NSMenu? {
+    private func codeContextMenu(for event: NSEvent, textView: DiffSelectableTextView) -> NSMenu? {
         let row = tableView.row(
             at: tableView.convert(event.locationInWindow, from: nil)
         )
         guard rows.indices.contains(row) else {
             return nil
         }
+        let hadSelection = codeSelectionRows(containing: row) != nil
+            || textView.selectedRange().length > 0
+            || (tableView.selectedRowIndexes.contains(row) && rowSelectionIncludesCode)
         if codeSelectionRows(containing: row) == nil {
             tableView.selectRowIndexes(
                 IndexSet(integer: row),
                 byExtendingSelection: false
             )
         }
-        return contextMenu(clickedRow: row, selectedRows: tableView.selectedRowIndexes)
+        rowSelectionIncludesCode = hadSelection
+        return contextMenu(clickedRow: row, selectedRows: tableView.selectedRowIndexes, includesSelectedCode: hadSelection)
     }
 
     private func clearCodeSelection() {
@@ -3580,7 +3659,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             case .new: pair.new
             case .unified: nil
             }
-        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
              .contextEdge, .image, .note:
             return nil
         }
@@ -3612,7 +3691,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     return values[0]
                 }
                 return values.joined(separator: "\n")
-            case .summary, .file, .folder, .group, .fileContextToggle,
+            case .summary, .file, .folder, .group, .fileContextToggle, .fileFooter,
                  .contextEdge, .image, .note:
                 return nil
             }
@@ -3626,9 +3705,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         let rows: [Int]
         let column: DiffCodeColumn
         let lines: [GitDiffLine]
+        var includesSelectedCode = true
 
         var excerpt: DiffSelectionExcerpt {
-            DiffSelectionExcerpt(fileID: fileID, lines: lines)
+            DiffSelectionExcerpt(fileID: fileID, lines: lines, includesSelectedCode: includesSelectedCode)
         }
     }
 
@@ -3639,7 +3719,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         switch rows[row] {
         case let .line(_, _, fileID, _, _), let .sideBySide(_, _, fileID, _, _):
             return fileID
-        case .summary, .group, .folder, .file, .fileContextToggle, .hunk,
+        case .summary, .group, .folder, .file, .fileContextToggle, .fileFooter, .hunk,
              .contextEdge, .image, .note:
             return nil
         }
@@ -3708,7 +3788,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         guard let fileID, !lines.isEmpty else {
             return nil
         }
-        return SelectedCode(fileID: fileID, rows: codeRows, column: .unified, lines: lines)
+        return SelectedCode(fileID: fileID, rows: codeRows, column: .unified, lines: lines, includesSelectedCode: rowSelectionIncludesCode)
     }
 
     /// 选区变了以后重新找操作条的锚点；滚动和尺寸变化只需要 `positionSelectionActionBar`。
@@ -4078,6 +4158,7 @@ private enum DiffStackRow {
     case folder(DiffStackFolder)
     case file(DiffStackFile)
     case fileContextToggle(fileID: String, showsWholeFile: Bool, isLoading: Bool)
+    case fileFooter(fileID: String)
     case hunk(DiffStackHunkRow)
     case contextEdge(DiffStackContextGap, fileID: String)
     case line(
@@ -4138,6 +4219,7 @@ private enum DiffStackRowIdentity: Hashable {
     case hunk(String)
     case contextGap(String)
     case contextToggle(String)
+    case fileFooter(String)
 }
 
 /// 布局切换后选中的代码可能分布在两列，或跳过单栏中的另一侧变更。
@@ -4235,7 +4317,7 @@ private final class DiffTableRowView: NSTableRowView {
 private final class DiffCopyingTableView: NSTableView {
     var copyTextProvider: ((IndexSet) -> String)?
     var rowClickHandler: ((Int) -> Bool)?
-    var dynamicMenuProvider: ((Int, IndexSet) -> NSMenu?)?
+    var dynamicMenuProvider: ((Int, IndexSet, Bool) -> NSMenu?)?
     var hunkNavigationHandler: ((Int) -> Bool)?
     var cancelPendingActionHandler: (() -> Bool)?
     var codeSelectionHandler: ((NSEvent, DiffSelectableTextView) -> Bool)?
@@ -4319,11 +4401,11 @@ private final class DiffCopyingTableView: NSTableView {
         guard clickedRow >= 0 else {
             return super.menu(for: event)
         }
-        if !selectedRowIndexes.contains(clickedRow),
-           keepsCodeSelectionForMenu?(clickedRow) != true {
+        let hadSelection = selectedRowIndexes.contains(clickedRow) || keepsCodeSelectionForMenu?(clickedRow) == true
+        if !hadSelection {
             selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
         }
-        return dynamicMenuProvider?(clickedRow, selectedRowIndexes) ?? super.menu(for: event)
+        return dynamicMenuProvider?(clickedRow, selectedRowIndexes, hadSelection) ?? super.menu(for: event)
     }
 
     @objc func copy(_ sender: Any?) {
@@ -6130,6 +6212,51 @@ private final class DiffImageCanvasView: NSView {
             row += 1
         }
         super.draw(dirtyRect)
+    }
+}
+
+private final class DiffFileFooterCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("diff-file-footer")
+
+    private let button = ReviewGlyphButton(title: "", target: nil, action: nil)
+    private var fileID = ""
+    private var collapseHandler: ((String) -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        button.identifier = NSUserInterfaceItemIdentifier("collapse-file-footer")
+        button.target = self
+        button.action = #selector(collapseFile)
+        button.imagePosition = .imageOnly
+        button.image = ReviewIcon.previous.actionImage
+        button.contentTintColor = AgentGitPalette.reviewSecondaryText
+        button.toolTip = "Collapse file above"
+        button.setAccessibilityLabel("Collapse file above")
+        addSubview(button)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        button.frame = NSRect(x: 6, y: 1, width: ReviewControlMetrics.height, height: ReviewControlMetrics.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        AgentGitPalette.codeBackground.setFill()
+        dirtyRect.fill()
+        super.draw(dirtyRect)
+    }
+
+    func update(fileID: String, collapseHandler: @escaping (String) -> Void) {
+        self.fileID = fileID
+        self.collapseHandler = collapseHandler
+    }
+
+    @objc private func collapseFile() {
+        collapseHandler?(fileID)
     }
 }
 
