@@ -84,7 +84,9 @@ private final class WorkspaceListSelectionView: NSView {
         while let view = ancestor {
             if let table = view as? NSTableView {
                 // 选中背景由 WorkspaceSelectionBackground 绘制，避免系统鼠标高亮另铺一层蓝色。
-                table.selectionHighlightStyle = .none
+                if table.selectionHighlightStyle != .none {
+                    table.selectionHighlightStyle = .none
+                }
                 return
             }
             ancestor = view.superview

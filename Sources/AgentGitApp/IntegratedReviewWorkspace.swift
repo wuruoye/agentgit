@@ -22,9 +22,7 @@ struct IntegratedReviewWorkspace: View {
     let initialSelectedCommitIDs: Set<GitCommit.ID>
     let initialPane: ReviewPane
     let initialHistoryFilter: String
-    private let snapshotWorkingItems: [IntegratedFileItem]
-    private let snapshotUntrackedItems: [IntegratedFileItem]
-    private let snapshotStagedItems: [IntegratedFileItem]
+    private let snapshotPendingItems: PendingIntegratedFileItems
 
     @State private var commits: [GitCommit] = []
     @State private var commitGraphLayout = CommitGraphLayout(commits: [])
@@ -58,6 +56,7 @@ struct IntegratedReviewWorkspace: View {
     @State private var review = ReviewState()
     @State private var navigatorSelection: NavigatorSelection?
     @State private var navigatorTreeCache = NavigatorTreeCache()
+    @State private var contextItemsCache = ContextFileItemsCache()
     @State private var commitFilterText = ""
     @State private var historyError: String?
     @State private var historyPaginationError: String?
@@ -142,9 +141,7 @@ struct IntegratedReviewWorkspace: View {
         self.initialPane = initialPane
         self.initialHistoryFilter = initialHistoryFilter
         let pendingItems = pendingIntegratedFileItems(in: snapshot)
-        snapshotWorkingItems = pendingItems.working
-        snapshotUntrackedItems = pendingItems.untracked
-        snapshotStagedItems = pendingItems.staged
+        snapshotPendingItems = pendingItems
         _review = State(initialValue: initialReviewState)
         _navigatorSelection = State(
             initialValue: initialReviewState.focusedFileID.map(
@@ -216,9 +213,7 @@ struct IntegratedReviewWorkspace: View {
         }
 
         if let cachedDiffs = startupContent.pendingDiffs {
-            let items = snapshotWorkingItems
-                + snapshotUntrackedItems
-                + snapshotStagedItems
+            let items = pendingItems.all
             let restored = integratedDiffCache(
                 diffs: cachedDiffs,
                 items: items
@@ -1085,7 +1080,8 @@ struct IntegratedReviewWorkspace: View {
                         pendingNavigatorFileGroups(
                             workingItems: workingItems,
                             untrackedItems: untrackedItems,
-                            stagedItems: stagedItems
+                            stagedItems: stagedItems,
+                            workingAndUntrackedItems: snapshotPendingItems.workingAndUntracked
                         )
                     ) { group in
                         Section(group.title) {
@@ -1125,69 +1121,49 @@ struct IntegratedReviewWorkspace: View {
         _ items: [IntegratedFileItem],
         namespace: String
     ) -> some View {
-        let allNodes = navigatorTreeCache.nodes(
+        let rows = navigatorTreeCache.rows(
             items: items,
-            namespace: namespace
+            namespace: namespace,
+            query: review.filterText,
+            collapsedFolderIDs: review.collapsedNavigatorFolderIDs
         )
-        let nodes = filteredNavigatorTreeNodes(
-            allNodes,
-            query: review.filterText
-        )
-        let expandedFolderIDs = review.filterText.isEmpty
-            ? navigatorFolderIDs(in: nodes).subtracting(review.collapsedNavigatorFolderIDs)
-            : navigatorFolderIDs(in: nodes)
-        ForEach(
-            flattenedNavigatorTreeRows(
-                nodes: nodes,
-                expandedFolderIDs: expandedFolderIDs
-            )
-        ) { row in
-            switch row.content {
-            case let .folder(id, name, fileCount):
-                NavigatorFolderRow(
-                    name: name,
-                    fileCount: fileCount,
-                    isExpanded: expandedFolderIDs.contains(id)
-                )
-                .padding(.leading, CGFloat(row.depth) * Self.navigatorIndent)
-                .contentShape(Rectangle())
-                .tag(NavigatorSelection.folder(id))
-                .listRowBackground(WorkspaceSelectionBackground(isSelected: navigatorSelection == .folder(id)))
-                .simultaneousGesture(TapGesture().onEnded {
-                    navigatorSelection = .folder(id)
+        ForEach(rows.rows) { row in
+            NavigatorTreeRowView(
+                row: row,
+                indent: Self.navigatorIndent,
+                isFolderExpanded: rows.expandedFolderIDs.contains(row.folderID ?? ""),
+                diff: row.fileItem.flatMap(displayedDiff(for:)),
+                isReviewed: row.fileItem.map(isReviewed) ?? false,
+                primaryActionTitle: row.fileItem.flatMap {
+                    primaryPendingMutationMode(context: activeContext, item: $0)?.fileActionTitle
+                },
+                canDiscard: row.fileItem.map {
+                    activeContext == .pending
+                        && $0.scope == .working
+                        && $0.change.kind != .unmerged
+                } ?? false,
+                onSelectFolder: { folderID in
+                    navigatorSelection = .folder(folderID)
                     isFilesNavigatorFocused = true
                     guard review.filterText.isEmpty else {
                         return
                     }
-                    toggleNavigatorFolder(id)
-                })
-            case let .file(item):
-                let mutationMode = primaryPendingMutationMode(
-                    context: activeContext,
-                    item: item
-                )
-                NavigatorFileRow(
-                    item: item,
-                    diff: displayedDiff(for: item),
-                    isReviewed: isReviewed(item),
-                    primaryActionTitle: mutationMode?.fileActionTitle,
-                    canDiscard: activeContext == .pending
-                        && item.scope == .working
-                        && item.change.kind != .unmerged,
-                    showsPathDetail: false
-                )
-                .padding(.leading, CGFloat(row.depth) * Self.navigatorIndent)
-                .contentShape(Rectangle())
-                .tag(NavigatorSelection.file(item.id.stackID))
-                .listRowBackground(WorkspaceSelectionBackground(isSelected: navigatorSelection == .file(item.id.stackID)))
-                .simultaneousGesture(TapGesture().onEnded {
+                    toggleNavigatorFolder(folderID)
+                },
+                onSelectFile: { fileID in
                     isFilesNavigatorFocused = true
-                    focusFileFromNavigator(item.id.stackID)
-                })
-                .contextMenu {
+                    focusFileFromNavigator(fileID)
+                },
+                fileContextMenu: { item in
                     fileUtilityMenu(for: item)
                 }
-            }
+            )
+            .tag(row.selection)
+            .listRowBackground(
+                WorkspaceSelectionBackground(
+                    isSelected: navigatorSelection == row.selection
+                )
+            )
         }
     }
 
@@ -1667,10 +1643,14 @@ struct IntegratedReviewWorkspace: View {
 
     private var allPendingDiffsAreCurrent: Bool {
         verifiedPendingDiffLoadKey == diffLoadKey
+            && verifiedPendingFileIDs.count >= currentFileCount
             && currentFileItems.allSatisfy { verifiedPendingFileIDs.contains($0.id) }
     }
 
     private var allChangesActionHandler: ((GitAllChangesAction) -> Void)? {
+        if activeContext == .pending, verifiedPendingFileIDs.count < currentFileCount {
+            return nil
+        }
         guard currentFileItems.allSatisfy(pendingDiffWasVerified) else { return nil }
         return { performAllChangesAction($0) }
     }
@@ -1945,6 +1925,9 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var supplementalDiffErrorMessage: String? {
+        guard !supplementalDiffFailures.isEmpty else {
+            return nil
+        }
         let failures = currentFileItems.compactMap { item -> (String, String)? in
             supplementalDiffFailures[item.id].map { (item.change.path, $0.message) }
         }
@@ -1970,7 +1953,7 @@ struct IntegratedReviewWorkspace: View {
             return false
         }
         return !reviewDiffsAreReady(
-            fileCount: currentFileItems.count,
+            fileCount: currentFileCount,
             requested: diffLoadKey,
             completed: completedDiffLoadKey
         )
@@ -1980,6 +1963,7 @@ struct IntegratedReviewWorkspace: View {
 
 
     private var stackGroups: [DiffStackGroup] {
+        let isPreparingDiffs = isPreparingReviewDiffs
         let groups = switch activeContext {
         case .pending:
             [
@@ -1987,13 +1971,15 @@ struct IntegratedReviewWorkspace: View {
                     id: "working",
                     title: "Working",
                     emptyMessage: emptyMessage("No working changes", "No matching working files"),
-                    items: filtered(workingItems + untrackedItems)
+                    items: filtered(snapshotPendingItems.workingAndUntracked),
+                    isPreparingDiffs: isPreparingDiffs
                 ),
                 stackGroup(
                     id: "staged",
                     title: "Staged",
                     emptyMessage: emptyMessage("No staged changes", "No matching staged files"),
-                    items: filtered(stagedItems)
+                    items: filtered(stagedItems),
+                    isPreparingDiffs: isPreparingDiffs
                 )
             ]
         case .commit, .range:
@@ -2002,7 +1988,8 @@ struct IntegratedReviewWorkspace: View {
                     id: "context",
                     title: nil,
                     emptyMessage: emptyMessage("No file changes", "No matching files"),
-                    items: filtered(contextItems)
+                    items: filtered(contextItems),
+                    isPreparingDiffs: isPreparingDiffs
                 )
             ]
         }
@@ -2017,9 +2004,17 @@ struct IntegratedReviewWorkspace: View {
         id: String,
         title: String?,
         emptyMessage: String,
-        items: [IntegratedFileItem]
+        items: [IntegratedFileItem],
+        isPreparingDiffs: Bool
     ) -> DiffStackGroup {
-        let files = items.map { stackFile(for: $0) }
+        let hasVisualStudioCode = Self.visualStudioCodeURL != nil
+        let files = items.map {
+            stackFile(
+                for: $0,
+                isPreparingDiffs: isPreparingDiffs,
+                hasVisualStudioCode: hasVisualStudioCode
+            )
+        }
         return DiffStackGroup(
             id: id,
             title: title,
@@ -2030,8 +2025,13 @@ struct IntegratedReviewWorkspace: View {
         )
     }
 
-    private func stackFile(for item: IntegratedFileItem) -> DiffStackFile {
+    private func stackFile(
+        for item: IntegratedFileItem,
+        isPreparingDiffs: Bool,
+        hasVisualStudioCode: Bool
+    ) -> DiffStackFile {
         let canOpenWorkingFile = existingWorkingFileIDs.contains(item.id.stackID)
+        let diffWasVerified = pendingDiffWasVerified(for: item)
         return DiffStackFile(
             id: item.id.stackID,
             path: item.change.path,
@@ -2040,7 +2040,7 @@ struct IntegratedReviewWorkspace: View {
             statusLabel: item.statusLabel,
             // diff 还没到齐时所有文件保持收起：这样点一条 commit 立刻就能看到摘要和文件列表，
             // 而不是整块白屏转圈；等全部 diff 就绪再一次性展开，中途不会边滚边重排。
-            isExpanded: isPreparingReviewDiffs
+            isExpanded: isPreparingDiffs
                 ? false
                 : isReviewFileExpanded(item.id.stackID, in: review),
             isFocused: item.id.stackID == review.focusedFileID,
@@ -2049,8 +2049,7 @@ struct IntegratedReviewWorkspace: View {
             isLoadingWholeFile: loadingWholeFileIDs.contains(item.id.stackID),
             canToggleWholeFile: canToggleWholeFile(item),
             canOpenWorkingFile: canOpenWorkingFile,
-            canOpenInVisualStudioCode: canOpenWorkingFile
-                && Self.visualStudioCodeURL != nil,
+            canOpenInVisualStudioCode: canOpenWorkingFile && hasVisualStudioCode,
             canApplyPrimaryAction: primaryPendingMutationMode(
                 context: activeContext,
                 item: item
@@ -2058,8 +2057,8 @@ struct IntegratedReviewWorkspace: View {
             canDiscard: activeContext == .pending
                 && item.scope == .working
                 && item.change.kind != .unmerged,
-            isMutationEnabled: pendingDiffWasVerified(for: item),
-            mutationSnapshotID: pendingDiffWasVerified(for: item) ? reviewSnapshotID(for: item) : nil,
+            isMutationEnabled: diffWasVerified,
+            mutationSnapshotID: diffWasVerified ? reviewSnapshotID(for: item) : nil,
             contextGaps: contextGaps(for: item),
             mutationMode: activeContext == .pending
                 ? (item.scope == .working ? .working : .staged)
@@ -2849,35 +2848,50 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var workingItems: [IntegratedFileItem] {
-        snapshotWorkingItems
+        snapshotPendingItems.working
     }
 
     private var untrackedItems: [IntegratedFileItem] {
-        snapshotUntrackedItems
+        snapshotPendingItems.untracked
     }
 
     private var stagedItems: [IntegratedFileItem] {
-        snapshotStagedItems
+        snapshotPendingItems.staged
     }
 
     private var contextItems: [IntegratedFileItem] {
         guard activeContext != .pending else {
             return []
         }
-        let contextID = Self.identifier(for: activeContext)
-        return contextChanges.map { change in
-            IntegratedFileItem(
-                id: .context(contextID: contextID, changeID: change.id),
-                change: change,
-                scope: .staged
-            )
-        }
+        return contextItemsCache.entry(
+            contextID: Self.identifier(for: activeContext),
+            changes: contextChanges
+        ).items
     }
 
     private var currentFileItems: [IntegratedFileItem] {
         switch activeContext {
-        case .pending: workingItems + untrackedItems + stagedItems
+        case .pending: snapshotPendingItems.all
         case .commit, .range: contextItems
+        }
+    }
+
+    private var currentFileIDs: [IntegratedFileID] {
+        switch activeContext {
+        case .pending:
+            snapshotPendingItems.allIDs
+        case .commit, .range:
+            contextItemsCache.entry(
+                contextID: Self.identifier(for: activeContext),
+                changes: contextChanges
+            ).fileIDs
+        }
+    }
+
+    private var currentFileCount: Int {
+        switch activeContext {
+        case .pending: snapshotPendingItems.all.count
+        case .commit, .range: contextChanges.count
         }
     }
 
@@ -3060,20 +3074,29 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var totalAddedLineCount: Int {
-        visibleFileItems.reduce(0) {
+        guard !diffsByFileID.isEmpty else {
+            return 0
+        }
+        return visibleFileItems.reduce(0) {
             $0 + (displayedDiff(for: $1)?.addedLineCount ?? 0)
         }
     }
 
     private var totalDeletedLineCount: Int {
-        visibleFileItems.reduce(0) {
+        guard !diffsByFileID.isEmpty else {
+            return 0
+        }
+        return visibleFileItems.reduce(0) {
             $0 + (displayedDiff(for: $1)?.deletedLineCount ?? 0)
         }
     }
 
     /// 只看一个文件或带筛选词时，进度仍按整个 Review 计算。
     private var reviewedFileCount: Int {
-        currentFileItems.count(where: isReviewed)
+        guard !review.reviewedSnapshotByFileID.isEmpty else {
+            return 0
+        }
+        return currentFileItems.count(where: isReviewed)
     }
 
     private func messageSubject(fallback: String) -> String {
@@ -3102,7 +3125,7 @@ struct IntegratedReviewWorkspace: View {
             activityDate: snapshot.lastActivityAt,
             context: activeContext,
             options: loadedDiffOptions,
-            fileIDs: currentFileItems.map(\.id),
+            fileIDs: currentFileIDs,
             pendingRefreshDate: activeContext == .pending && snapshot.pendingDiffRevision == nil
                 ? snapshot.refreshedAt : nil,
             pendingRevision: activeContext == .pending ? snapshot.pendingDiffRevision : nil
@@ -3143,15 +3166,19 @@ struct IntegratedReviewWorkspace: View {
     ) -> [IntegratedFileID] {
         switch context {
         case .pending:
-            return pendingIntegratedFileItems(in: snapshot).all.map(\.id)
-        case .commit, .range:
-            let contextID = Self.identifier(for: context)
-            return contextChanges.map { change in
-                IntegratedFileID.context(
-                    contextID: contextID,
-                    changeID: change.id
-                )
+            if snapshot.id == self.snapshot.id,
+               snapshot.refreshedAt == self.snapshot.refreshedAt,
+               snapshot.pendingDiffRevision == self.snapshot.pendingDiffRevision,
+               snapshot.lastActivityAt == self.snapshot.lastActivityAt,
+               snapshot.status == self.snapshot.status {
+                return snapshotPendingItems.allIDs
             }
+            return pendingIntegratedFileItems(in: snapshot).allIDs
+        case .commit, .range:
+            return contextItemsCache.entry(
+                contextID: Self.identifier(for: context),
+                changes: contextChanges
+            ).fileIDs
         }
     }
 
@@ -3178,7 +3205,7 @@ struct IntegratedReviewWorkspace: View {
             worktreeID: snapshot.id,
             activityDate: snapshot.lastActivityAt,
             context: activeContext,
-            fileIDs: currentFileItems.map(\.id)
+            fileIDs: currentFileIDs
         )
     }
 
@@ -5983,9 +6010,66 @@ struct PendingIntegratedFileItems: Equatable {
     let working: [IntegratedFileItem]
     let untracked: [IntegratedFileItem]
     let staged: [IntegratedFileItem]
+    let workingAndUntracked: [IntegratedFileItem]
+    let all: [IntegratedFileItem]
+    let allIDs: [IntegratedFileID]
 
-    var all: [IntegratedFileItem] {
-        working + untracked + staged
+    init(
+        working: [IntegratedFileItem],
+        untracked: [IntegratedFileItem],
+        staged: [IntegratedFileItem]
+    ) {
+        self.working = working
+        self.untracked = untracked
+        self.staged = staged
+        let workingAndUntracked = working + untracked
+        let all = workingAndUntracked + staged
+        self.workingAndUntracked = workingAndUntracked
+        self.all = all
+        self.allIDs = all.map(\.id)
+    }
+}
+
+@MainActor
+final class ContextFileItemsCache {
+    struct Entry {
+        let contextID: String
+        let changes: [GitFileChange]
+        let items: [IntegratedFileItem]
+        let fileIDs: [IntegratedFileID]
+    }
+
+    private var cached: Entry?
+
+    func entry(contextID: String, changes: [GitFileChange]) -> Entry {
+        if let cached,
+           cached.contextID == contextID,
+           cached.changes == changes {
+            return cached
+        }
+        var items: [IntegratedFileItem] = []
+        var fileIDs: [IntegratedFileID] = []
+        items.reserveCapacity(changes.count)
+        fileIDs.reserveCapacity(changes.count)
+        for change in changes {
+            let id = IntegratedFileID.context(contextID: contextID, changeID: change.id)
+            fileIDs.append(id)
+            items.append(
+                IntegratedFileItem(
+                    id: id,
+                    change: change,
+                    scope: .staged
+                )
+            )
+        }
+        let next = Entry(
+            contextID: contextID,
+            changes: changes,
+            items: items,
+            fileIDs: fileIDs
+        )
+        cached = next
+        return next
     }
 }
 
@@ -6067,6 +6151,23 @@ struct NavigatorTreeRow: Identifiable, Hashable {
     let id: String
     let depth: Int
     let content: Content
+
+    var selection: NavigatorSelection {
+        switch content {
+        case let .folder(id, _, _): .folder(id)
+        case let .file(item): .file(item.id.stackID)
+        }
+    }
+
+    var folderID: String? {
+        guard case let .folder(id, _, _) = content else { return nil }
+        return id
+    }
+
+    var fileItem: IntegratedFileItem? {
+        guard case let .file(item) = content else { return nil }
+        return item
+    }
 }
 
 enum NavigatorSelection: Hashable {
@@ -6076,30 +6177,80 @@ enum NavigatorSelection: Hashable {
 
 @MainActor
 final class NavigatorTreeCache {
-    private struct Entry {
+    struct Entry {
         let items: [IntegratedFileItem]
         let nodes: [NavigatorTreeNode]
+        let folderIDs: Set<String>
+    }
+
+    struct RowsEntry {
+        let query: String
+        let collapsedFolderIDs: Set<String>
+        let expandedFolderIDs: Set<String>
+        let rows: [NavigatorTreeRow]
     }
 
     private var entriesByNamespace: [String: Entry] = [:]
+    private var rowsByNamespace: [String: RowsEntry] = [:]
 
-    func nodes(
+    func entry(
         items: [IntegratedFileItem],
         namespace: String
-    ) -> [NavigatorTreeNode] {
+    ) -> Entry {
         if let cached = entriesByNamespace[namespace],
            cached.items == items {
-            return cached.nodes
+            return cached
         }
         let nodes = navigatorTreeNodes(
             items: items,
             namespace: namespace
         )
-        entriesByNamespace[namespace] = Entry(
+        let entry = Entry(
             items: items,
-            nodes: nodes
+            nodes: nodes,
+            folderIDs: navigatorFolderIDs(in: nodes)
         )
-        return nodes
+        entriesByNamespace[namespace] = entry
+        rowsByNamespace.removeValue(forKey: namespace)
+        return entry
+    }
+
+    func nodes(
+        items: [IntegratedFileItem],
+        namespace: String
+    ) -> [NavigatorTreeNode] {
+        entry(items: items, namespace: namespace).nodes
+    }
+
+    func rows(
+        items: [IntegratedFileItem],
+        namespace: String,
+        query: String,
+        collapsedFolderIDs: Set<String>
+    ) -> RowsEntry {
+        let tree = entry(items: items, namespace: namespace)
+        let normalizedCollapsed = query.isEmpty ? collapsedFolderIDs : []
+        if let cached = rowsByNamespace[namespace],
+           cached.query == query,
+           cached.collapsedFolderIDs == normalizedCollapsed {
+            return cached
+        }
+        let nodes = filteredNavigatorTreeNodes(tree.nodes, query: query)
+        let expandedFolderIDs = query.isEmpty
+            ? tree.folderIDs.subtracting(collapsedFolderIDs)
+            : navigatorFolderIDs(in: nodes)
+        let flattened = flattenedNavigatorTreeRows(
+            nodes: nodes,
+            expandedFolderIDs: expandedFolderIDs
+        )
+        let result = RowsEntry(
+            query: query,
+            collapsedFolderIDs: normalizedCollapsed,
+            expandedFolderIDs: expandedFolderIDs,
+            rows: flattened
+        )
+        rowsByNamespace[namespace] = result
+        return result
     }
 }
 
@@ -6123,12 +6274,21 @@ func navigatorTreeNodes(
 }
 
 func navigatorFolderIDs(in nodes: [NavigatorTreeNode]) -> Set<String> {
-    nodes.reduce(into: []) { result, node in
+    var result: Set<String> = []
+    collectNavigatorFolderIDs(in: nodes, into: &result)
+    return result
+}
+
+private func collectNavigatorFolderIDs(
+    in nodes: [NavigatorTreeNode],
+    into result: inout Set<String>
+) {
+    for node in nodes {
         guard case let .folder(id, _, _, children) = node else {
-            return
+            continue
         }
         result.insert(id)
-        result.formUnion(navigatorFolderIDs(in: children))
+        collectNavigatorFolderIDs(in: children, into: &result)
     }
 }
 
@@ -6336,13 +6496,14 @@ struct NavigatorFileGroup: Identifiable, Equatable {
 func pendingNavigatorFileGroups(
     workingItems: [IntegratedFileItem],
     untrackedItems: [IntegratedFileItem],
-    stagedItems: [IntegratedFileItem]
+    stagedItems: [IntegratedFileItem],
+    workingAndUntrackedItems: [IntegratedFileItem]? = nil
 ) -> [NavigatorFileGroup] {
     let groups = [
         NavigatorFileGroup(
             id: "working",
             title: "Working",
-            items: workingItems + untrackedItems
+            items: workingAndUntrackedItems ?? (workingItems + untrackedItems)
         ),
         NavigatorFileGroup(
             id: "staged",
@@ -7456,6 +7617,56 @@ struct CommitMessageSummary: View {
 func commitMessageNeedsFullReader(_ message: String) -> Bool {
     message.count > 240
         || message.split(separator: "\n", omittingEmptySubsequences: false).count > 3
+}
+
+private struct NavigatorTreeRowView<MenuContent: View>: View {
+    let row: NavigatorTreeRow
+    let indent: CGFloat
+    let isFolderExpanded: Bool
+    let diff: GitFileDiff?
+    let isReviewed: Bool
+    let primaryActionTitle: String?
+    let canDiscard: Bool
+    let onSelectFolder: (String) -> Void
+    let onSelectFile: (String) -> Void
+    @ViewBuilder let fileContextMenu: (IntegratedFileItem) -> MenuContent
+
+    var body: some View {
+        // 用单层容器包住条件分支，让 SwiftUI List 把每行识别为固定单节点（unary view），
+        // 避免 OutlineListCoordinator 按动态子列表逐项从头计数导致 O(N²) 耗时。
+        ZStack(alignment: .leading) {
+            switch row.content {
+            case let .folder(id, name, fileCount):
+                NavigatorFolderRow(
+                    name: name,
+                    fileCount: fileCount,
+                    isExpanded: isFolderExpanded
+                )
+                .padding(.leading, CGFloat(row.depth) * indent)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded {
+                    onSelectFolder(id)
+                })
+            case let .file(item):
+                NavigatorFileRow(
+                    item: item,
+                    diff: diff,
+                    isReviewed: isReviewed,
+                    primaryActionTitle: primaryActionTitle,
+                    canDiscard: canDiscard,
+                    showsPathDetail: false
+                )
+                .padding(.leading, CGFloat(row.depth) * indent)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded {
+                    onSelectFile(item.id.stackID)
+                })
+                .contextMenu {
+                    fileContextMenu(item)
+                }
+            }
+        }
+    }
 }
 
 private struct NavigatorFolderRow: View {

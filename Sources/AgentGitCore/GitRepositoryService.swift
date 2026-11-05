@@ -2442,8 +2442,30 @@ public struct GitRepositoryService: Sendable {
         _ worktree: GitWorktree,
         submoduleScanMode: GitSubmoduleScanMode = .commitsOnly
     ) async -> GitWorktreeSnapshot {
+        let gitDirectories = await absoluteGitDirectories(for: worktree.rootURL)
+        let fallbackEventWatchURLs = Set(
+            [
+                worktree.rootURL,
+                gitDirectories.gitDirectory,
+                gitDirectories.commonGitDirectory
+            ].compactMap { $0 }
+        ).sorted { $0.path < $1.path }
         do {
-            async let loadedGitDirectories = absoluteGitDirectories(for: worktree.rootURL)
+            if await isWorktreeIndexUninitialized(
+                for: worktree,
+                gitDirectory: gitDirectories.gitDirectory
+            ) {
+                return GitWorktreeSnapshot(
+                    worktree: worktree,
+                    status: .clean,
+                    diffStat: .zero,
+                    lastActivityAt: .distantPast,
+                    refreshedAt: nil,
+                    errorMessage: "Worktree checkout is still in progress; waiting for Git index initialization.",
+                    hasUsableState: false,
+                    eventWatchURLs: fallbackEventWatchURLs
+                )
+            }
             let reader = GitPendingIdentityReader(runner: runner, rootURL: worktree.rootURL)
             let metadataStamp = try? await pendingIdentityCache.refreshMetadataStamp(reader: reader)
             let initialStatus = try await loadStatus(
@@ -2463,7 +2485,6 @@ public struct GitRepositoryService: Sendable {
                     status: initialStatus
                 )
             }
-            let gitDirectories = await loadedGitDirectories
             let fileMetadata = changedFileMetadata(for: refreshedWorktree, status: initialStatus)
             let diffStatCacheKey = diffStatCacheKey(
                 for: refreshedWorktree,
@@ -2547,9 +2568,56 @@ public struct GitRepositoryService: Sendable {
                 refreshedAt: nil,
                 errorMessage: GitErrorDescription.message(for: error),
                 hasUsableState: false,
-                eventWatchURLs: [worktree.rootURL]
+                eventWatchURLs: fallbackEventWatchURLs
             )
         }
+    }
+
+    private static let emptyTreeOIDs: Set<String> = [
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+    ]
+
+    /// `git worktree add`（含 `--no-checkout` 加工作区克隆）在写完 `index` 前，
+    /// `git status` 会把整棵 `HEAD` 树当成暂存删除、把已拷入磁盘的文件全部当成未跟踪。
+    private func isWorktreeIndexUninitialized(
+        for worktree: GitWorktree,
+        gitDirectory: URL?
+    ) async -> Bool {
+        guard !worktree.isBare, let gitDirectory else {
+            return false
+        }
+        let indexURL: URL
+        if let customIndex = GitCommandRunner.baseEnvironment["GIT_INDEX_FILE"],
+           !customIndex.isEmpty {
+            indexURL = URL(
+                fileURLWithPath: customIndex,
+                relativeTo: worktree.rootURL
+            ).standardizedFileURL
+        } else {
+            indexURL = gitDirectory.appendingPathComponent("index")
+        }
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: indexURL.path) {
+            return false
+        }
+        if worktree.lockedReason?.trimmingCharacters(in: .whitespacesAndNewlines) == "initializing" {
+            return true
+        }
+        let indexLockURL = indexURL.appendingPathExtension("lock")
+        if fileManager.fileExists(atPath: indexLockURL.path) {
+            return true
+        }
+        guard let treeData = try? await runner.run(
+            arguments: ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"],
+            workingDirectory: worktree.rootURL,
+            timeout: Self.quickMetadataTimeout
+        ) else {
+            return false
+        }
+        let treeOID = String(decoding: treeData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !treeOID.isEmpty && !Self.emptyTreeOIDs.contains(treeOID)
     }
 
     private func supplementalResult<Value: Sendable>(

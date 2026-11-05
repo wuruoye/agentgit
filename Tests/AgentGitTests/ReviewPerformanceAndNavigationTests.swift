@@ -2,6 +2,7 @@ import AgentGitCore
 @testable import AgentGitApp
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 
 @Test func watchIndexLimitsWorkingTreeRootsToActiveWorktreeWhileKeepingGitMetadata() {
@@ -827,6 +828,156 @@ private func makeTestDiffFile(path: String, lineCount: Int) -> DiffStackFile {
     #expect(!scrollView.isFlingSubstepping)
     _ = scrollView.stepFlingSubstepper(at: 30.0 + vsyncDt, nominalFrameDuration: vsyncDt)
     #expect(scrollView.contentView.bounds.minY == stoppedY)
+}
+
+@Test func loadWorktreeMarksNoCheckoutWorktreeUnavailableUntilIndexIsInitialized() async throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("AgentGitTests.UninitializedWorktree.\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+    let service = GitRepositoryService()
+
+    // 尚未产生任何提交的全新仓库没有 .git/index 属于正常情况，仍应返回可用状态。
+    let unbornURL = tempRoot.appendingPathComponent("unborn", isDirectory: true)
+    try FileManager.default.createDirectory(at: unbornURL, withIntermediateDirectories: true)
+    try runGit(["init", "-q"], in: unbornURL)
+    let unbornProject = try await service.loadProject(at: unbornURL)
+    let unbornSnapshot = try #require(unbornProject.worktrees.first)
+    #expect(unbornSnapshot.hasUsableState)
+
+    // 主仓提交文件后，通过 `--no-checkout` 加工作区文件拷贝模拟克隆中途尚未生成 index 的窗口。
+    let repoURL = tempRoot.appendingPathComponent("repo", isDirectory: true)
+    let worktreeURL = tempRoot.appendingPathComponent("wt", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: repoURL.appendingPathComponent("Sources", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try runGit(["init", "-q"], in: repoURL)
+    try runGit(["config", "user.name", "Test User"], in: repoURL)
+    try runGit(["config", "user.email", "test@example.com"], in: repoURL)
+    let sourceFile = repoURL.appendingPathComponent("Sources/App.swift")
+    try "let ready = true\n".write(to: sourceFile, atomically: true, encoding: .utf8)
+    try runGit(["add", "Sources/App.swift"], in: repoURL)
+    try runGit(["commit", "-qm", "Initial commit"], in: repoURL)
+
+    try runGit(["worktree", "add", "--no-checkout", worktreeURL.path, "-b", "feature-wt", "-q"], in: repoURL)
+    try FileManager.default.createDirectory(
+        at: worktreeURL.appendingPathComponent("Sources", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.copyItem(
+        at: sourceFile,
+        to: worktreeURL.appendingPathComponent("Sources/App.swift")
+    )
+
+    let midCheckoutProject = try await service.loadProject(at: repoURL)
+    let midCheckoutSnapshot = try #require(
+        midCheckoutProject.worktrees.first {
+            $0.worktree.rootURL.standardizedFileURL == worktreeURL.standardizedFileURL
+        }
+    )
+    #expect(!midCheckoutSnapshot.hasUsableState)
+    #expect(midCheckoutSnapshot.refreshedAt == nil)
+    #expect(midCheckoutSnapshot.status.changes.isEmpty)
+    #expect(midCheckoutSnapshot.eventWatchURLs.count >= 2)
+
+    // 未就绪的非活跃 worktree 只监听 Git 元数据目录，写完 index 后能收到元数据变更通知。
+    let watchIndex = RepositoryWatchIndex(
+        projects: [ProjectState(project: midCheckoutProject.project, snapshot: midCheckoutProject)],
+        activeWorkingTreeIDs: [repoURL.standardizedFileURL.path]
+    )
+    #expect(!Set(watchIndex.watchedPaths).contains(worktreeURL.standardizedFileURL.path))
+    let adminGitDir = try #require(
+        midCheckoutSnapshot.eventWatchURLs.first {
+            $0.standardizedFileURL.path.contains("/.git/worktrees/")
+        }
+    )
+    let indexImpact = watchIndex.impact(
+        for: [adminGitDir.appendingPathComponent("index").path]
+    )
+    #expect(indexImpact.metadataWorktreeIDs.contains(midCheckoutSnapshot.id))
+
+    // `git reset` 写回 index 后再次加载，应恢复为干净可用状态。
+    try runGit(["reset", "-q"], in: worktreeURL)
+    let readySnapshot = await service.loadWorktree(midCheckoutSnapshot.worktree)
+    #expect(readySnapshot.hasUsableState)
+    #expect(readySnapshot.errorMessage == nil)
+    #expect(readySnapshot.status.changes.isEmpty)
+}
+
+@Test @MainActor func integratedReviewWorkspaceLayoutsLargePendingFileSnapshotWithoutQuadraticStall() throws {
+    _ = NSApplication.shared
+
+    let suiteName = "AgentGitTests.LargePending.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let rootURL = URL(fileURLWithPath: "/repos/large-worktree")
+    let worktree = GitWorktree(
+        rootURL: rootURL,
+        headOID: "1111111111111111111111111111111111111111",
+        branchRef: "refs/heads/main",
+        isBare: false,
+        isDetached: false,
+        lockedReason: nil,
+        prunableReason: nil
+    )
+
+    var changes: [GitFileChange] = []
+    changes.reserveCapacity(10_000)
+    for index in 0..<5_000 {
+        let folder = "Module\(index / 100)"
+        changes.append(
+            GitFileChange(
+                path: "\(folder)/Tracked\(index).swift",
+                originalPath: nil,
+                indexStatus: "D",
+                worktreeStatus: ".",
+                kind: .ordinary
+            )
+        )
+        changes.append(
+            GitFileChange(
+                path: "\(folder)/Untracked\(index).swift",
+                originalPath: nil,
+                indexStatus: "?",
+                worktreeStatus: "?",
+                kind: .untracked
+            )
+        )
+    }
+
+    let snapshot = GitWorktreeSnapshot(
+        worktree: worktree,
+        status: GitStatusSnapshot(
+            changes: changes,
+            branch: nil,
+            headOID: worktree.headOID,
+            branchHead: "main"
+        ),
+        diffStat: .zero,
+        lastActivityAt: Date(timeIntervalSince1970: 1_000),
+        refreshedAt: Date(timeIntervalSince1970: 1_000),
+        errorMessage: nil
+    )
+
+    let model = AppModel(defaults: defaults)
+    let start = ContinuousClock.now
+    let workspace = IntegratedReviewWorkspace(snapshot: snapshot)
+        .environment(model)
+    let host = NSHostingView(rootView: workspace)
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1_200, height: 800),
+        styleMask: [.titled, .resizable],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = host
+    host.layoutSubtreeIfNeeded()
+    let elapsed = ContinuousClock.now - start
+
+    #expect(elapsed < .seconds(3))
 }
 
 private func runGit(_ arguments: [String], in directory: URL) throws {
