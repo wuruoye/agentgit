@@ -55,19 +55,24 @@ struct AgentSessionNavigationResolver: Sendable {
 
     let claudeSessionsRoot: URL
     let codexHome: URL
+    let antigravityAppDataRoot: URL
 
     init(
         claudeSessionsRoot: URL = Self.defaultClaudeSessionsRoot,
-        codexHome: URL = Self.defaultCodexHome
+        codexHome: URL = Self.defaultCodexHome,
+        antigravityAppDataRoot: URL = Self.defaultAntigravityAppDataRoot
     ) {
         self.claudeSessionsRoot = claudeSessionsRoot.standardizedFileURL
         self.codexHome = codexHome.standardizedFileURL
+        self.antigravityAppDataRoot = antigravityAppDataRoot.standardizedFileURL
     }
 
     /// 宿主自己建的 worktree 不经过 agent shell，hook 拿不到会话；按宿主元数据里记下的精确路径
     /// 找回所属会话：Claude Desktop 会话索引的 `worktreePath`，Codex App 放在
-    /// `~/.codex/worktrees/` 下的 worktree 对应最早以它为 `cwd` 的线程。会话创建时间和
-    /// worktree 的 git 管理目录创建时间要在一小时内，之后才在已有 worktree 里启动的会话不算。
+    /// `~/.codex/worktrees/` 下的 worktree 对应最早以它为 `cwd` 的线程，Antigravity
+    /// 对应 `conversation_summaries.db` 的 `workspace_uris` 或沙盒内 `git worktree add`
+    /// 会话日志。会话创建时间和 worktree 的 git 管理目录创建时间要在一小时内，之后才在已有
+    /// worktree 里启动的会话不算。
     func discoverCreators(worktreePaths: Set<String>) -> [String: AgentWorktreeCreator] {
         var candidates: [AgentWorktreeCreator] = []
         for record in (try? loadClaudeDesktopSessionRecords(matching: nil)) ?? [] {
@@ -96,6 +101,19 @@ struct AgentSessionNavigationResolver: Sendable {
         candidates += loadCodexCreateWorktreeThreads(
             paths: codexPaths.subtracting(codexThreads.map(\.worktreePath))
         )
+
+        if !worktreePaths.isEmpty {
+            let antigravityRecords = loadAntigravitySummaryRecords()
+            let antigravityWorkspaceCreators = loadAntigravityWorkspaceCreators(
+                paths: worktreePaths,
+                records: antigravityRecords
+            )
+            candidates += antigravityWorkspaceCreators
+            candidates += loadAntigravityWorktreeAddSessions(
+                paths: worktreePaths.subtracting(antigravityWorkspaceCreators.map(\.worktreePath)),
+                records: antigravityRecords
+            )
+        }
 
         var creators: [String: AgentWorktreeCreator] = [:]
         for candidate in candidates.sorted(by: { $0.createdAt < $1.createdAt }) {
@@ -148,6 +166,11 @@ struct AgentSessionNavigationResolver: Sendable {
         let codexTitles = associations.contains { $0.provider == .codex }
             ? loadCodexThreadTitles()
             : [:]
+        let hasAntigravityAssociations = associations.contains { $0.provider == .antigravity }
+        let antigravityRecords = hasAntigravityAssociations
+            ? loadAntigravitySummaryRecords()
+            : [:]
+        let hasAntigravityDataRoot = hasAntigravityAssociations && hasAntigravitySessionData()
 
         var resolutions: [AgentAssociation.ID: AgentSessionNavigationResolution] = [:]
         resolutions.reserveCapacity(associations.count)
@@ -163,6 +186,12 @@ struct AgentSessionNavigationResolver: Sendable {
                     association,
                     records: claudeRecords,
                     indexError: claudeIndexError
+                )
+            case .antigravity:
+                resolveAntigravity(
+                    association,
+                    records: antigravityRecords,
+                    hasDataRoot: hasAntigravityDataRoot
                 )
             }
         }
@@ -497,6 +526,349 @@ struct AgentSessionNavigationResolver: Sendable {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true)
     }
+
+    private static var defaultAntigravityAppDataRoot: URL {
+        if let override = ProcessInfo.processInfo.environment["ANTIGRAVITY_APP_DATA_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini", isDirectory: true)
+            .appendingPathComponent("antigravity", isDirectory: true)
+    }
+
+    private func resolveAntigravity(
+        _ association: AgentAssociation,
+        records: [String: AntigravitySummaryRecord],
+        hasDataRoot: Bool
+    ) -> AgentSessionNavigationResolution {
+        guard let sessionID = normalizedUUID(association.sessionID) else {
+            return .unavailable("The Antigravity session ID is invalid.")
+        }
+        guard hasDataRoot else {
+            return .unavailable(
+                "Antigravity session data is unavailable. Open Antigravity and try again."
+            )
+        }
+        let root = antigravityRootConversation(for: sessionID, in: records)
+        guard records[root.sessionID] != nil
+            || antigravityConversationExistsOnDisk(root.sessionID) else {
+            return .unavailable("Antigravity no longer has this conversation.")
+        }
+        guard let encodedID = root.sessionID.addingPercentEncoding(
+                  withAllowedCharacters: .urlPathAllowed
+              ),
+              let url = URL(string: "antigravity://conversation/\(encodedID)") else {
+            return .unavailable("The Antigravity session ID is invalid.")
+        }
+        return .available(url, title: root.title)
+    }
+
+    private func hasAntigravitySessionData() -> Bool {
+        let fm = FileManager.default
+        let candidates = [
+            antigravityAppDataRoot.appendingPathComponent("conversation_summaries.db"),
+            antigravityAppDataRoot.appendingPathComponent("brain", isDirectory: true),
+            antigravityAppDataRoot.appendingPathComponent("conversations", isDirectory: true)
+        ]
+        return candidates.contains { fm.fileExists(atPath: $0.path) }
+    }
+
+    private func antigravityConversationExistsOnDisk(_ sessionID: String) -> Bool {
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        let brainPath = antigravityAppDataRoot
+            .appendingPathComponent("brain", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
+            .path
+        if fm.fileExists(atPath: brainPath, isDirectory: &isDirectory), isDirectory.boolValue {
+            return true
+        }
+        let dbPath = antigravityAppDataRoot
+            .appendingPathComponent("conversations", isDirectory: true)
+            .appendingPathComponent("\(sessionID).db", isDirectory: false)
+            .path
+        return fm.fileExists(atPath: dbPath)
+    }
+
+    /// 子代理会话（`parent_conversation_id` 非空）向上归并到用户可见的根会话。
+    private func antigravityRootConversation(
+        for sessionID: String,
+        in records: [String: AntigravitySummaryRecord]
+    ) -> (sessionID: String, title: String?) {
+        var currentID = sessionID
+        var visited: Set<String> = [sessionID]
+        for _ in 0..<8 {
+            guard let parentID = records[currentID]?.parentConversationID,
+                  !visited.contains(parentID),
+                  records[parentID] != nil || antigravityConversationExistsOnDisk(parentID) else {
+                break
+            }
+            visited.insert(parentID)
+            currentID = parentID
+        }
+        let title = records[currentID]?.title ?? records[sessionID]?.title
+        return (currentID, title)
+    }
+
+    private func antigravityConversationCreationDate(
+        sessionID: String,
+        fallback: Date?
+    ) -> Date? {
+        let candidates = [
+            antigravityAppDataRoot
+                .appendingPathComponent("brain", isDirectory: true)
+                .appendingPathComponent(sessionID, isDirectory: true),
+            antigravityAppDataRoot
+                .appendingPathComponent("conversations", isDirectory: true)
+                .appendingPathComponent("\(sessionID).db", isDirectory: false)
+        ]
+        for url in candidates {
+            if let created = try? url.resourceValues(forKeys: [.creationDateKey]).creationDate {
+                return created
+            }
+        }
+        return fallback
+    }
+
+    private func loadAntigravityWorkspaceCreators(
+        paths: Set<String>,
+        records: [String: AntigravitySummaryRecord]
+    ) -> [AgentWorktreeCreator] {
+        guard !paths.isEmpty, !records.isEmpty else {
+            return []
+        }
+        var creators: [AgentWorktreeCreator] = []
+        for record in records.values {
+            let matchedPaths = record.workspacePaths.filter { paths.contains($0) }
+            guard !matchedPaths.isEmpty,
+                  let createdAt = antigravityConversationCreationDate(
+                      sessionID: record.conversationID,
+                      fallback: record.timestamp
+                  ) else {
+                continue
+            }
+            let root = antigravityRootConversation(for: record.conversationID, in: records)
+            for path in matchedPaths {
+                creators.append(AgentWorktreeCreator(
+                    worktreePath: path,
+                    provider: .antigravity,
+                    sessionID: root.sessionID,
+                    title: root.title,
+                    createdAt: createdAt,
+                    source: "antigravity"
+                ))
+            }
+        }
+        return creators
+    }
+
+    /// Antigravity 沙盒开启时，shell 里的 git hook 写不了仓库外目录；对近一天内新建且尚未匹配到
+    /// 创建者的 worktree，扫描修改时间不早于该 worktree 的会话日志，定位执行 `git worktree add` 的会话。
+    private func loadAntigravityWorktreeAddSessions(
+        paths: Set<String>,
+        records: [String: AntigravitySummaryRecord]
+    ) -> [AgentWorktreeCreator] {
+        let recentCutoff = Date().addingTimeInterval(-86_400)
+        var remaining: [String: Date] = [:]
+        for path in paths {
+            if let createdAt = AgentWorktreeCreatorStore.gitDirectoryCreationDate(
+                worktreeRoot: URL(fileURLWithPath: path, isDirectory: true)
+            ), createdAt >= recentCutoff {
+                remaining[path] = createdAt
+            }
+        }
+        let brainRoot = antigravityAppDataRoot.appendingPathComponent("brain", isDirectory: true)
+        guard let earliest = remaining.values.min(),
+              let entries = try? FileManager.default.contentsOfDirectory(
+                  at: brainRoot,
+                  includingPropertiesForKeys: [.isDirectoryKey],
+                  options: [.skipsHiddenFiles]
+              ) else {
+            return []
+        }
+        var creators: [AgentWorktreeCreator] = []
+        for entry in entries {
+            guard !remaining.isEmpty, !Task.isCancelled else {
+                break
+            }
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let sessionID = normalizedUUID(entry.lastPathComponent),
+                  let transcriptURL = Self.antigravityTranscriptURL(in: entry),
+                  let modifiedAt = try? transcriptURL.resourceValues(
+                      forKeys: [.contentModificationDateKey]
+                  ).contentModificationDate,
+                  modifiedAt >= earliest,
+                  let data = try? Data(contentsOf: transcriptURL, options: .alwaysMapped) else {
+                continue
+            }
+            let root = antigravityRootConversation(for: sessionID, in: records)
+            for (path, createdAt) in remaining
+            where modifiedAt >= createdAt && Self.containsGitWorktreeAddCommand(data, path: path) {
+                creators.append(AgentWorktreeCreator(
+                    worktreePath: path,
+                    provider: .antigravity,
+                    sessionID: root.sessionID,
+                    title: root.title,
+                    createdAt: createdAt,
+                    source: "antigravity"
+                ))
+                remaining[path] = nil
+            }
+        }
+        return creators
+    }
+
+    private static func antigravityTranscriptURL(in brainDirectory: URL) -> URL? {
+        let logs = brainDirectory
+            .appendingPathComponent(".system_generated", isDirectory: true)
+            .appendingPathComponent("logs", isDirectory: true)
+        for name in ["transcript.jsonl", "transcript_full.jsonl"] {
+            let candidate = logs.appendingPathComponent(name, isDirectory: false)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func containsGitWorktreeAddCommand(_ data: Data, path: String) -> Bool {
+        let needle = Data(path.utf8)
+        let marker = Data("worktree add".utf8)
+        let newline = Data([0x0A])
+        let delimiters: Set<UInt8> = [
+            UInt8(ascii: "\""),
+            UInt8(ascii: "\\"),
+            UInt8(ascii: "'"),
+            UInt8(ascii: " "),
+            UInt8(ascii: "\t"),
+            UInt8(ascii: "\n"),
+            UInt8(ascii: "\r")
+        ]
+        var searchStart = data.startIndex
+        while let match = data.range(of: needle, in: searchStart..<data.endIndex) {
+            let lineStart = data.range(
+                of: newline,
+                options: .backwards,
+                in: data.startIndex..<match.lowerBound
+            )?.upperBound ?? data.startIndex
+            let lineEnd = data.range(of: newline, in: match.upperBound..<data.endIndex)?.lowerBound
+                ?? data.endIndex
+            let next = match.upperBound < data.endIndex ? data[match.upperBound] : UInt8(ascii: "\n")
+            if delimiters.contains(next),
+               data.range(of: marker, in: lineStart..<lineEnd) != nil {
+                return true
+            }
+            searchStart = match.upperBound
+        }
+        return false
+    }
+
+    private func loadAntigravitySummaryRecords() -> [String: AntigravitySummaryRecord] {
+        let databaseURL = antigravityAppDataRoot.appendingPathComponent(
+            "conversation_summaries.db",
+            isDirectory: false
+        )
+        guard FileManager.default.fileExists(atPath: databaseURL.path),
+              let database = Self.openReadOnlySQLite(at: databaseURL) else {
+            return [:]
+        }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(database, """
+            SELECT conversation_id, title, workspace_uris, parent_conversation_id,
+                   last_user_input_time, last_modified_time
+            FROM conversation_summaries
+            """, -1, &statement, nil) == SQLITE_OK else {
+            return [:]
+        }
+        var records: [String: AntigravitySummaryRecord] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let rawID = sqlite3_column_text(statement, 0).map({ String(cString: $0) }),
+                  let sessionID = normalizedUUID(rawID) else {
+                continue
+            }
+            let title = sqlite3_column_text(statement, 1)
+                .map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }?
+                .nilIfEmpty
+            let workspaceURIs = sqlite3_column_text(statement, 2).map { String(cString: $0) }
+            let parentID = sqlite3_column_text(statement, 3)
+                .map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap(normalizedUUID)
+            let userInputTime = sqlite3_column_text(statement, 4).map { String(cString: $0) }
+            let modifiedTime = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+            records[sessionID] = AntigravitySummaryRecord(
+                conversationID: sessionID,
+                title: title,
+                workspacePaths: Self.decodeAntigravityWorkspacePaths(workspaceURIs),
+                parentConversationID: parentID,
+                timestamp: Self.parseAntigravityTimestamp(userInputTime)
+                    ?? Self.parseAntigravityTimestamp(modifiedTime)
+            )
+        }
+        return records
+    }
+
+    private static func openReadOnlySQLite(at url: URL) -> OpaquePointer? {
+        let escapedPath = url.path
+            .replacingOccurrences(of: "%", with: "%25")
+            .replacingOccurrences(of: "?", with: "%3f")
+            .replacingOccurrences(of: "#", with: "%23")
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI
+        for suffix in ["mode=ro", "mode=ro&immutable=1"] {
+            var database: OpaquePointer?
+            if sqlite3_open_v2("file:\(escapedPath)?\(suffix)", &database, flags, nil) == SQLITE_OK {
+                sqlite3_busy_timeout(database, 200)
+                return database
+            }
+            sqlite3_close(database)
+        }
+        return nil
+    }
+
+    private static func decodeAntigravityWorkspacePaths(_ rawJSON: String?) -> [String] {
+        guard let rawJSON,
+              let data = rawJSON.data(using: .utf8),
+              let uris = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return uris.compactMap { item in
+            let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: trimmed), url.isFileURL, !url.path.isEmpty else {
+                return nil
+            }
+            return url.standardizedFileURL.path
+        }
+    }
+
+    private static func parseAntigravityTimestamp(_ raw: String?) -> Date? {
+        guard var text = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return nil
+        }
+        // SQLite datetime 常写成 `YYYY-MM-DD HH:MM:SS.ffffff+00:00`，替换中间空格后按 ISO-8601 解析。
+        if text.count > 10 {
+            let separatorIndex = text.index(text.startIndex, offsetBy: 10)
+            if text[separatorIndex] == " " {
+                text.replaceSubrange(separatorIndex...separatorIndex, with: "T")
+            }
+        }
+        let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        if let date = try? Date(text, strategy: fractional) {
+            return date
+        }
+        return try? Date(text, strategy: Date.ISO8601FormatStyle())
+    }
+}
+
+private struct AntigravitySummaryRecord: Sendable {
+    let conversationID: String
+    let title: String?
+    let workspacePaths: [String]
+    let parentConversationID: String?
+    let timestamp: Date?
 }
 
 private struct CodexSessionIndexEntry: Decodable {

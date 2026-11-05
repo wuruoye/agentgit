@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 
 /// 创建某个 worktree 的 agent 会话。写入方：agent shell 里的 `git worktree add` 触发全局
-/// post-checkout hook（`git-hook`）；Claude Desktop、Codex App 自己建的 worktree 由 AgentGit
-/// 按宿主会话元数据补查（`claude-desktop`、`codex-app`）。
+/// post-checkout hook（`git-hook`）；Claude Desktop、Codex App、Antigravity 自己建的
+/// worktree 由 AgentGit 按宿主会话元数据补查（`claude-desktop`、`codex-app`、`antigravity`）。
 public struct AgentWorktreeCreator: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case worktreePath = "worktree_path"

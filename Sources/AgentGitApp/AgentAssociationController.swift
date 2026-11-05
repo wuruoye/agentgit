@@ -529,6 +529,16 @@ final class AgentAssociationController {
             return
         }
         guard let context else {
+            if association.provider == .antigravity {
+                if AntigravityComposerHandoff.activateOrNavigateSession(target.url) {
+                    errorMessage = nil
+                } else if openSessionURL(target.url, provider: .antigravity) == nil {
+                    contextDeliveryTask = Task {
+                        _ = await AntigravityComposerHandoff.navigate(sessionURL: target.url)
+                    }
+                }
+                return
+            }
             _ = openSessionURL(target.url, provider: association.provider)
             return
         }
@@ -546,20 +556,38 @@ final class AgentAssociationController {
             return
         }
         copyToPasteboard(context)
-        let canFillClaude = association.provider == .claude && ClaudeComposerHandoff.requestAccessIfNeeded()
-        let activatedExistingSession = canFillClaude && ClaudeComposerHandoff.activateExistingSession(handoff.url)
+        let canFillComposer: Bool
+        let activatedExistingSession: Bool
+        switch association.provider {
+        case .claude:
+            canFillComposer = ClaudeComposerHandoff.requestAccessIfNeeded()
+            activatedExistingSession = canFillComposer && ClaudeComposerHandoff.activateExistingSession(handoff.url)
+        case .antigravity:
+            canFillComposer = AntigravityComposerHandoff.requestAccessIfNeeded()
+            activatedExistingSession = canFillComposer && AntigravityComposerHandoff.activateOrNavigateSession(handoff.url)
+        case .codex:
+            canFillComposer = false
+            activatedExistingSession = false
+        }
         if !activatedExistingSession,
            let failure = openSessionURL(handoff.url, provider: association.provider) {
             onDelivery?(.failed(failure))
             return
         }
-        guard canFillClaude else {
+        guard canFillComposer else {
             onDelivery?(.copiedToPasteboard)
             return
         }
         contextDeliveryTask = Task {
             let started = ContinuousClock.now
-            let filled = await ClaudeComposerHandoff.fill(context, sessionURL: handoff.url)
+            let filled = switch association.provider {
+            case .claude:
+                await ClaudeComposerHandoff.fill(context, sessionURL: handoff.url)
+            case .antigravity:
+                await AntigravityComposerHandoff.fill(context, sessionURL: handoff.url)
+            case .codex:
+                false
+            }
             guard !Task.isCancelled else { return }
             AgentGitDiagnostics.shared.record("agent.context.delivery", fields: [
                 "provider": association.provider.rawValue,
@@ -579,8 +607,13 @@ final class AgentAssociationController {
                 "elapsed": String(describing: ContinuousClock.now - started)
             ])
         }
-        if provider == .claude,
-           let appURL = NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop")
+        let runningBundleID: String? = switch provider {
+        case .claude: "com.anthropic.claudefordesktop"
+        case .antigravity: AntigravityComposerHandoff.bundleIdentifier
+        case .codex: nil
+        }
+        if let runningBundleID,
+           let appURL = NSRunningApplication.runningApplications(withBundleIdentifier: runningBundleID)
             .first?.bundleURL {
             NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
                 guard let error else { return }

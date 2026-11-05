@@ -34,6 +34,35 @@ enum WorktreeCreatorHook {
         provider=codex session=$CODEX_THREAD_ID
         title=$(grep -F '"id":"'"$session"'"' "$HOME/.codex/session_index.jsonl" 2>/dev/null |
             tail -n 1 | /usr/bin/plutil -extract thread_name raw -o - - 2>/dev/null)
+    elif [ -n "$ANTIGRAVITY_CONVERSATION_ID" ]; then
+        provider=antigravity session=$ANTIGRAVITY_CONVERSATION_ID
+        agy_db="${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity}/conversation_summaries.db"
+        case "$session" in
+            *[!0-9A-Fa-f-]*) ;;
+            ????????-????-????-????-????????????)
+                if [ -f "$agy_db" ] && [ -x /usr/bin/sqlite3 ]; then
+                    agy_uri=$(printf '%s' "$agy_db" | sed 's/%/%25/g; s/?/%3f/g; s/#/%23/g')
+                    agy_row=$(/usr/bin/sqlite3 -init /dev/null -batch -noheader "file:$agy_uri?mode=ro" "
+                        WITH RECURSIVE chain(id, title, parent, depth) AS (
+                            SELECT conversation_id, title, parent_conversation_id, 0
+                            FROM conversation_summaries
+                            WHERE lower(conversation_id) = lower('$session')
+                            UNION ALL
+                            SELECT c.conversation_id, c.title, c.parent_conversation_id, chain.depth + 1
+                            FROM conversation_summaries c
+                            JOIN chain ON lower(c.conversation_id) = lower(chain.parent)
+                            WHERE chain.parent != '' AND chain.depth < 8
+                        )
+                        SELECT id || char(9) || replace(replace(title, char(10), ' '), char(13), ' ')
+                        FROM chain ORDER BY depth DESC LIMIT 1;
+                    " 2>/dev/null)
+                    if [ -n "$agy_row" ]; then
+                        tab=$(printf '\t')
+                        session=${agy_row%%"$tab"*}
+                        title=${agy_row#*"$tab"}
+                    fi
+                fi ;;
+        esac
     elif [ -n "$CLAUDE_CODE_HOST_SESSION_ID" ]; then
         provider=claude session=
     else

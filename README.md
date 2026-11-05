@@ -302,7 +302,7 @@ Files 导航与 Diff 文件标题的 `…` 菜单或右键菜单可以打开当�
 Send to Agent 的草稿开头留一行空白，后面附文件名与行号；有选中的代码时附带 `+` / `-`
 标记的原文，只右键定位一行时不附代码正文。草稿统一生成，开头空行包含在实际粘贴文本中。
 Codex 线程链接带 `prompt` 参数，打开后填入输入框；
-Claude Desktop 立即打开目标会话，通过 macOS 辅助功能填写，保留已有草稿，并把光标移到开头空行。
+Claude Desktop 与 Antigravity 立即打开目标会话，通过 macOS 辅助功能填写，保留已有草稿，并把光标移到开头空行。
 首次使用需在系统设置的「隐私与安全性 → 辅助功能」中允许 AgentGit；无法填写时仍可从剪贴板粘贴。
 关联多个会话时先选择目标，没有关联会话时按钮禁用。Copy as Quote 复制带仓库、worktree 和审阅范围的引用文本。
 Pending 的 Files 导航按 Working / Staged 分组，同一路径的两份 Diff 保持独立选择；列表获得
@@ -483,7 +483,9 @@ Settings 的 Agents 页面显示已登记的会话数量；存储 JSON 损坏时
 正常数据不会自动删除。
 
 主 App 只在选中 worktree 的标题栏显示会话按钮，侧栏项目列表保持纯 Git 信息。点击按钮
-直接打开对应会话，悬停显示会话详情。Codex 会话使用规范 thread UUID 打开；Claude 的规范
+直接打开对应会话，悬停显示会话详情。Codex 会话使用规范 thread UUID 打开；Antigravity
+只读 `conversation_summaries.db` 与 `brain/` 解析根会话及最新标题，使用
+`antigravity://conversation/<id>` 配合 macOS 辅助功能切换到对应会话；Claude 的规范
 session UUID 与 Desktop 内部 session ID 可能不同，主 App 在后台只读 Claude Desktop 的
 JSON 会话索引解析 Desktop session ID，不读取 transcript 正文。记录里有 `host_session_id`
 时直接按它找未归档的 Desktop 会话；否则按 `cliSessionId` 匹配。会话回退、清空或撤销清空后
@@ -494,8 +496,9 @@ Desktop 会话时，会话按钮、侧栏右键菜单和选区的 Send to Agent 
 其他格式的 Desktop session ID 使用 `claude://claude.ai/claude-code-desktop/<id>` 打开。
 索引映射已经失效的关联显示为 Unavailable，并排到仍可打开的会话之后，可从右键菜单移除。
 
-AgentGit 不扫描 transcript，唯一的例外是查 Codex `create_worktree` 建的 worktree 属于哪个线程时，
-只读 worktree 创建之后仍在写入的 Codex 会话日志，见下文「Worktree 创建者」；也不启动额外后台服务。
+AgentGit 不扫描常规历史 transcript，仅在补查近一天内由 Codex `create_worktree` 或
+Antigravity 沙盒内 `git worktree add` 新建的 worktree 时，只读 worktree 创建之后仍在写入的
+会话日志，见下文「Worktree 创建者」；也不启动额外后台服务。
 关联数据的读取、合并与原子写入通过
 独立锁文件串行执行，数据文件与锁文件权限均为 `0600`。
 
@@ -528,17 +531,19 @@ AgentGit 不往仓库的 `.git` 里写东西：
 }
 ```
 
-记录有三种来源：
+记录有四种来源：
 
 | `source` | 创建方式 | 会话来源 |
 |---|---|---|
-| `git-hook` | agent shell 里执行 `git worktree add`，包括 Claude 的 `EnterWorktree` | 环境变量，依次认 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CLAUDE_CODE_HOST_SESSION_ID` |
+| `git-hook` | agent shell 里执行 `git worktree add`，包括 Claude 的 `EnterWorktree` | 环境变量，依次认 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`ANTIGRAVITY_CONVERSATION_ID`、`CLAUDE_CODE_HOST_SESSION_ID` |
 | `claude-desktop` | Claude Desktop 新建会话时自己建的 worktree | Desktop 会话索引里 `worktreePath` 等于该路径的会话 |
 | `codex-app` | Codex App 在 `~/.codex/worktrees/` 下建的 worktree | `~/.codex/state_<n>.sqlite` 里以该路径为 `cwd` 的最早线程；线程里调用 `create_worktree` 建的，取会话日志里 `worktreeGitRoot` 等于该路径的那次调用所在线程 |
+| `antigravity` | Antigravity 分支工作区或沙盒内 `git worktree add` 建的 worktree | `~/.gemini/antigravity/conversation_summaries.db` 中 `workspace_uris` 匹配该路径的会话，或近一天内会话日志中执行 `git worktree add` 的会话（子代理向上归并到根会话） |
 
 - hook 只有 Desktop 会话 ID 时，从该会话的 Desktop 索引读出 `cliSessionId`；Claude 的标题和
   `host_session_id` 只在索引的 `cliSessionId` 与会话一致时写入。Codex 标题取
-  `~/.codex/session_index.jsonl` 里该线程最新的 `thread_name`。hook 写完后用
+  `~/.codex/session_index.jsonl` 里该线程最新的 `thread_name`；Antigravity 从
+  `conversation_summaries.db` 只读查询根会话与标题。hook 写完后用
   `notifyutil -p com.sigma.agentgit.worktree-creators.changed` 通知 AgentGit 重读。
 - 宿主自己建的 worktree 不经过 agent shell，hook 认不出会话，改写待查标记
   `worktree-creators/pending/<路径哈希>` 并发同一个通知。AgentGit 不论在前台还是后台，
@@ -558,7 +563,7 @@ worktree 页面工具栏的会话按钮把创建者会话排在最前，点击�
 创建者记录不能在这里移除。All Worktrees 列表在目录名后显示创建者。标题优先取宿主索引里的最新值，其次是记录里的
 `title`，都没有时显示 provider 和会话 ID 前 8 位；悬停显示 provider、会话 ID 和创建时间。
 右键 `Open Creator Session` 打开该会话：Codex 用 `codex://threads/<id>`，Claude 按
-Desktop 会话索引解析出的 Desktop 会话打开。
+Desktop 会话索引解析出的 Desktop 会话打开，Antigravity 用 `antigravity://conversation/<id>` 配合辅助功能切换。
 
 ## M1 验收
 

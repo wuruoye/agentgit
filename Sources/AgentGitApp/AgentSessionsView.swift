@@ -48,7 +48,7 @@ struct AgentSessionsButton: View {
                 )
             }
         }
-        .frame(width: 136, height: ReviewControlMetrics.height)
+        .frame(width: 164, height: ReviewControlMetrics.height)
     }
 
     private func shortcutButton(for association: AgentAssociation) -> some View {
@@ -186,6 +186,8 @@ extension AgentProvider {
             "terminal"
         case .claude:
             "sparkles"
+        case .antigravity:
+            "atom"
         }
     }
 
@@ -195,6 +197,8 @@ extension AgentProvider {
             .blue
         case .claude:
             .orange
+        case .antigravity:
+            .indigo
         }
     }
 }

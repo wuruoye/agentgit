@@ -2084,9 +2084,12 @@ struct IntegratedReviewWorkspace: View {
         let sessions = selectionAgentSessions
         let sendHelp: String
         if let session = sessions.first, sessions.count == 1 {
-            sendHelp = session.provider == .codex
-                ? "Open the Codex session for this worktree with the selection in its composer"
-                : "Open the Claude session for this worktree and fill its composer with the selection"
+            sendHelp = switch session.provider {
+            case .codex:
+                "Open the Codex session for this worktree with the selection in its composer"
+            case .claude, .antigravity:
+                "Open the \(session.provider.displayName) session for this worktree and fill its composer with the selection"
+            }
         } else if sessions.isEmpty {
             sendHelp = "No agent session is linked to this worktree"
         } else {

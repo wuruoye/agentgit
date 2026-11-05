@@ -4,9 +4,33 @@ import Foundation
 public enum AgentProvider: String, Codable, CaseIterable, Hashable, Sendable {
     case codex
     case claude
+    case antigravity
 
     public var displayName: String {
         rawValue.capitalized
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        switch rawValue.lowercased() {
+        case "codex":
+            self = .codex
+        case "claude":
+            self = .claude
+        case "antigravity", "agy":
+            self = .antigravity
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown agent provider: \(rawValue)"
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
