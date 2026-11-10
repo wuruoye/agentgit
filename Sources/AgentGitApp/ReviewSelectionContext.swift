@@ -108,9 +108,14 @@ struct ReviewSelectionContext: Equatable {
         """
     }
 
+    /// 仓库根目录名，和侧栏里项目的显示名一致。
+    var repositoryName: String {
+        URL(fileURLWithPath: repositoryPath).lastPathComponent
+    }
+
     /// 第一行留给用户输入；此处生成最终文本，交付时原样粘贴。
     func agentDraft(includingCode: Bool) -> String {
-        var parts = ["", "文件：\(filePath)", "行号：\(lineRangeDescription)"]
+        var parts = ["", "文件：\(repositoryName)/\(filePath)", "行号：\(lineRangeDescription)"]
         if includingCode, !lines.isEmpty {
             let code = quotedCode
             let fence = Self.fence(for: code)

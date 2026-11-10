@@ -126,6 +126,27 @@ private func context(
     """)
 }
 
+@Test func agentDraftPrefixesFileWithRepositoryName() {
+    let selection = context(lines: [
+        line(1, .deletion, old: 7, new: nil, "a"),
+        line(2, .addition, old: nil, new: 7, "b")
+    ])
+    #expect(selection.repositoryName == "repo")
+    #expect(selection.agentDraft(includingCode: false) == """
+
+    文件：repo/Sources/App/Main.swift
+    行号：old 7, new 7
+    """)
+    #expect(selection.agentDraft(includingCode: true).hasSuffix("""
+    文件：repo/Sources/App/Main.swift
+    行号：old 7, new 7
+    ```diff
+    -a
+    +b
+    ```
+    """))
+}
+
 @Test func selectionTextLengthensFenceAroundBackticks() {
     let selection = context(lines: [
         line(1, .addition, old: nil, new: 1, "```swift"),

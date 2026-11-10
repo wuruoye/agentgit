@@ -77,16 +77,19 @@ private func openCustomApplication(
         return
     }
 
-    // AS 的命令行入口会把文件交给已打开的所属工程。
-    // 直接传文件路径，工程选择由 IDE 处理。
     let bundle = Bundle(url: applicationURL)
     if opensSelectedFile,
-       bundle?.bundleIdentifier?.hasPrefix("com.google.android.studio") == true,
-       let executableURL = bundle?.executableURL {
+       let launch = EditorFileLaunch(
+           bundleIdentifier: bundle?.bundleIdentifier,
+           applicationURL: applicationURL,
+           executableURL: bundle?.executableURL,
+           fileURL: targetURL,
+           lineNumber: lineNumber
+       ) {
+        let applicationName = entry.applicationName(for: applicationURL)
         let process = Process()
-        process.executableURL = executableURL
-        process.arguments = lineNumber.map { ["--line", String(max(1, $0)), targetURL.path] }
-            ?? [targetURL.path]
+        process.executableURL = launch.executableURL
+        process.arguments = launch.arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { process in
@@ -94,7 +97,7 @@ private func openCustomApplication(
             Task { @MainActor in
                 presentOpenWithFailure(
                     title: "Couldn’t Open File",
-                    message: "Android Studio couldn’t open “\(targetURL.path)” (exit code \(process.terminationStatus))."
+                    message: "\(applicationName) couldn’t open “\(targetURL.path)” (exit code \(process.terminationStatus))."
                 )
             }
         }
@@ -115,6 +118,48 @@ private func openCustomApplication(
         Task { @MainActor in
             presentOpenWithFailure(title: "Couldn’t Open Application", message: message)
         }
+    }
+}
+
+/// 通过 IDE 自带的命令行入口打开文件。返回 nil 时交给系统打开。
+/// - Android Studio 的入口会把文件交给已打开的所属工程，所以选中文件时始终走它，工程选择由 IDE 处理。
+/// - 系统打开文件时没法指定行号，VS Code 只在带行号时用 `code --goto 文件:行号`。
+///   `vscode://file/…` 链接默认每次都弹确认框，所以不用它。
+struct EditorFileLaunch: Equatable {
+    let executableURL: URL
+    let arguments: [String]
+
+    init(executableURL: URL, arguments: [String]) {
+        self.executableURL = executableURL
+        self.arguments = arguments
+    }
+
+    init?(
+        bundleIdentifier: String?,
+        applicationURL: URL,
+        executableURL: URL?,
+        fileURL: URL,
+        lineNumber: Int?,
+        isExecutable: (URL) -> Bool = { FileManager.default.isExecutableFile(atPath: $0.path) }
+    ) {
+        let line = lineNumber.map { String(max(1, $0)) }
+        if bundleIdentifier?.hasPrefix("com.google.android.studio") == true, let executableURL {
+            self.init(
+                executableURL: executableURL,
+                arguments: line.map { ["--line", $0, fileURL.path] } ?? [fileURL.path]
+            )
+            return
+        }
+        // 正式版的入口叫 code，Insiders 版叫 code-insiders。
+        if bundleIdentifier?.hasPrefix("com.microsoft.VSCode") == true,
+           let line,
+           let cli = ["code", "code-insiders"]
+               .map({ applicationURL.appending(path: "Contents/Resources/app/bin/\($0)") })
+               .first(where: isExecutable) {
+            self.init(executableURL: cli, arguments: ["--goto", "\(fileURL.path):\(line)"])
+            return
+        }
+        return nil
     }
 }
 

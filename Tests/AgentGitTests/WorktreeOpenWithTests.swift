@@ -122,6 +122,74 @@ import Testing
     #expect(named.menuTitle(applicationURL: nil) == "Open with Flutter Studio")
 }
 
+@Test func editorFileLaunchJumpsToLine() {
+    let file = URL(fileURLWithPath: "/repo/Sources/My App/Main.swift")
+    let studioApp = URL(fileURLWithPath: "/Applications/Android Studio.app")
+    let studioExecutable = studioApp.appending(path: "Contents/MacOS/studio")
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.google.android.studio",
+        applicationURL: studioApp,
+        executableURL: studioExecutable,
+        fileURL: file,
+        lineNumber: 0
+    ) == EditorFileLaunch(executableURL: studioExecutable, arguments: ["--line", "1", file.path]))
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.google.android.studio",
+        applicationURL: studioApp,
+        executableURL: studioExecutable,
+        fileURL: file,
+        lineNumber: nil
+    )?.arguments == [file.path])
+
+    let codeApp = URL(fileURLWithPath: "/Applications/Visual Studio Code.app")
+    let codeCLI = codeApp.appending(path: "Contents/Resources/app/bin/code")
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.microsoft.VSCode",
+        applicationURL: codeApp,
+        executableURL: codeApp.appending(path: "Contents/MacOS/Code"),
+        fileURL: file,
+        lineNumber: 42,
+        isExecutable: { $0 == codeCLI }
+    ) == EditorFileLaunch(executableURL: codeCLI, arguments: ["--goto", "\(file.path):42"]))
+
+    let insidersApp = URL(fileURLWithPath: "/Applications/Visual Studio Code - Insiders.app")
+    let insidersCLI = insidersApp.appending(path: "Contents/Resources/app/bin/code-insiders")
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.microsoft.VSCodeInsiders",
+        applicationURL: insidersApp,
+        executableURL: nil,
+        fileURL: file,
+        lineNumber: 7,
+        isExecutable: { $0 == insidersCLI }
+    )?.executableURL == insidersCLI)
+
+    // 不带行号或找不到命令行入口时交给系统打开。
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.microsoft.VSCode",
+        applicationURL: codeApp,
+        executableURL: nil,
+        fileURL: file,
+        lineNumber: nil,
+        isExecutable: { _ in true }
+    ) == nil)
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.microsoft.VSCode",
+        applicationURL: codeApp,
+        executableURL: nil,
+        fileURL: file,
+        lineNumber: 42,
+        isExecutable: { _ in false }
+    ) == nil)
+    #expect(EditorFileLaunch(
+        bundleIdentifier: "com.apple.dt.Xcode",
+        applicationURL: URL(fileURLWithPath: "/Applications/Xcode.app"),
+        executableURL: nil,
+        fileURL: file,
+        lineNumber: 42,
+        isExecutable: { _ in true }
+    ) == nil)
+}
+
 @Test func openWithEntriesEncodeAndDecode() throws {
     let entry = WorktreeOpenWithEntry(
         name: "Flutter",
