@@ -106,6 +106,8 @@ struct IntegratedReviewWorkspace: View {
     @State private var navigationHistory = ReviewNavigationHistory()
     @State private var suppressedHistoryFilterValue: String?
     @State private var fileFocusedFromDiffID: String?
+    /// 左侧列表要滚到能看见的行；带序号，同一行再次请求也会滚。
+    @State private var navigatorRevealRequest: NavigatorRevealRequest?
     @State private var collapsedDiffGroupIDs: Set<String> = []
     @State private var diffCommandSequence: UInt64 = 0
     @State private var diffCommand: DiffStackCommand?
@@ -117,6 +119,10 @@ struct IntegratedReviewWorkspace: View {
     @AppStorage("agentgit.review-navigator-hidden") private var isNavigatorHidden = false
     /// 左栏下半的提交列表可以收成一行标题。
     @AppStorage("agentgit.review-commits-collapsed") private var isCommitsSectionCollapsed = false
+    /// 提交列表占左栏可用高度的比例，拖动文件树和提交列表之间的分隔线来调整。
+    @AppStorage("agentgit.review-commits-fraction") private var commitsSectionFraction = 0.45
+    /// 拖动分隔线时，按下那一刻提交列表的高度。
+    @State private var commitsResizeStartHeight: CGFloat?
     /// 过滤框平时收起，由顶栏搜索按钮或 ⌘F 打开；框里有文字时一直显示。
     @State private var isNavigatorSearchVisible = false
     @FocusState private var isCommitsNavigatorFocused: Bool
@@ -607,30 +613,63 @@ struct IntegratedReviewWorkspace: View {
     // MARK: - Navigation
 
     /// 左栏上半是文件树，下半是提交列表，中间一条细线；两部分同时可见，⌘1 / ⌘2 切换焦点。
+    /// 提交列表展开时，拖动这条线可以调整上下两部分的高度。
     private var navigationPane: some View {
         GeometryReader { geometry in
+            let available = max(0, geometry.size.height - Self.commitsHeaderHeight - 1)
+            let commitsHeight = clampedCommitsSectionHeight(
+                available * commitsSectionFraction,
+                available: available
+            )
             VStack(spacing: 0) {
                 filesSection
                     .frame(maxHeight: .infinity)
-                Rectangle()
-                    .fill(Color(nsColor: AgentGitPalette.reviewDivider))
-                    .frame(height: 1)
+                navigatorSplitDivider(commitsHeight: commitsHeight, available: available)
                 commitsSectionHeader
                 if !isCommitsSectionCollapsed {
                     historySection
-                        .frame(height: commitsSectionHeight(totalHeight: geometry.size.height))
+                        .frame(height: commitsHeight)
                 }
             }
         }
         .background(Color(nsColor: AgentGitPalette.reviewNavigationBackground))
     }
 
-    private func commitsSectionHeight(totalHeight: CGFloat) -> CGFloat {
-        let available = max(0, totalHeight - Self.commitsHeaderHeight - 1)
-        return min(available, max(160, available * 0.45))
+    private func navigatorSplitDivider(commitsHeight: CGFloat, available: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color(nsColor: AgentGitPalette.reviewDivider))
+            .frame(height: 1)
+            .overlay {
+                if !isCommitsSectionCollapsed {
+                    NavigatorSplitHandle(
+                        onDragChanged: { offset in
+                            let start = commitsResizeStartHeight ?? commitsHeight
+                            commitsResizeStartHeight = start
+                            guard available > 0 else { return }
+                            commitsSectionFraction = clampedCommitsSectionHeight(
+                                start - offset,
+                                available: available
+                            ) / available
+                        },
+                        onDragEnded: { commitsResizeStartHeight = nil }
+                    )
+                    .frame(height: Self.splitHandleHitHeight)
+                }
+            }
+            // 拖动区域上下各伸出几像素，盖在文件树和 Commits 标题上面才能点到。
+            .zIndex(1)
+    }
+
+    /// 提交列表和文件树都至少留一小段高度；左栏太矮放不下时优先保留文件树。
+    private func clampedCommitsSectionHeight(_ height: CGFloat, available: CGFloat) -> CGFloat {
+        let upper = max(0, available - Self.minimumFilesSectionHeight)
+        return min(upper, max(min(Self.minimumCommitsSectionHeight, upper), height))
     }
 
     private static let commitsHeaderHeight: CGFloat = 38
+    private static let minimumCommitsSectionHeight: CGFloat = 72
+    private static let minimumFilesSectionHeight: CGFloat = 80
+    private static let splitHandleHitHeight: CGFloat = 9
 
     private var commitsSectionHeader: some View {
         Button {
@@ -1061,6 +1100,19 @@ struct IntegratedReviewWorkspace: View {
     }
 
     private var filesList: some View {
+        ScrollViewReader { proxy in
+            filesListContent
+                .onChange(of: navigatorRevealRequest) { _, request in
+                    guard let request else { return }
+                    // 刚展开的文件夹要等列表按新的行刷新完，才能滚到里面的文件。
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(request.rowID)
+                    }
+                }
+        }
+    }
+
+    private var filesListContent: some View {
         List(selection: navigatorSelectionBinding) {
             if visibleFileItems.isEmpty {
                 if review.filterText.isEmpty {
@@ -1145,6 +1197,7 @@ struct IntegratedReviewWorkspace: View {
                 onSelectFolder: { folderID in
                     navigatorSelection = .folder(folderID)
                     isFilesNavigatorFocused = true
+                    scrollDiffToNavigatorFolder(folderID)
                     guard review.filterText.isEmpty else {
                         return
                     }
@@ -1156,6 +1209,9 @@ struct IntegratedReviewWorkspace: View {
                 },
                 fileContextMenu: { item in
                     fileUtilityMenu(for: item)
+                },
+                folderContextMenu: { path in
+                    folderUtilityMenu(path: path)
                 }
             )
             .tag(row.selection)
@@ -1167,7 +1223,8 @@ struct IntegratedReviewWorkspace: View {
         }
     }
 
-    private static let navigatorIndent: CGFloat = 14
+    /// 每层缩进。和文件夹行的箭头列一样宽，子项的图标从父文件夹箭头的右边开始。
+    private static let navigatorIndent: CGFloat = 10
 
     /// 键盘选择也打开文件；鼠标点击另行处理，确保重复点击仍能定位。
     private var navigatorSelectionBinding: Binding<NavigatorSelection?> {
@@ -1181,8 +1238,8 @@ struct IntegratedReviewWorkspace: View {
                 switch requestedSelection {
                 case let .file(fileID):
                     focusFileFromNavigator(fileID)
-                case .folder:
-                    break
+                case let .folder(folderID):
+                    scrollDiffToNavigatorFolder(folderID)
                 case nil:
                     focusFileFromNavigator(nil, expandsFile: false)
                 }
@@ -1207,17 +1264,7 @@ struct IntegratedReviewWorkspace: View {
         fileFocusedFromDiffID = nil
         navigatorSelection = fileID.map(NavigatorSelection.file)
         if expandsFile, let fileID {
-            if let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
-                let groupID = activeContext == .pending
-                    ? (item.scope == .staged ? "staged" : "working")
-                    : "context"
-                collapsedDiffGroupIDs.remove(groupID)
-            }
-            diffCommandSequence &+= 1
-            diffCommand = DiffStackCommand(
-                id: diffCommandSequence,
-                action: .focusFile(fileID)
-            )
+            scrollDiff(toFileID: fileID)
         }
         if expandsFile,
            let fileID,
@@ -1231,10 +1278,133 @@ struct IntegratedReviewWorkspace: View {
         updateFocusedFile(fileID)
     }
 
+    private func scrollDiff(toFileID fileID: String) {
+        if let item = currentFileItems.first(where: { $0.id.stackID == fileID }) {
+            let groupID = activeContext == .pending
+                ? (item.scope == .staged ? "staged" : "working")
+                : "context"
+            collapsedDiffGroupIDs.remove(groupID)
+        }
+        diffCommandSequence &+= 1
+        diffCommand = DiffStackCommand(
+            id: diffCommandSequence,
+            action: .focusFile(fileID)
+        )
+    }
+
+    /// 左侧选中文件夹时，右侧滚到文件夹里的第一个文件，焦点也给它，左侧仍选中文件夹。
+    /// 焦点文件已经在这个文件夹里就不动，免得点文件夹收起时右侧跳回文件夹开头。
+    private func scrollDiffToNavigatorFolder(_ folderID: String) {
+        if let focusedFileID = review.focusedFileID,
+           let placement = navigatorPlacement(forFileID: focusedFileID),
+           navigatorAncestorFolderIDs(
+               ofFilePath: placement.item.change.path,
+               namespace: placement.namespace
+           ).contains(folderID) {
+            return
+        }
+        let nodes = filteredNavigatorTreeNodes(currentNavigatorTreeNodes, query: review.filterText)
+        guard let fileID = firstNavigatorFileID(in: folderID, nodes: nodes) else {
+            return
+        }
+        fileFocusedFromDiffID = nil
+        scrollDiff(toFileID: fileID)
+        updateFocusedFile(fileID)
+    }
+
+    /// 在右侧点了文件，或者右侧滚动停在某个文件：左侧展开挡住它的文件夹，选中并滚到这个文件。
     private func focusFileFromDiff(_ fileID: String) {
         fileFocusedFromDiffID = fileID
-        navigatorSelection = .file(fileID)
+        revealFileInNavigator(fileID)
         updateFocusedFile(fileID)
+    }
+
+    /// 右侧滚动途中只改左侧选中，不展开文件夹，免得左侧边滚边变长；文件被收起的文件夹挡住时，
+    /// 先选中挡住它的那个文件夹。滚动停下再展开并改焦点，改焦点会重绘 diff，途中改会打断滚动惯性。
+    private func followVisibleDiffFile(_ fileID: String, isSettled: Bool) {
+        if isSettled {
+            if review.focusedFileID != fileID || navigatorSelection != .file(fileID) {
+                focusFileFromDiff(fileID)
+            }
+            return
+        }
+        guard let target = visibleNavigatorSelection(forFileID: fileID),
+              navigatorSelection != target else {
+            return
+        }
+        navigatorSelection = target
+        requestNavigatorReveal(target)
+    }
+
+    private func revealFileInNavigator(_ fileID: String) {
+        expandNavigatorAncestors(ofFileID: fileID)
+        navigatorSelection = .file(fileID)
+        requestNavigatorReveal(.file(fileID))
+    }
+
+    private func requestNavigatorReveal(_ selection: NavigatorSelection) {
+        let rowID = switch selection {
+        case let .file(fileID): "navigator-file:\(fileID)"
+        case let .folder(folderID): folderID
+        }
+        navigatorRevealRequest = NavigatorRevealRequest(
+            rowID: rowID,
+            sequence: (navigatorRevealRequest?.sequence ?? 0) &+ 1
+        )
+    }
+
+    /// 文件在左侧哪棵树里，和 filesList 的分组一致。
+    private func navigatorPlacement(
+        forFileID fileID: String
+    ) -> (namespace: String, items: [IntegratedFileItem], item: IntegratedFileItem)? {
+        guard let item = currentFileItems.first(where: { $0.id.stackID == fileID }) else {
+            return nil
+        }
+        switch activeContext {
+        case .pending:
+            return item.scope == .staged
+                ? ("staged", stagedItems, item)
+                : ("working", snapshotPendingItems.workingAndUntracked, item)
+        case .commit, .range:
+            return ("context", contextItems, item)
+        }
+    }
+
+    /// 文件在左侧当前能看到的那一行：文件行本身，或者挡住它的文件夹行。
+    private func visibleNavigatorSelection(forFileID fileID: String) -> NavigatorSelection? {
+        guard let placement = navigatorPlacement(forFileID: fileID) else {
+            return nil
+        }
+        let rows = navigatorTreeCache.rows(
+            items: placement.items,
+            namespace: placement.namespace,
+            query: review.filterText,
+            collapsedFolderIDs: review.collapsedNavigatorFolderIDs
+        ).rows
+        return navigatorRowSelection(
+            forFilePath: placement.item.change.path,
+            fileID: fileID,
+            in: rows
+        )
+    }
+
+    /// 展开挡住文件的所有文件夹。合并显示的文件夹行沿用链上最深一层的 id，逐层前缀都去掉即可。
+    private func expandNavigatorAncestors(ofFileID fileID: String) {
+        guard review.filterText.isEmpty,
+              let placement = navigatorPlacement(forFileID: fileID) else {
+            return
+        }
+        let blocking = review.collapsedNavigatorFolderIDs.intersection(
+            navigatorAncestorFolderIDs(
+                ofFilePath: placement.item.change.path,
+                namespace: placement.namespace
+            )
+        )
+        guard !blocking.isEmpty else {
+            return
+        }
+        review.collapsedNavigatorFolderIDs.subtract(blocking)
+        model.reviewStates.save(review, for: stateKey)
     }
 
     private func updateFocusedFile(_ fileID: String?) {
@@ -1296,6 +1466,74 @@ struct IntegratedReviewWorkspace: View {
         }
         Button("Copy Absolute Path") {
             performFileUtilityAction(fileID: item.id.stackID, action: .copyAbsolutePath)
+        }
+        Divider()
+        sendPathToAgentMenu(ReviewPathContext(
+            repositoryPath: selectionRepositoryPath,
+            path: item.change.path,
+            isFolder: false
+        ))
+    }
+
+    /// 文件夹是否还在要到点击时才查，避免每次重绘都访问磁盘。
+    @ViewBuilder
+    private func folderUtilityMenu(path: String) -> some View {
+        Button("Open with Visual Studio Code") {
+            guard let folderURL = existingWorkingFolderURL(path: path),
+                  let applicationURL = Self.visualStudioCodeURL else {
+                return
+            }
+            openInVisualStudioCode(folderURL, applicationURL: applicationURL)
+        }
+        .disabled(Self.visualStudioCodeURL == nil)
+        ForEach(fileOpenWithEntries) { entry in
+            let applicationURL = entry.applicationURL()
+            Button(entry.menuTitle(applicationURL: applicationURL, opensSelectedFile: true)) {
+                guard let folderURL = existingWorkingFolderURL(path: path) else {
+                    return
+                }
+                openFolder(folderURL, with: entry)
+            }
+            .disabled(applicationURL == nil)
+        }
+        Button("Reveal in Finder") {
+            guard let folderURL = workingFolderURL(path: path) else { return }
+            revealInFinder(nearestExistingURL(from: folderURL))
+        }
+        Divider()
+        Button("Copy Relative Path") {
+            copyToPasteboard(path)
+        }
+        Button("Copy Absolute Path") {
+            guard let folderURL = workingFolderURL(path: path) else { return }
+            copyToPasteboard(folderURL.path)
+        }
+        Divider()
+        sendPathToAgentMenu(ReviewPathContext(
+            repositoryPath: selectionRepositoryPath,
+            path: path,
+            isFolder: true
+        ))
+    }
+
+    /// 只有一个会话时直接发送；多个会话时展开子菜单选择；没有会话时置灰。
+    @ViewBuilder
+    private func sendPathToAgentMenu(_ context: ReviewPathContext) -> some View {
+        let sessions = selectionAgentSessions
+        let noun = context.isFolder ? "folder path" : "file path"
+        if sessions.count > 1 {
+            Menu("Send to Agent") {
+                ForEach(sessions) { session in
+                    Button(agentSessionMenuTitle(session)) {
+                        sendDraftToAgent(context.agentDraft, sessionID: session.id, noun: noun)
+                    }
+                }
+            }
+        } else {
+            Button("Send to Agent") {
+                sendDraftToAgent(context.agentDraft, sessionID: sessions.first?.id, noun: noun)
+            }
+            .disabled(sessions.isEmpty)
         }
     }
 
@@ -1846,6 +2084,7 @@ struct IntegratedReviewWorkspace: View {
                     onHunkPositionChanged: { position in
                         hunkPositionState.position = position
                     },
+                    onVisibleFileChanged: followVisibleDiffFile,
                     selectionActions: selectionActions,
                     onSelectionContextAction: performSelectionContextAction
                 )
@@ -2102,11 +2341,7 @@ struct IntegratedReviewWorkspace: View {
                 systemImage: "paperplane",
                 help: sendHelp,
                 choices: sessions.map { session in
-                    DiffSelectionAction.Choice(
-                        id: session.id,
-                        title: "\(session.provider.displayName) · "
-                            + model.agentAssociations.displayTitle(for: session)
-                    )
+                    DiffSelectionAction.Choice(id: session.id, title: agentSessionMenuTitle(session))
                 },
                 isEnabled: !sessions.isEmpty
             ),
@@ -2132,39 +2367,57 @@ struct IntegratedReviewWorkspace: View {
             copyToPasteboard(context.text)
             showSelectionNotice(.init(message: "Copied selection as a quote", systemImage: "doc.on.clipboard"))
         case SelectionActionID.sendToAgent:
-            guard let session = selectionAgentSessions.first(where: { $0.id == choiceID }) else {
-                showSelectionNotice(.init(
-                    message: "No agent session is linked to this worktree",
-                    systemImage: "exclamationmark.triangle",
-                    isWarning: true
-                ))
-                return
-            }
-            let provider = session.provider.displayName
-            let draft = context.agentDraft(includingCode: excerpt.includesSelectedCode)
-            model.agentAssociations.open(session, attaching: draft) { delivery in
-                switch delivery {
-                case .prefilled:
-                    showSelectionNotice(.init(
-                        message: "Opened \(provider) with the selection in the composer",
-                        systemImage: "paperplane"
-                    ))
-                case .copiedToPasteboard:
-                    showSelectionNotice(.init(
-                        message: "Selection copied — paste it into the \(provider) session (⌘V)",
-                        systemImage: "doc.on.clipboard"
-                    ))
-                case let .failed(message):
-                    showSelectionNotice(.init(
-                        message: message,
-                        systemImage: "exclamationmark.triangle",
-                        isWarning: true
-                    ))
-                }
-            }
+            sendDraftToAgent(
+                context.agentDraft(includingCode: excerpt.includesSelectedCode),
+                sessionID: choiceID,
+                noun: "selection"
+            )
         default:
             return
         }
+    }
+
+    private func agentSessionMenuTitle(_ session: AgentAssociation) -> String {
+        "\(session.provider.displayName) · " + model.agentAssociations.displayTitle(for: session)
+    }
+
+    /// 打开 worktree 关联的 agent 会话并把草稿填进输入框；noun 用在提示里，如 "selection"、"file path"。
+    private func sendDraftToAgent(_ draft: String, sessionID: String?, noun: String) {
+        guard let session = selectionAgentSessions.first(where: { $0.id == sessionID }) else {
+            showSelectionNotice(.init(
+                message: "No agent session is linked to this worktree",
+                systemImage: "exclamationmark.triangle",
+                isWarning: true
+            ))
+            return
+        }
+        let provider = session.provider.displayName
+        let capitalizedNoun = noun.prefix(1).uppercased() + noun.dropFirst()
+        model.agentAssociations.open(session, attaching: draft) { delivery in
+            switch delivery {
+            case .prefilled:
+                showSelectionNotice(.init(
+                    message: "Opened \(provider) with the \(noun) in the composer",
+                    systemImage: "paperplane"
+                ))
+            case .copiedToPasteboard:
+                showSelectionNotice(.init(
+                    message: "\(capitalizedNoun) copied — paste it into the \(provider) session (⌘V)",
+                    systemImage: "doc.on.clipboard"
+                ))
+            case let .failed(message):
+                showSelectionNotice(.init(
+                    message: message,
+                    systemImage: "exclamationmark.triangle",
+                    isWarning: true
+                ))
+            }
+        }
+    }
+
+    /// 选区和文件树发给 agent 时用的仓库路径：主仓库根目录，取不到时用 worktree 根目录。
+    private var selectionRepositoryPath: String {
+        model.projectID(for: snapshot.id) ?? snapshot.worktree.rootURL.path
     }
 
     private func selectionContext(for excerpt: DiffSelectionExcerpt) -> ReviewSelectionContext? {
@@ -2183,7 +2436,7 @@ struct IntegratedReviewWorkspace: View {
             .range(base: base, head: head)
         }
         return ReviewSelectionContext(
-            repositoryPath: model.projectID(for: snapshot.id) ?? snapshot.worktree.rootURL.path,
+            repositoryPath: selectionRepositoryPath,
             worktreePath: snapshot.worktree.rootURL.path,
             branchName: snapshot.worktree.branchName,
             scope: scope,
@@ -2267,6 +2520,33 @@ struct IntegratedReviewWorkspace: View {
             return nil
         }
         return fileURL
+    }
+
+    /// 文件树里文件夹的路径，必须落在 worktree 根目录下。
+    private func workingFolderURL(path: String) -> URL? {
+        let rootURL = snapshot.worktree.rootURL.standardizedFileURL
+        let folderURL = rootURL
+            .appendingPathComponent(path, isDirectory: true)
+            .standardizedFileURL
+        guard folderURL.path.hasPrefix(rootURL.path + "/") else {
+            return nil
+        }
+        return folderURL
+    }
+
+    /// 点击时才检查目录是否还在；不在时弹窗说明。
+    private func existingWorkingFolderURL(path: String) -> URL? {
+        var isDirectory: ObjCBool = false
+        guard let folderURL = workingFolderURL(path: path),
+              FileManager.default.fileExists(atPath: folderURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            presentOpenWithFailure(
+                title: "Couldn’t Open Folder",
+                message: "“\(path)” doesn’t exist in this worktree."
+            )
+            return nil
+        }
+        return folderURL
     }
 
     private func nearestExistingURL(from fileURL: URL) -> URL {
@@ -2725,7 +3005,7 @@ struct IntegratedReviewWorkspace: View {
         switch activeContext {
         case .pending:
             return navigatorTreeCache.nodes(
-                items: workingItems + untrackedItems,
+                items: snapshotPendingItems.workingAndUntracked,
                 namespace: "working"
             )
                 + navigatorTreeCache.nodes(
@@ -4404,7 +4684,7 @@ struct IntegratedReviewWorkspace: View {
             }
             contextMessage = message
             contextCommitMetadata = metadata
-            let sortedChanges = changes.sorted(by: integratedChangePrecedes)
+            let sortedChanges = sortedInNavigatorOrder(changes, path: \.path)
             contextChanges = sortedChanges
             await model.cacheHistoricalDetails(
                 HistoricalReviewDetails(
@@ -4472,7 +4752,7 @@ struct IntegratedReviewWorkspace: View {
             guard acceptsReviewState(key) else {
                 return
             }
-            let sortedChanges = changes.sorted(by: integratedChangePrecedes)
+            let sortedChanges = sortedInNavigatorOrder(changes, path: \.path)
             contextChanges = sortedChanges
             await model.cacheHistoricalDetails(
                 HistoricalReviewDetails(
@@ -6025,7 +6305,10 @@ struct PendingIntegratedFileItems: Equatable {
         self.working = working
         self.untracked = untracked
         self.staged = staged
-        let workingAndUntracked = working + untracked
+        // 左侧把未跟踪文件和修改的文件放在同一棵树里，右侧也合在一起按树的顺序排。
+        let workingAndUntracked = untracked.isEmpty
+            ? working
+            : sortedInNavigatorOrder(working + untracked, path: \.change.path)
         let all = workingAndUntracked + staged
         self.workingAndUntracked = workingAndUntracked
         self.all = all
@@ -6054,7 +6337,9 @@ final class ContextFileItemsCache {
         var fileIDs: [IntegratedFileID] = []
         items.reserveCapacity(changes.count)
         fileIDs.reserveCapacity(changes.count)
-        for change in changes {
+        // 启动恢复和切换 commit 时用的是缓存里的文件列表，可能是旧的排序；
+        // 在这里统一按左侧文件树的顺序排，右侧 diff 和左侧从上到下一致。
+        for change in sortedInNavigatorOrder(changes, path: \.path) {
             let id = IntegratedFileID.context(contextID: contextID, changeID: change.id)
             fileIDs.append(id)
             items.append(
@@ -6097,9 +6382,9 @@ func pendingIntegratedFileItems(
             stagedChanges.append(change)
         }
     }
-    workingChanges.sort(by: integratedChangePrecedes)
-    untrackedChanges.sort(by: integratedChangePrecedes)
-    stagedChanges.sort(by: integratedChangePrecedes)
+    workingChanges = sortedInNavigatorOrder(workingChanges, path: \.path)
+    untrackedChanges = sortedInNavigatorOrder(untrackedChanges, path: \.path)
+    stagedChanges = sortedInNavigatorOrder(stagedChanges, path: \.path)
 
     return PendingIntegratedFileItems(
         working: integratedFileItems(workingChanges, scope: .working),
@@ -6121,11 +6406,85 @@ private func integratedFileItems(
     }
 }
 
-private func integratedChangePrecedes(
-    _ lhs: GitFileChange,
-    _ rhs: GitFileChange
-) -> Bool {
-    lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+/// 左侧文件树的顺序：逐层比较，同一层文件夹在前、文件在后，名字用 navigatorNamePrecedes。
+/// 右侧 diff 也按这个顺序排，两边从上到下一致。
+private struct NavigatorPathSortKey {
+    let components: [String]
+    let foldedComponents: [String]
+
+    init(path: String) {
+        components = navigatorPathComponents(path)
+        foldedComponents = components.map { $0.folding(options: [.caseInsensitive], locale: nil) }
+    }
+
+    static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
+        let sharedCount = min(lhs.components.count, rhs.components.count)
+        for index in 0..<sharedCount where lhs.components[index] != rhs.components[index] {
+            let lhsIsFolder = index < lhs.components.count - 1
+            let rhsIsFolder = index < rhs.components.count - 1
+            if lhsIsFolder != rhsIsFolder {
+                return lhsIsFolder
+            }
+            let lhsFolded = lhs.foldedComponents[index]
+            let rhsFolded = rhs.foldedComponents[index]
+            return lhsFolded == rhsFolded
+                ? lhs.components[index] < rhs.components[index]
+                : lhsFolded < rhsFolded
+        }
+        return lhs.components.count < rhs.components.count
+    }
+}
+
+func sortedInNavigatorOrder<Element>(
+    _ elements: [Element],
+    path: (Element) -> String
+) -> [Element] {
+    elements
+        .map { (key: NavigatorPathSortKey(path: path($0)), element: $0) }
+        .sorted { NavigatorPathSortKey.precedes($0.key, $1.key) }
+        .map(\.element)
+}
+
+struct NavigatorRevealRequest: Equatable {
+    let rowID: String
+    let sequence: Int
+}
+
+/// 文件路径上每一层文件夹在左侧树里的 id。
+func navigatorAncestorFolderIDs(ofFilePath path: String, namespace: String) -> Set<String> {
+    let components = navigatorPathComponents(path)
+    guard components.count > 1 else {
+        return []
+    }
+    return Set((1..<components.count).map { depth in
+        "navigator-folder:\(namespace):\(components[0..<depth].joined(separator: "/"))"
+    })
+}
+
+/// 文件行在列表里时选中文件；被收起的文件夹挡住时选中最深的那个可见文件夹行。
+func navigatorRowSelection(
+    forFilePath path: String,
+    fileID: String,
+    in rows: [NavigatorTreeRow]
+) -> NavigatorSelection? {
+    var deepestFolderID: String?
+    for row in rows {
+        switch row.content {
+        case let .file(item) where item.id.stackID == fileID:
+            return .file(fileID)
+        case let .folder(id, _, folderPath, _) where path.hasPrefix(folderPath + "/"):
+            deepestFolderID = id
+        default:
+            break
+        }
+    }
+    return deepestFolderID.map(NavigatorSelection.folder)
+}
+
+func navigatorPathComponents(_ path: String) -> [String] {
+    (path as NSString).pathComponents.filter {
+        !$0.isEmpty && $0 != "/" && $0 != "."
+    }
 }
 
 indirect enum NavigatorTreeNode: Identifiable, Hashable {
@@ -6147,7 +6506,8 @@ indirect enum NavigatorTreeNode: Identifiable, Hashable {
 
 struct NavigatorTreeRow: Identifiable, Hashable {
     enum Content: Hashable {
-        case folder(id: String, name: String, fileCount: Int)
+        /// path 是相对 worktree 根目录的文件夹路径。
+        case folder(id: String, name: String, path: String, fileCount: Int)
         case file(IntegratedFileItem)
     }
 
@@ -6157,13 +6517,13 @@ struct NavigatorTreeRow: Identifiable, Hashable {
 
     var selection: NavigatorSelection {
         switch content {
-        case let .folder(id, _, _): .folder(id)
+        case let .folder(id, _, _, _): .folder(id)
         case let .file(item): .file(item.id.stackID)
         }
     }
 
     var folderID: String? {
-        guard case let .folder(id, _, _) = content else { return nil }
+        guard case let .folder(id, _, _, _) = content else { return nil }
         return id
     }
 
@@ -6263,9 +6623,7 @@ func navigatorTreeNodes(
 ) -> [NavigatorTreeNode] {
     let entries = items.map { item in
         NavigatorTreeEntry(
-            components: (item.change.path as NSString).pathComponents.filter {
-                !$0.isEmpty && $0 != "/" && $0 != "."
-            },
+            components: navigatorPathComponents(item.change.path),
             item: item
         )
     }
@@ -6346,10 +6704,10 @@ func filteredNavigatorTreeNodes(
             guard !filteredChildren.isEmpty else {
                 return nil
             }
-            return .folder(
+            // 过滤后某层只剩一个子目录时，按过滤后的结果继续合并。
+            return navigatorFolderNode(
                 id: id,
                 name: name,
-                fileCount: navigatorFileCount(in: filteredChildren),
                 children: filteredChildren
             )
         case let .file(item):
@@ -6369,6 +6727,7 @@ func flattenedNavigatorTreeRows(
     appendNavigatorTreeRows(
         nodes,
         depth: 0,
+        parentPath: "",
         expandedFolderIDs: expandedFolderIDs,
         into: &rows
     )
@@ -6413,10 +6772,9 @@ private func buildNavigatorTree(
             namespace: namespace,
             parentPath: directoryPath
         )
-        return NavigatorTreeNode.folder(
+        return navigatorFolderNode(
             id: "navigator-folder:\(namespace):\(directoryPath)",
             name: directoryName,
-            fileCount: navigatorFileCount(in: children),
             children: children
         )
     }
@@ -6427,6 +6785,31 @@ private func buildNavigatorTree(
         )
     }.map(NavigatorTreeNode.file)
     return folders + fileNodes
+}
+
+/// 本层没有文件、只有一个子目录时，和子目录合成一行，标题写成 `A/B`。
+/// children 已经合并过，合一次就是完整的一条链。合并后的行用最深一层文件夹的 id，
+/// 展开状态跟着这一层走；行的完整路径由上层路径加标题拼出。
+private func navigatorFolderNode(
+    id: String,
+    name: String,
+    children: [NavigatorTreeNode]
+) -> NavigatorTreeNode {
+    if children.count == 1,
+       case let .folder(childID, childName, fileCount, grandchildren) = children[0] {
+        return .folder(
+            id: childID,
+            name: "\(name)/\(childName)",
+            fileCount: fileCount,
+            children: grandchildren
+        )
+    }
+    return .folder(
+        id: id,
+        name: name,
+        fileCount: navigatorFileCount(in: children),
+        children: children
+    )
 }
 
 private func navigatorNamePrecedes(_ lhs: String, _ rhs: String) -> Bool {
@@ -6447,12 +6830,14 @@ private func navigatorFileCount(in nodes: [NavigatorTreeNode]) -> Int {
 private func appendNavigatorTreeRows(
     _ nodes: [NavigatorTreeNode],
     depth: Int,
+    parentPath: String,
     expandedFolderIDs: Set<String>,
     into rows: inout [NavigatorTreeRow]
 ) {
     for node in nodes {
         switch node {
         case let .folder(id, name, fileCount, children):
+            let path = parentPath.isEmpty ? name : "\(parentPath)/\(name)"
             rows.append(
                 NavigatorTreeRow(
                     id: id,
@@ -6460,6 +6845,7 @@ private func appendNavigatorTreeRows(
                     content: .folder(
                         id: id,
                         name: name,
+                        path: path,
                         fileCount: fileCount
                     )
                 )
@@ -6468,6 +6854,7 @@ private func appendNavigatorTreeRows(
                 appendNavigatorTreeRows(
                     children,
                     depth: depth + 1,
+                    parentPath: path,
                     expandedFolderIDs: expandedFolderIDs,
                     into: &rows
                 )
@@ -7622,7 +8009,7 @@ func commitMessageNeedsFullReader(_ message: String) -> Bool {
         || message.split(separator: "\n", omittingEmptySubsequences: false).count > 3
 }
 
-private struct NavigatorTreeRowView<MenuContent: View>: View {
+private struct NavigatorTreeRowView<MenuContent: View, FolderMenuContent: View>: View {
     let row: NavigatorTreeRow
     let indent: CGFloat
     let isFolderExpanded: Bool
@@ -7633,13 +8020,14 @@ private struct NavigatorTreeRowView<MenuContent: View>: View {
     let onSelectFolder: (String) -> Void
     let onSelectFile: (String) -> Void
     @ViewBuilder let fileContextMenu: (IntegratedFileItem) -> MenuContent
+    @ViewBuilder let folderContextMenu: (_ path: String) -> FolderMenuContent
 
     var body: some View {
         // 用单层容器包住条件分支，让 SwiftUI List 把每行识别为固定单节点（unary view），
         // 避免 OutlineListCoordinator 按动态子列表逐项从头计数导致 O(N²) 耗时。
         ZStack(alignment: .leading) {
             switch row.content {
-            case let .folder(id, name, fileCount):
+            case let .folder(id, name, path, fileCount):
                 NavigatorFolderRow(
                     name: name,
                     fileCount: fileCount,
@@ -7650,6 +8038,9 @@ private struct NavigatorTreeRowView<MenuContent: View>: View {
                 .simultaneousGesture(TapGesture().onEnded {
                     onSelectFolder(id)
                 })
+                .contextMenu {
+                    folderContextMenu(path)
+                }
             case let .file(item):
                 NavigatorFileRow(
                     item: item,
@@ -7679,11 +8070,12 @@ private struct NavigatorFolderRow: View {
 
     var body: some View {
         let fileCountLabel = countedLabel(fileCount, singular: "file")
-        HStack(spacing: 6) {
+        // 箭头字形约 8pt 宽，列宽 10pt 正好放下；列宽和每层缩进相同。
+        HStack(spacing: 4) {
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Color(nsColor: ReviewWorkspaceStyle.secondary))
-                .frame(width: 14, height: 14)
+                .frame(width: 10, height: 14)
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
             Text(name)
                 .font(ReviewWorkspaceStyle.font(ReviewWorkspaceStyle.navigatorRowSize))
@@ -7709,14 +8101,15 @@ private struct NavigatorFileRow: View {
     var showsPathDetail = true
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             // 和 diff 文件标题一样用 `</>` 图标；修改的文件灰色，其他状态用对应颜色。
+            // 这个字形约 16pt 宽，列宽按它留，避免压到文件名。
             Image(systemName: item.stackStatus == .conflicted
                 ? "exclamationmark.triangle.fill"
                 : "chevron.left.forwardslash.chevron.right")
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(statusColor)
-                .frame(width: 14, height: 14)
+                .frame(width: 16, height: 14)
 
             VStack(alignment: .leading, spacing: 1) {
                 fileName
@@ -8171,6 +8564,50 @@ private extension GitReferenceKind {
         case .tag: .orange
         case .remoteBranch: .purple
         case .other: .secondary
+        }
+    }
+}
+
+/// 文件树和提交列表之间的拖动条：鼠标移上去显示上下调整光标，
+/// 拖动时回报相对按下位置的纵向位移，向下为正。
+private struct NavigatorSplitHandle: NSViewRepresentable {
+    var onDragChanged: (CGFloat) -> Void
+    var onDragEnded: () -> Void
+
+    func makeNSView(context: Context) -> HandleView { HandleView() }
+
+    func updateNSView(_ view: HandleView, context: Context) {
+        view.onDragChanged = onDragChanged
+        view.onDragEnded = onDragEnded
+    }
+
+    final class HandleView: NSView {
+        var onDragChanged: ((CGFloat) -> Void)?
+        var onDragEnded: (() -> Void)?
+        private var dragStartY: CGFloat?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .resizeUpDown)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragStartY = event.locationInWindow.y
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let dragStartY else { return }
+            // 窗口坐标 y 向上增大，换成向下为正。
+            onDragChanged?(dragStartY - event.locationInWindow.y)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard dragStartY != nil else { return }
+            dragStartY = nil
+            onDragEnded?()
         }
     }
 }

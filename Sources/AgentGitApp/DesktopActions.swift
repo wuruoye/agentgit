@@ -60,6 +60,12 @@ func openFile(_ fileURL: URL, with entry: WorktreeOpenWithEntry, lineNumber: Int
     openCustomApplication(entry, targetURL: fileURL, opensSelectedFile: true, lineNumber: lineNumber)
 }
 
+/// 文件树里的文件夹交给系统用所选应用打开，和 worktree 菜单一致。
+@MainActor
+func openFolder(_ folderURL: URL, with entry: WorktreeOpenWithEntry) {
+    openCustomApplication(entry, targetURL: folderURL)
+}
+
 @MainActor
 private func openCustomApplication(
     _ entry: WorktreeOpenWithEntry,

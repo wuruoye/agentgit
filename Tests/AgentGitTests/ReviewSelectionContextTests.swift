@@ -147,6 +147,21 @@ private func context(
     """))
 }
 
+@Test func pathAgentDraftStartsWithRepositoryName() {
+    let file = ReviewPathContext(
+        repositoryPath: "/Users/me/agentgit",
+        path: "Sources/App/Main.swift",
+        isFolder: false
+    )
+    #expect(file.agentDraft == "\n文件：agentgit/Sources/App/Main.swift")
+    let folder = ReviewPathContext(
+        repositoryPath: "/Users/me/agentgit/",
+        path: "tools/rpc-proxy/music_pb",
+        isFolder: true
+    )
+    #expect(folder.agentDraft == "\n文件夹：agentgit/tools/rpc-proxy/music_pb/")
+}
+
 @Test func selectionTextLengthensFenceAroundBackticks() {
     let selection = context(lines: [
         line(1, .addition, old: nil, new: 1, "```swift"),

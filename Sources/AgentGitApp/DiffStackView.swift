@@ -467,6 +467,8 @@ struct DiffStackView: NSViewRepresentable {
     let onSelectionAction: (String, Set<GitDiffLine.ID>, GitPendingSelectionAction) -> Void
     var onAllChangesAction: ((GitAllChangesAction) -> Void)? = nil
     var onHunkPositionChanged: ((DiffHunkPosition) -> Void)? = nil
+    /// 参数是视口顶部所在的文件，以及滚动是否已经停下。
+    var onVisibleFileChanged: ((String, Bool) -> Void)? = nil
     var selectionActions: [DiffSelectionAction] = []
     /// 参数依次是操作 ID、选中的目标（没有可选目标时为 nil）和选区。
     var onSelectionContextAction: ((String, String?, DiffSelectionExcerpt) -> Void)? = nil
@@ -497,6 +499,7 @@ struct DiffStackView: NSViewRepresentable {
         scrollView.onSelectionAction = onSelectionAction
         scrollView.onAllChangesAction = onAllChangesAction
         scrollView.onHunkPositionChanged = onHunkPositionChanged
+        scrollView.onVisibleFileChanged = onVisibleFileChanged
         scrollView.onSelectionContextAction = onSelectionContextAction
         scrollView.selectionActions = selectionActions
         scrollView.bind(store: scrollStore, key: scrollKey)
@@ -531,6 +534,11 @@ private final class DiffFlingDisplayLinkProxy: NSObject {
     }
 }
 
+/// 吸顶查找只按行号定位分组和文件段，位置再向表格要。
+private protocol DiffStickySection {
+    var headerRow: Int { get }
+}
+
 final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableViewDelegate {
     private enum Metrics {
         static let lineHeight: CGFloat = 20
@@ -556,25 +564,28 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         ).width
     }
 
-    private struct FileSection {
+    private struct FileSection: DiffStickySection {
         let groupID: String
         let headerRow: Int
         let endRow: Int
-        var headerMinY: CGFloat = 0
-        var endY: CGFloat = 0
         let file: DiffStackFile
     }
 
-    private struct GroupSection {
+    private struct GroupSection: DiffStickySection {
         let headerRow: Int
         let endRow: Int
-        var headerMinY: CGFloat = 0
-        var endY: CGFloat = 0
         let group: DiffStackGroup
     }
 
     var onToggleFile: ((String) -> Void)?
     var onHunkPositionChanged: ((DiffHunkPosition) -> Void)?
+    var onVisibleFileChanged: ((String, Bool) -> Void)?
+    /// 程序跳到某个文件后一直报这个文件，直到用户自己滚动。跳到列表末尾时文件标题到不了顶部，
+    /// 按顶部位置算会报成上一个文件。
+    private var pinnedVisibleFileID: String?
+    private var computedVisibleFileID: String?
+    private var reportedVisibleFileID: String?
+    private var reportedVisibleFileIsSettled = true
     private var reportedHunkPosition: DiffHunkPosition?
     var onFocusFile: ((String) -> Void)?
     var onToggleGroup: ((String) -> Void)?
@@ -652,7 +663,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     private var stickyFileID: String?
     private var isUpdatingSticky = false
     private var rows: [DiffStackRow] = []
-    private var rowMinYs: [CGFloat] = [0]
     private var rowBlocks: [DiffRowBlock] = []
     private var isAppKitLiveScrolling = false
     private(set) var isFlingSubstepping = false
@@ -810,6 +820,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     override func scrollWheel(with event: NSEvent) {
+        pinnedVisibleFileID = nil
         if !Self.shouldForwardScrollWheel(
             horizontalDelta: event.scrollingDeltaX,
             verticalDelta: event.scrollingDeltaY
@@ -1098,6 +1109,9 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         scrollKey = key
         reportedHunkPosition = nil
+        pinnedVisibleFileID = nil
+        computedVisibleFileID = nil
+        reportedVisibleFileID = nil
         renderToken = nil
         appliedScrollTarget = nil
         appliedCommandID = nil
@@ -1553,50 +1567,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
     }
 
-    private func recomputeRowGeometry() {
-        var offsets: [CGFloat] = []
-        offsets.reserveCapacity(rows.count + 1)
-        var currentY: CGFloat = 0
-        offsets.append(0)
-        for row in rows {
-            currentY += rowHeight(for: row)
-            offsets.append(currentY)
-        }
-        rowMinYs = offsets
-        for index in groupSections.indices {
-            let headerRow = groupSections[index].headerRow
-            let endRow = groupSections[index].endRow
-            groupSections[index].headerMinY = offsets[min(headerRow, rows.count)]
-            groupSections[index].endY = offsets[min(endRow, rows.count)]
-        }
-        for index in fileSections.indices {
-            let headerRow = fileSections[index].headerRow
-            let endRow = fileSections[index].endRow
-            fileSections[index].headerMinY = offsets[min(headerRow, rows.count)]
-            fileSections[index].endY = offsets[min(endRow, rows.count)]
-        }
-    }
-
-    private func rowIndex(atY y: CGFloat) -> Int {
-        guard !rows.isEmpty,
-              let totalHeight = rowMinYs.last,
-              y >= 0,
-              y < totalHeight else {
-            return -1
-        }
-        var low = 0
-        var high = rows.count
-        while low < high {
-            let mid = (low + high) / 2
-            if rowMinYs[mid] <= y {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return max(0, low - 1)
-    }
-
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         guard rows.indices.contains(row) else {
             return false
@@ -1796,7 +1766,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             sectionIndexByID[builtFileSections[index].file.id] = index
         }
         fileSectionIndexByID = sectionIndexByID
-        recomputeRowGeometry()
         guard let changedFileIDs else { return nil }
         var changedBlockIDs = Set(changedFileIDs.map { "file-content:\($0)" })
         let previousByID = Dictionary(uniqueKeysWithValues: previousBlocks.map { ($0.id, $0) })
@@ -1887,8 +1856,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
                     groupID: section.groupID,
                     headerRow: section.headerRow,
                     endRow: section.endRow,
-                    headerMinY: section.headerMinY,
-                    endY: section.endY,
                     file: updated
                 )
             }
@@ -2244,11 +2211,12 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         cancelFlingSubstepping()
+        pinnedVisibleFileID = fileID
+        reportedVisibleFileID = fileID
+        reportedVisibleFileIsSettled = true
         tableView.layoutSubtreeIfNeeded()
         let rect = tableView.rect(ofRow: row)
-        let groupHeight: CGFloat = fileSectionIndexByID[fileID].flatMap { index in
-            groupSections.first { $0.group.id == fileSections[index].groupID }
-        } == nil ? 0 : Metrics.groupHeight
+        let groupHeight = stickyGroupHeight(for: fileSectionIndexByID[fileID].map { fileSections[$0] })
         // 真实文件头放在吸顶分组标题下面，确认按钮和第一段代码都能看到。
         let maxOffset = max(0, tableView.bounds.height - contentView.bounds.height)
         let target = NSPoint(x: 0, y: min(maxOffset, max(0, rect.minY - groupHeight)))
@@ -2568,6 +2536,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return false
         }
         cancelFlingSubstepping()
+        pinnedVisibleFileID = nil
         // 与顶栏显示的当前 hunk 一致，手动滚动后不再沿用屏幕外的旧选中行。
         let activePosition = isLiveScrolling ? currentHunkPosition() : reportedHunkPosition
         let currentIndex = activePosition.flatMap { $0.count > 0 ? $0.index - 1 : nil }
@@ -2580,10 +2549,11 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             IndexSet(integer: targetRow),
             byExtendingSelection: false
         )
-        let stickyHeight = Metrics.groupHeight + Metrics.fileHeight
-        let targetMinY = targetRow < rows.count
-            ? rowMinYs[targetRow]
-            : tableView.rect(ofRow: targetRow).minY
+        let targetMinY = tableRowMinY(targetRow)
+        // 按目标所在文件实际会出现的吸顶高度留位置。多留了没有的分组标题高度时，
+        // 跳到下一个文件的第一个 hunk 会让上一个文件的吸顶标题停在新文件标题上方。
+        let stickyHeight = stickyGroupHeight(for: fileSection(containingRow: targetRow))
+            + Metrics.fileHeight
         let targetOffset = max(0, targetMinY - stickyHeight)
         let maxOffset = max(0, tableView.bounds.height - contentView.bounds.height)
         contentView.scroll(
@@ -2709,6 +2679,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     }
 
     @objc private func scrollViewWillStartLiveScroll() {
+        pinnedVisibleFileID = nil
         let wasLive = isLiveScrolling
         isAppKitLiveScrolling = true
         noteLiveScrollStateTransition(wasLiveScrolling: wasLive)
@@ -2739,6 +2710,26 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             scrollStore?.saveScrollOffset(contentView.bounds.minY, for: scrollKey)
         }
         publishHunkPosition()
+        publishVisibleFile()
+    }
+
+    /// 顶部文件变了就报，滚动停下时再报一次已停下，焦点等停下再改，免得重绘打断滚动惯性。
+    private func publishVisibleFile() {
+        guard let fileID = pinnedVisibleFileID ?? computedVisibleFileID else {
+            return
+        }
+        let isSettled = !isLiveScrolling
+        guard fileID != reportedVisibleFileID
+                || (isSettled && !reportedVisibleFileIsSettled) else {
+            return
+        }
+        reportedVisibleFileID = fileID
+        reportedVisibleFileIsSettled = isSettled
+        let key = scrollKey
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.scrollKey == key, self.reportedVisibleFileID == fileID else { return }
+            self.onVisibleFileChanged?(fileID, isSettled)
+        }
     }
 
     private func cancelPendingDiscardConfirmations() -> Bool {
@@ -2798,13 +2789,18 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
 
         let top = contentView.bounds.minY
-        let groupSection = currentGroupSection(above: top)
+        let groupSection = lastSection(in: groupSections, atOrBeforeRow: tableRowIndex(atY: top))
         let groupVisibleHeight = stickyGroupVisibleHeight(
             for: groupSection,
             top: top
         )
         let fileTop = top + groupVisibleHeight
-        var fileSection = currentFileSection(above: fileTop)
+        let fileTopRow = tableRowIndex(atY: fileTop)
+        if let visibleFileID = self.fileSection(containingRow: fileTopRow)?.file.id {
+            computedVisibleFileID = visibleFileID
+        }
+        publishVisibleFile()
+        var fileSection = lastSection(in: fileSections, atOrBeforeRow: fileTopRow)
         if let groupSection {
             if fileSection?.groupID != groupSection.group.id {
                 fileSection = nil
@@ -2913,14 +2909,14 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
         let viewportBounds = contentView.bounds
         let selectedRow = tableView.selectedRow
-        let selectedIsVisible: Bool = if selectedRow >= 0 && selectedRow < rows.count {
-            rowMinYs[selectedRow + 1] > viewportBounds.minY
-                && rowMinYs[selectedRow] < viewportBounds.maxY
+        let selectedIsVisible: Bool = if selectedRow >= 0 && selectedRow < tableView.numberOfRows {
+            tableView.rect(ofRow: selectedRow).maxY > viewportBounds.minY
+                && tableView.rect(ofRow: selectedRow).minY < viewportBounds.maxY
         } else {
             false
         }
         let visibleTop = viewportBounds.minY + (stickyClip.isHidden ? 0 : stickyClip.bounds.height) + 1
-        let anchorRow = selectedIsVisible ? selectedRow : rowIndex(atY: visibleTop)
+        let anchorRow = selectedIsVisible ? selectedRow : tableRowIndex(atY: visibleTop)
         var low = 0
         var high = hunkRowIndexes.count
         while low < high {
@@ -2943,14 +2939,41 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         }
     }
 
-    private func currentGroupSection(above top: CGFloat) -> GroupSection? {
+    /// 行位置一律向表格要。行数很多时 AppKit 对还没排到的行先按估算位置摆放，
+    /// 自己按行高累加的位置会和屏幕上画出来的行对不上，吸顶标题就会选错文件、推开时机不对。
+    /// 低于最后一行（底部留白）时按最后一行算，空表或视口在内容上方时返回 -1。
+    private func tableRowIndex(atY y: CGFloat) -> Int {
+        let count = tableView.numberOfRows
+        guard count > 0, count == rows.count, y >= 0 else {
+            return -1
+        }
+        let row = tableView.row(at: NSPoint(x: tableView.bounds.midX, y: y))
+        if row >= 0 {
+            return row
+        }
+        return y >= tableView.rect(ofRow: count - 1).maxY ? count - 1 : -1
+    }
+
+    /// 行的顶边；超出最后一行时用表格底边，和最后一段一直延伸到底部留白一致。
+    private func tableRowMinY(_ row: Int) -> CGFloat {
+        row < tableView.numberOfRows ? tableView.rect(ofRow: row).minY : tableView.bounds.maxY
+    }
+
+    /// 标题行不晚于 row 的最后一段。
+    private func lastSection<Section: DiffStickySection>(
+        in sections: [Section],
+        atOrBeforeRow row: Int
+    ) -> Section? {
+        guard row >= 0 else {
+            return nil
+        }
         var low = 0
-        var high = groupSections.count - 1
-        var found: GroupSection?
+        var high = sections.count - 1
+        var found: Section?
         while low <= high {
             let mid = (low + high) / 2
-            if groupSections[mid].headerMinY <= top {
-                found = groupSections[mid]
+            if sections[mid].headerRow <= row {
+                found = sections[mid]
                 low = mid + 1
             } else {
                 high = mid - 1
@@ -2959,36 +2982,23 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         return found
     }
 
-    private func currentFileSection(above top: CGFloat) -> FileSection? {
-        var low = 0
-        var high = fileSections.count - 1
-        var found: FileSection?
-        while low <= high {
-            let mid = (low + high) / 2
-            if fileSections[mid].headerMinY <= top {
-                found = fileSections[mid]
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
+    /// 文件所在分组有标题行时，滚动定位要给吸顶分组标题留出高度；没有标题的分组（如 commit）不留。
+    private func stickyGroupHeight(for section: FileSection?) -> CGFloat {
+        guard let section,
+              groupSections.contains(where: { $0.group.id == section.groupID }) else {
+            return 0
         }
-        return found
+        return Metrics.groupHeight
     }
 
     private func stickyGroupVisibleHeight(
         for section: GroupSection?,
         top: CGFloat
     ) -> CGFloat {
-        guard let section, section.headerMinY < top else {
+        guard let section, tableRowMinY(section.headerRow) < top else {
             return 0
         }
-        return max(
-            0,
-            min(
-                Metrics.groupHeight,
-                sectionEndY(section.endRow, precomputedEndY: section.endY) - top
-            )
-        )
+        return max(0, min(Metrics.groupHeight, tableRowMinY(section.endRow) - top))
     }
 
     private func stickyFileVisibleHeight(
@@ -2997,22 +3007,10 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     ) -> CGFloat {
         guard let section,
               section.endRow > section.headerRow + 1,
-              section.headerMinY < top else {
+              tableRowMinY(section.headerRow) < top else {
             return 0
         }
-        return max(
-            0,
-            min(
-                Metrics.fileHeight,
-                sectionEndY(section.endRow, precomputedEndY: section.endY) - top
-            )
-        )
-    }
-
-    private func sectionEndY(_ endRow: Int, precomputedEndY: CGFloat) -> CGFloat {
-        endRow < rows.count
-            ? precomputedEndY
-            : tableView.bounds.maxY
+        return max(0, min(Metrics.fileHeight, tableRowMinY(section.endRow) - top))
     }
 
     private func handleStickyGroupClick(groupID: String) {
@@ -3456,10 +3454,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
         notifiesTableView: Bool = true
     ) {
         guard let displayedSummary else {
-            if summaryRowHeight != 28 {
-                summaryRowHeight = 28
-                recomputeRowGeometry()
-            }
+            summaryRowHeight = 28
             return
         }
         let nextHeight = DiffStackSummaryCellView.preferredHeight(
@@ -3470,7 +3465,6 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
             return
         }
         summaryRowHeight = nextHeight
-        recomputeRowGeometry()
         guard notifiesTableView,
               tableView.numberOfRows > 0,
               tableView.numberOfRows == rows.count,
@@ -3486,9 +3480,7 @@ final class DiffStackScrollView: NSScrollView, NSTableViewDataSource, NSTableVie
     /// 仍能停在原来的视口位置。空白沿用 diff 画布，不引入额外可见行。
     private func updateDocumentHeight() {
         let rowContentHeight: CGFloat
-        if tableView.numberOfRows == rows.count {
-            rowContentHeight = rowMinYs.last ?? 0
-        } else if tableView.numberOfRows > 0 {
+        if tableView.numberOfRows > 0 {
             rowContentHeight = tableView.rect(
                 ofRow: tableView.numberOfRows - 1
             ).maxY

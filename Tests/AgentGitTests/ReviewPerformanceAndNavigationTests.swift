@@ -357,6 +357,46 @@ import Testing
     #expect(scrollView.contentView.bounds.minY > 400)
 }
 
+@Test @MainActor func movingToNextFileHunkLeavesOnlyActualStickyHeightAbove() throws {
+    _ = NSApplication.shared
+    let fileHeight = ReviewWorkspaceStyle.fileHeaderHeight
+    // commit 视图的分组没有标题，只给文件标题留位置；带标题的分组还要加上分组标题。
+    for (title, reservedHeight) in [(String?.none, fileHeight), ("Working", 32 + fileHeight)] {
+        let scrollView = DiffStackScrollView(frame: NSRect(x: 0, y: 0, width: 800, height: 220))
+        scrollView.display(
+            groups: [
+                DiffStackGroup(
+                    id: "files",
+                    title: title,
+                    emptyMessage: "",
+                    isExpanded: true,
+                    files: [
+                        makeTestDiffFile(path: "First.swift", lineCount: 35),
+                        makeTestDiffFile(path: "Second.swift", lineCount: 35)
+                    ]
+                )
+            ],
+            layout: .unified,
+            scrollTarget: nil
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let table = try #require(scrollView.documentView as? NSTableView)
+
+        // 第一次显示时当前 hunk 可能已经是第一个，按需多跳一次，直到落到第二个文件。
+        for _ in 0..<3 where table.selectedRow < 0 || table.rect(ofRow: table.selectedRow).minY < 300 {
+            #expect(scrollView.moveHunk(by: 1))
+            scrollView.layoutSubtreeIfNeeded()
+        }
+        #expect(table.rect(ofRow: table.selectedRow).minY > 300)
+
+        // 第二个文件的第一个 hunk 紧跟在它的文件标题后面，文件标题正好落在吸顶位置，
+        // 不能留出上一个文件的吸顶标题。
+        let hunkMinY = table.rect(ofRow: table.selectedRow).minY
+        #expect(scrollView.contentView.bounds.minY == hunkMinY - reservedHeight)
+        #expect(table.rect(ofRow: table.selectedRow - 1).minY == hunkMinY - fileHeight)
+    }
+}
+
 @Test @MainActor func multiFileHeadersFlattenLayersEliminateRowTrackingAreasAndSupport165Hz() throws {
     _ = NSApplication.shared
 

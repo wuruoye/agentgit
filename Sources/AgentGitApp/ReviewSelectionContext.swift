@@ -110,7 +110,7 @@ struct ReviewSelectionContext: Equatable {
 
     /// 仓库根目录名，和侧栏里项目的显示名一致。
     var repositoryName: String {
-        URL(fileURLWithPath: repositoryPath).lastPathComponent
+        reviewRepositoryName(ofPath: repositoryPath)
     }
 
     /// 第一行留给用户输入；此处生成最终文本，交付时原样粘贴。
@@ -159,6 +159,26 @@ struct ReviewSelectionContext: Equatable {
             }
         }
         return String(repeating: "`", count: max(3, longest + 1))
+    }
+}
+
+/// 仓库根目录名，和侧栏里项目的显示名一致。
+func reviewRepositoryName(ofPath repositoryPath: String) -> String {
+    URL(fileURLWithPath: repositoryPath).lastPathComponent
+}
+
+/// 文件树里右键 Send to Agent 时交给 agent 的文件或文件夹路径。
+struct ReviewPathContext: Equatable {
+    let repositoryPath: String
+    /// 相对 worktree 根目录的路径。
+    let path: String
+    let isFolder: Bool
+
+    /// 第一行留给用户输入；路径以仓库名开头，文件夹末尾带 `/`。
+    var agentDraft: String {
+        let label = isFolder ? "文件夹" : "文件"
+        let suffix = isFolder ? "/" : ""
+        return "\n\(label)：\(reviewRepositoryName(ofPath: repositoryPath))/\(path)\(suffix)"
     }
 }
 
