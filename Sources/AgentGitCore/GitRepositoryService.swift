@@ -2116,9 +2116,14 @@ public struct GitRepositoryService: Sendable {
                 try preserveDiscardedItemIfPresent(worktree: worktree, relativePath: change.path, kind: .file)
             }
         }
-        for change in status.changes where change.isStaged {
-            try await unstageFile(worktree: worktree, change: change)
-        }
+        // Reset the complete index, including intent-to-add entries that status does not mark as staged.
+        // An unborn branch has no HEAD; its original index is empty.
+        _ = try await runDiscardMutation(
+            arguments: worktree.isUnborn
+                ? ["read-tree", "--empty"]
+                : ["reset", "-q", "--no-refresh", "HEAD"],
+            worktree: worktree
+        )
         let unstaged = try await loadStatus(for: worktree, submoduleScanMode: .allChanges)
         for change in unstaged.changes {
             try await discardFile(worktree: worktree, change: change)
@@ -2178,10 +2183,36 @@ public struct GitRepositoryService: Sendable {
             relativePath: change.path,
             kind: .file
         )
-        _ = try await runner.run(
+        _ = try await runDiscardMutation(
             arguments: ["restore", "--worktree", "--", change.path],
-            workingDirectory: worktree.rootURL
+            worktree: worktree
         )
+    }
+
+    private func runDiscardMutation(
+        arguments: [String],
+        worktree: GitWorktree
+    ) async throws -> Data {
+        // Retry only a failed index-lock acquisition, before Git can mutate the index.
+        // Never remove the lock: it may belong to another application using this worktree.
+        var remainingRetries = 20
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await runner.run(
+                    arguments: arguments,
+                    workingDirectory: worktree.rootURL,
+                    environment: ["LC_ALL": "C"]
+                )
+            } catch let failure as GitCommandFailure
+                where remainingRetries > 0
+                    && failure.exitCode == 128
+                    && failure.stderr.contains("fatal: Unable to create '")
+                    && failure.stderr.contains("/index.lock': File exists") {
+                remainingRetries -= 1
+                try await Task.sleep(for: .milliseconds(500))
+            }
+        }
     }
 
     public func applySelection(
