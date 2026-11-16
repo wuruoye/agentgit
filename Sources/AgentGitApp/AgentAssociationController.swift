@@ -530,11 +530,16 @@ final class AgentAssociationController {
         }
         guard let context else {
             if association.provider == .antigravity {
-                if AntigravityComposerHandoff.activateOrNavigateSession(target.url) {
+                let activated = AntigravityComposerHandoff.openFocusURL()
+                    || openSessionURL(target.url, provider: .antigravity) == nil
+                if activated {
                     errorMessage = nil
-                } else if openSessionURL(target.url, provider: .antigravity) == nil {
+                    let workspacePath = association.worktreePath
                     contextDeliveryTask = Task {
-                        _ = await AntigravityComposerHandoff.navigate(sessionURL: target.url)
+                        _ = await AntigravityComposerHandoff.navigate(
+                            sessionURL: target.url,
+                            workspacePath: workspacePath
+                        )
                     }
                 }
                 return
@@ -564,7 +569,7 @@ final class AgentAssociationController {
             activatedExistingSession = canFillComposer && ClaudeComposerHandoff.activateExistingSession(handoff.url)
         case .antigravity:
             canFillComposer = AntigravityComposerHandoff.requestAccessIfNeeded()
-            activatedExistingSession = canFillComposer && AntigravityComposerHandoff.activateOrNavigateSession(handoff.url)
+            activatedExistingSession = AntigravityComposerHandoff.openFocusURL()
         case .codex:
             canFillComposer = false
             activatedExistingSession = false
@@ -578,13 +583,18 @@ final class AgentAssociationController {
             onDelivery?(.copiedToPasteboard)
             return
         }
+        let workspacePath = association.worktreePath
         contextDeliveryTask = Task {
             let started = ContinuousClock.now
             let filled = switch association.provider {
             case .claude:
                 await ClaudeComposerHandoff.fill(context, sessionURL: handoff.url)
             case .antigravity:
-                await AntigravityComposerHandoff.fill(context, sessionURL: handoff.url)
+                await AntigravityComposerHandoff.fill(
+                    context,
+                    sessionURL: handoff.url,
+                    workspacePath: workspacePath
+                )
             case .codex:
                 false
             }
